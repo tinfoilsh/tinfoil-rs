@@ -214,11 +214,12 @@ fn decode_asn1_string(bytes: &[u8]) -> Option<String> {
         (len, 2 + num_length_bytes)
     };
 
-    if bytes.len() < header_len + len {
+    let total_len = header_len.checked_add(len)?;
+    if bytes.len() < total_len {
         return None;
     }
 
-    String::from_utf8(bytes[header_len..header_len + len].to_vec()).ok()
+    String::from_utf8(bytes[header_len..total_len].to_vec()).ok()
 }
 
 /// Extract certificate info from the bundle
