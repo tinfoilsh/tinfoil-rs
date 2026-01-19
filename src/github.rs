@@ -5,6 +5,7 @@ use serde::Deserialize;
 use crate::error::{Error, Result};
 
 const GITHUB_PROXY: &str = "https://api-github-proxy.tinfoil.sh";
+const ATTESTATION_PROXY: &str = "https://gh-attestation-proxy.tinfoil.sh";
 
 #[derive(Deserialize)]
 struct ReleaseResponse {
@@ -49,4 +50,40 @@ pub async fn fetch_digest(repo: &str, tag: &str) -> Result<String> {
 pub async fn fetch_latest_digest(repo: &str) -> Result<String> {
     let tag = fetch_latest_tag(repo).await?;
     fetch_digest(repo, &tag).await
+}
+
+#[derive(Deserialize)]
+struct Attestation {
+    bundle: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct AttestationsResponse {
+    attestations: Vec<Attestation>,
+}
+
+/// Fetch the Sigstore attestation bundle for a given repo and digest.
+pub async fn fetch_attestation_bundle(repo: &str, digest: &str) -> Result<Vec<u8>> {
+    let url = format!("{}/repos/{}/attestations/sha256:{}", ATTESTATION_PROXY, repo, digest);
+
+    let response = reqwest::get(&url).await?;
+
+    if !response.status().is_success() {
+        return Err(Error::GitHub(format!(
+            "failed to fetch attestation bundle for {}@{}: HTTP {}",
+            repo, digest, response.status()
+        )));
+    }
+
+    let attestations: AttestationsResponse = response.json().await?;
+
+    if attestations.attestations.is_empty() {
+        return Err(Error::GitHub(format!(
+            "no attestations found for {}@{}",
+            repo, digest
+        )));
+    }
+
+    let bundle = serde_json::to_vec(&attestations.attestations[0].bundle)?;
+    Ok(bundle)
 }
