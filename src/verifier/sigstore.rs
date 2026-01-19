@@ -182,11 +182,33 @@ fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+/// Decode an ASN.1 string from extension value bytes.
+/// Fulcio uses UTF8String (tag 0x0C) for these extensions.
+fn decode_asn1_string(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 2 {
+        return None;
+    }
+
+    // Check for UTF8String (0x0C) or IA5String (0x16) or PrintableString (0x13)
+    let tag = bytes[0];
+    if tag != 0x0C && tag != 0x16 && tag != 0x13 {
+        return None;
+    }
+
+    // Parse length (simplified: assumes short form, length < 128)
+    let len = bytes[1] as usize;
+    if bytes.len() < 2 + len {
+        return None;
+    }
+
+    String::from_utf8(bytes[2..2 + len].to_vec()).ok()
+}
+
 /// Extract certificate info from the bundle
 fn extract_certificate_info(bundle: &serde_json::Value) -> Result<CertificateInfo> {
     use x509_cert::Certificate;
     use der::Decode;
-    
+
     // Get the certificate
     let cert_b64 = bundle
         .get("verificationMaterial")
@@ -194,39 +216,41 @@ fn extract_certificate_info(bundle: &serde_json::Value) -> Result<CertificateInf
         .and_then(|c| c.get("rawBytes"))
         .and_then(|rb| rb.as_str())
         .ok_or_else(|| Error::SigstoreVerification("No certificate in bundle".into()))?;
-    
+
     let cert_der = base64::engine::general_purpose::STANDARD
         .decode(cert_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode certificate: {}", e)))?;
-    
+
     let cert = Certificate::from_der(&cert_der)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to parse certificate: {}", e)))?;
-    
+
     // Extract extensions
     let mut issuer = String::new();
     let mut repository = String::new();
     let mut subject_workflow = String::new();
-    
+
     if let Some(extensions) = &cert.tbs_certificate.extensions {
         for ext in extensions.iter() {
             let oid_str = ext.extn_id.to_string();
-            let value = String::from_utf8_lossy(ext.extn_value.as_bytes()).to_string();
-            
+            let raw_bytes = ext.extn_value.as_bytes();
+
+            // Decode as ASN.1 string, fall back to raw UTF-8 if that fails
+            let value = decode_asn1_string(raw_bytes)
+                .unwrap_or_else(|| String::from_utf8_lossy(raw_bytes).to_string());
+
             // Fulcio OIDC Issuer (1.3.6.1.4.1.57264.1.1)
             if oid_str == "1.3.6.1.4.1.57264.1.1" {
-                issuer = value.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ':' && c != '/' && c != '.').to_string();
-            }
-            // Build Signer URI (1.3.6.1.4.1.57264.1.9)
-            if oid_str == "1.3.6.1.4.1.57264.1.9" {
-                subject_workflow = value.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ':' && c != '/' && c != '.' && c != '-' && c != '_' && c != '@').to_string();
-            }
-            // Source Repository URI (1.3.6.1.4.1.57264.1.12)
-            if oid_str == "1.3.6.1.4.1.57264.1.12" {
-                repository = value.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ':' && c != '/' && c != '.' && c != '-' && c != '_').to_string();
+                issuer = value;
+            } else if oid_str == "1.3.6.1.4.1.57264.1.9" {
+                // Build Signer URI
+                subject_workflow = value;
+            } else if oid_str == "1.3.6.1.4.1.57264.1.12" {
+                // Source Repository URI
+                repository = value;
             }
         }
     }
-    
+
     Ok(CertificateInfo {
         issuer,
         subject_workflow,
