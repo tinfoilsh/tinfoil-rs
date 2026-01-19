@@ -35,9 +35,9 @@ const REPORTED_TCB_OFFSET: usize = 384;
 
 // Additional report field offsets for validation
 const POLICY_OFFSET: usize = 8;
-const CURRENT_BUILD_OFFSET: usize = 54;
-const CURRENT_MINOR_OFFSET: usize = 55;
-const CURRENT_MAJOR_OFFSET: usize = 56;
+const CURRENT_BUILD_OFFSET: usize = 488;  // 0x1E8
+const CURRENT_MINOR_OFFSET: usize = 489;  // 0x1E9
+const CURRENT_MAJOR_OFFSET: usize = 490;  // 0x1EA
 
 // Minimum TCB values for production
 const MIN_BL_SPL: u8 = 0x07;
