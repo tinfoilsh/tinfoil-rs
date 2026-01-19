@@ -195,13 +195,30 @@ fn decode_asn1_string(bytes: &[u8]) -> Option<String> {
         return None;
     }
 
-    // Parse length (simplified: assumes short form, length < 128)
-    let len = bytes[1] as usize;
-    if bytes.len() < 2 + len {
+    // Parse length - handle both short and long form
+    let length_byte = bytes[1];
+    let (len, header_len) = if length_byte & 0x80 == 0 {
+        // Short form: length < 128, single byte
+        (length_byte as usize, 2)
+    } else {
+        // Long form: first byte indicates number of length bytes
+        let num_length_bytes = (length_byte & 0x7F) as usize;
+        if num_length_bytes == 0 || num_length_bytes > 4 || bytes.len() < 2 + num_length_bytes {
+            return None;
+        }
+
+        let mut len: usize = 0;
+        for i in 0..num_length_bytes {
+            len = (len << 8) | (bytes[2 + i] as usize);
+        }
+        (len, 2 + num_length_bytes)
+    };
+
+    if bytes.len() < header_len + len {
         return None;
     }
 
-    String::from_utf8(bytes[2..2 + len].to_vec()).ok()
+    String::from_utf8(bytes[header_len..header_len + len].to_vec()).ok()
 }
 
 /// Extract certificate info from the bundle
