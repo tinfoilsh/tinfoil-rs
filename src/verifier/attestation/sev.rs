@@ -493,6 +493,74 @@ fn validate_report_fields(report: &[u8]) -> Result<bool> {
         )));
     }
 
+    // Validate CURRENT_TCB meets minimum requirements
+    let current_tcb = u64::from_le_bytes(
+        report[CURRENT_TCB_OFFSET..CURRENT_TCB_OFFSET + 8].try_into().unwrap()
+    );
+
+    let cur_bl_spl = (current_tcb & 0xFF) as u8;
+    let cur_tee_spl = ((current_tcb >> 8) & 0xFF) as u8;
+    let cur_snp_spl = ((current_tcb >> 48) & 0xFF) as u8;
+    let cur_ucode_spl = ((current_tcb >> 56) & 0xFF) as u8;
+
+    if cur_bl_spl < MIN_BL_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "Current boot loader SPL {} is below minimum {}", cur_bl_spl, MIN_BL_SPL
+        )));
+    }
+
+    if cur_tee_spl < MIN_TEE_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "Current TEE SPL {} is below minimum {}", cur_tee_spl, MIN_TEE_SPL
+        )));
+    }
+
+    if cur_snp_spl < MIN_SNP_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "Current SNP SPL {} is below minimum {}", cur_snp_spl, MIN_SNP_SPL
+        )));
+    }
+
+    if cur_ucode_spl < MIN_UCODE_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "Current microcode SPL {} is below minimum {}", cur_ucode_spl, MIN_UCODE_SPL
+        )));
+    }
+
+    // Validate COMMITTED_TCB meets minimum requirements
+    let committed_tcb = u64::from_le_bytes(
+        report[COMMITTED_TCB_OFFSET..COMMITTED_TCB_OFFSET + 8].try_into().unwrap()
+    );
+
+    let com_bl_spl = (committed_tcb & 0xFF) as u8;
+    let com_tee_spl = ((committed_tcb >> 8) & 0xFF) as u8;
+    let com_snp_spl = ((committed_tcb >> 48) & 0xFF) as u8;
+    let com_ucode_spl = ((committed_tcb >> 56) & 0xFF) as u8;
+
+    if com_bl_spl < MIN_BL_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "Committed boot loader SPL {} is below minimum {}", com_bl_spl, MIN_BL_SPL
+        )));
+    }
+
+    if com_tee_spl < MIN_TEE_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "Committed TEE SPL {} is below minimum {}", com_tee_spl, MIN_TEE_SPL
+        )));
+    }
+
+    if com_snp_spl < MIN_SNP_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "Committed SNP SPL {} is below minimum {}", com_snp_spl, MIN_SNP_SPL
+        )));
+    }
+
+    if com_ucode_spl < MIN_UCODE_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "Committed microcode SPL {} is below minimum {}", com_ucode_spl, MIN_UCODE_SPL
+        )));
+    }
+
     // Validate LAUNCH_TCB meets minimum requirements
     let launch_tcb = u64::from_le_bytes(
         report[LAUNCH_TCB_OFFSET..LAUNCH_TCB_OFFSET + 8].try_into().unwrap()
