@@ -59,16 +59,12 @@
 //! ```
 
 pub mod api;
-pub mod attestation;
 pub mod client;
 pub mod discovery;
-pub mod embedded;
 pub mod error;
-pub mod github;
-pub mod sigstore;
-pub mod tls;
+pub mod verifier;
 
 pub use client::SecureClient;
 pub use error::Error;
 pub use api::{ChatMessage, ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse};
-pub use attestation::{GroundTruth, Measurement, PredicateType};
+pub use verifier::{GroundTruth, Measurement, PredicateType};

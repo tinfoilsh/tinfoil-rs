@@ -4,9 +4,9 @@
 //! validates the server certificate fingerprint matches the attested value.
 
 use crate::api::{ChatMessage, ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse, Tool};
-use crate::attestation::{self, types::{GroundTruth, Measurement}};
 use crate::error::{Error, Result};
-use crate::tls;
+use crate::verifier::attestation::{self, types::{GroundTruth, Measurement}};
+use crate::verifier::tls;
 
 /// Default models
 pub const DEFAULT_CHAT_MODEL: &str = "qwen3-coder-480b";

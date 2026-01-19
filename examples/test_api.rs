@@ -1,7 +1,7 @@
 //! Test the Tinfoil API with full cryptographic verification
 
 use tinfoil::{SecureClient, ChatMessage};
-use tinfoil::attestation;
+use tinfoil::verifier::attestation;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

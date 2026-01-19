@@ -1,6 +1,6 @@
 //! Test that TLS pinning actually rejects wrong fingerprints
 
-use tinfoil::tls::create_pinned_client;
+use tinfoil::verifier::tls::create_pinned_client;
 
 #[tokio::main]
 async fn main() {

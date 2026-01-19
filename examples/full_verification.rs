@@ -11,7 +11,9 @@
 //!
 //! We verify the ROUTER, which internally verifies each model enclave.
 
-use tinfoil::attestation;
+use tinfoil::verifier::attestation;
+use tinfoil::verifier::github;
+use tinfoil::verifier::sigstore;
 
 // The confidential model router - all API requests go through here
 const ROUTER_HOST: &str = "inference.tinfoil.sh";
@@ -48,15 +50,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Step 2: Sigstore Verification
     println!("\n═══ Step 2: Sigstore Verification ═══");
     println!("   → Fetching latest release from GitHub...");
-    let tag = tinfoil::sigstore::fetch_latest_tag(ROUTER_REPO).await?;
+    let tag = github::fetch_latest_tag(ROUTER_REPO).await?;
     println!("   ✓ Latest release: {}", tag);
     
     println!("   → Fetching attestation bundle...");
-    let digest = tinfoil::sigstore::fetch_digest(ROUTER_REPO, &tag).await?;
+    let digest = github::fetch_digest(ROUTER_REPO, &tag).await?;
     println!("   ✓ Digest: {}...", &digest[..32]);
     
     println!("   → Verifying Sigstore bundle...");
-    let code_measurement = tinfoil::sigstore::verify_repo(ROUTER_REPO).await?;
+    let code_measurement = sigstore::verify_repo(ROUTER_REPO).await?;
     println!("   ✓ DSSE signature verified (ECDSA P-256)");
     println!("   ✓ Certificate issuer: GitHub Actions");
     println!("   ✓ Certificate repository: {}", ROUTER_REPO);
