@@ -1,4 +1,4 @@
-//! Sigstore verification for code provenance (Step 2)
+//! Sigstore verification for code provenance.
 //!
 //! This module verifies that the code running in the enclave matches
 //! the published open-source code by:
@@ -10,29 +10,9 @@
 
 use crate::attestation::types::{Measurement, PredicateType};
 use crate::error::{Error, Result};
+use crate::github;
 use base64::Engine;
 use serde::Deserialize;
-
-/// GitHub proxy URL for fetching release info
-const GITHUB_PROXY: &str = "https://api-github-proxy.tinfoil.sh";
-
-/// GitHub attestation proxy for Sigstore bundles  
-const ATTESTATION_PROXY: &str = "https://gh-attestation-proxy.tinfoil.sh";
-
-#[derive(Debug, Deserialize)]
-struct ReleaseResponse {
-    tag_name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct AttestationResponse {
-    attestations: Vec<AttestationEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AttestationEntry {
-    bundle: serde_json::Value,
-}
 
 /// In-toto statement from the decoded payload
 #[derive(Debug, Deserialize)]
@@ -61,23 +41,20 @@ pub struct CertificateInfo {
     pub repository: String,
 }
 
-/// Verify a repository and return the expected measurement
-/// 
-/// This performs FULL Sigstore verification:
-/// 1. Fetches latest release from GitHub
+/// Verify a repository and return the expected measurement.
+///
+/// This performs full Sigstore verification:
+/// 1. Fetches latest release digest from GitHub
 /// 2. Fetches Sigstore attestation bundle
 /// 3. Verifies the DSSE signature cryptographically
 /// 4. Validates certificate is from GitHub Actions for the repo
 /// 5. Extracts and returns the measurement
 pub async fn verify_repo(repo: &str) -> Result<Measurement> {
-    // 1. Fetch latest release tag
-    let tag = fetch_latest_tag(repo).await?;
-    
-    // 2. Fetch the digest (hash of the enclave image)  
-    let digest = fetch_digest(repo, &tag).await?;
-    
-    // 3. Fetch the Sigstore attestation bundle
-    let bundle_json = fetch_attestation_bundle(repo, &digest).await?;
+    // 1. Fetch latest release digest
+    let digest = github::fetch_latest_digest(repo).await?;
+
+    // 2. Fetch the Sigstore attestation bundle
+    let bundle_json = github::fetch_attestation_bundle(repo, &digest).await?;
     
     // 4. Parse bundle
     let bundle: serde_json::Value = serde_json::from_slice(&bundle_json)
@@ -334,56 +311,6 @@ fn extract_measurement_from_bundle(bundle: &serde_json::Value) -> Result<Measure
         type_: measurement_type,
         registers,
     })
-}
-
-/// Fetch the latest release tag from GitHub
-pub async fn fetch_latest_tag(repo: &str) -> Result<String> {
-    let url = format!("{}/repos/{}/releases/latest", GITHUB_PROXY, repo);
-    
-    let response: ReleaseResponse = reqwest::get(&url)
-        .await
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to fetch release: {}", e)))?
-        .json()
-        .await
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse release: {}", e)))?;
-    
-    Ok(response.tag_name)
-}
-
-/// Fetch the attestation digest for a release
-pub async fn fetch_digest(repo: &str, tag: &str) -> Result<String> {
-    let url = format!("{}/{}/releases/download/{}/tinfoil.hash", GITHUB_PROXY, repo, tag);
-    
-    let digest = reqwest::get(&url)
-        .await
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to fetch digest: {}", e)))?
-        .text()
-        .await
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to read digest: {}", e)))?;
-    
-    Ok(digest.trim().to_string())
-}
-
-/// Fetch the Sigstore attestation bundle
-pub async fn fetch_attestation_bundle(repo: &str, digest: &str) -> Result<Vec<u8>> {
-    let url = format!("{}/repos/{}/attestations/sha256:{}", ATTESTATION_PROXY, repo, digest);
-    
-    let response: AttestationResponse = reqwest::get(&url)
-        .await
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to fetch bundle: {}", e)))?
-        .json()
-        .await
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse bundle response: {}", e)))?;
-    
-    let bundle = response.attestations
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::SigstoreVerification("No attestations found".into()))?;
-    
-    let bundle_bytes = serde_json::to_vec(&bundle.bundle)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to serialize bundle: {}", e)))?;
-    
-    Ok(bundle_bytes)
 }
 
 #[cfg(test)]

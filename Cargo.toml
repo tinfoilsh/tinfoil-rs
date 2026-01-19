@@ -50,8 +50,12 @@ thiserror = "1"
 # Hex encoding
 hex = "0.4"
 
-# Sigstore verification (Step 2)
-sigstore = { version = "0.13", default-features = false, features = ["sigstore-trust-root", "bundle", "verify", "rustls-tls"] }
+# Sigstore verification
+# NOTE: sigstore-rs 0.13 cannot be used because it requires the `oauth` module
+# even for verification-only use cases, and that module uses Rust edition 2024
+# let-chains which don't compile on stable Rust (see rust-lang/rust#145878).
+# We implement DSSE verification manually in src/sigstore.rs instead.
+# sigstore = { version = "0.13", default-features = false, features = ["verify", "rustls-tls"] }
 
 # Regex for certificate identity matching
 regex = "1"
