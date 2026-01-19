@@ -59,6 +59,9 @@ const CURRENT_TCB_OFFSET: usize = 0x38;
 const COMMITTED_TCB_OFFSET: usize = 0x1E0;
 const LAUNCH_TCB_OFFSET: usize = 0x1F0;
 
+// Signer info field offset
+const SIGNER_INFO_OFFSET: usize = 0x48;
+
 // Signature component sizes (AMD SEV-SNP ECDSA P-384)
 // Each component (R, S) is stored in 72 bytes (48 bytes value + 24 bytes padding)
 // Values are in little-endian format
@@ -148,6 +151,41 @@ fn validate_mbz_fields(report: &[u8]) -> Result<()> {
     validate_tcb_mbz(launch_tcb, "launch_tcb")?;
 
     Ok(())
+}
+
+/// Validate signer info field and return maskChipKey flag
+///
+/// Signer info field (32-bit at offset 0x48):
+/// - Bits 31-5: Must be zero
+/// - Bits 2-4: Signing key (must be 0 for VCEK)
+/// - Bit 1: maskChipKey flag
+/// - Bit 0: authorKeyEn flag
+fn validate_signer_info(report: &[u8]) -> Result<bool> {
+    let signer_info = u32::from_le_bytes(
+        report[SIGNER_INFO_OFFSET..SIGNER_INFO_OFFSET + 4].try_into().unwrap()
+    );
+
+    // Bits 31-5 must be zero
+    if signer_info >> 5 != 0 {
+        return Err(Error::AttestationVerification(format!(
+            "Signer info bits 31-5 must be zero, got 0x{:x}",
+            signer_info >> 5
+        )));
+    }
+
+    // Signing key (bits 2-4) must be 0 (VCEK)
+    let signing_key = (signer_info >> 2) & 0x7;
+    if signing_key != 0 {
+        return Err(Error::AttestationVerification(format!(
+            "Only VCEK-signed reports are supported, got signing key {}",
+            signing_key
+        )));
+    }
+
+    // Extract maskChipKey flag (bit 1)
+    let mask_chip_key = (signer_info & 0x2) != 0;
+
+    Ok(mask_chip_key)
 }
 
 /// Parse AMD SEV-SNP attestation report and extract measurements without cryptographic verification.
@@ -265,6 +303,9 @@ fn validate_report_structure(report: &[u8]) -> Result<()> {
 fn validate_report_fields(report: &[u8]) -> Result<()> {
     // Validate all MBZ (Must Be Zero) fields first
     validate_mbz_fields(report)?;
+
+    // Validate signer info field (returns maskChipKey for later HWID validation)
+    let _mask_chip_key = validate_signer_info(report)?;
 
     // Extract and validate guest policy
     let policy = u64::from_le_bytes(
