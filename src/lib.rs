@@ -62,6 +62,7 @@ pub mod attestation;
 pub mod client;
 pub mod embedded;
 pub mod error;
+pub mod github;
 pub mod tls;
 pub mod api;
 pub mod sigstore;
