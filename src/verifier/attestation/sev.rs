@@ -62,6 +62,15 @@ const LAUNCH_TCB_OFFSET: usize = 0x1F0;
 // Signer info field offset
 const SIGNER_INFO_OFFSET: usize = 0x48;
 
+// AMD VCEK certificate OID extensions (arc: 1.3.6.1.4.1.3704.1)
+const OID_BL_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 1];
+const OID_TEE_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 2];
+const OID_SNP_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 3];
+const OID_UCODE_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 8];
+const OID_HWID: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 4];
+const OID_PRODUCT_NAME: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 2];
+const OID_CSP_ID: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 5];
+
 // Signature component sizes (AMD SEV-SNP ECDSA P-384)
 // Each component (R, S) is stored in 72 bytes (48 bytes value + 24 bytes padding)
 // Values are in little-endian format
@@ -247,10 +256,13 @@ pub async fn verify_full(body: &str) -> Result<Verification> {
     // 6. Verify certificate chain with full cryptographic verification
     verify_cert_chain_crypto(&vcek, &cert_chain)?;
 
-    // 7. Verify report signature against VCEK
+    // 7. Validate VCEK extensions match report TCB
+    validate_vcek_extensions(&vcek, reported_tcb)?;
+
+    // 8. Verify report signature against VCEK
     verify_report_signature_full(&report_bytes, &vcek)?;
 
-    // 8. Extract measurements and keys
+    // 9. Extract measurements and keys
     let measurement_bytes = &report_bytes[MEASUREMENT_OFFSET..MEASUREMENT_OFFSET + MEASUREMENT_SIZE];
     let report_data = &report_bytes[REPORT_DATA_OFFSET..REPORT_DATA_OFFSET + REPORT_DATA_SIZE];
     let tls_fp = hex::encode(&report_data[..32]);
@@ -545,11 +557,130 @@ fn extract_tbs_from_cert(cert_der: &[u8]) -> Result<Vec<u8>> {
 fn extract_signature_from_cert(cert_der: &[u8]) -> Result<Vec<u8>> {
     use x509_cert::Certificate;
     use der::Decode;
-    
+
     let cert = Certificate::from_der(cert_der)
         .map_err(|e| Error::AttestationVerification(format!("Failed to parse cert: {}", e)))?;
-    
+
     Ok(cert.signature.raw_bytes().to_vec())
+}
+
+/// Check if an OID matches the expected value
+fn oid_matches(oid: &der::oid::ObjectIdentifier, expected: &[u64]) -> bool {
+    let oid_str = oid.to_string();
+    let expected_str = expected.iter()
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(".");
+    oid_str == expected_str
+}
+
+/// Decode a DER-encoded INTEGER to u8
+fn decode_der_integer(data: &[u8]) -> Result<u8> {
+    if data.len() < 2 || data[0] != 0x02 {
+        return Err(Error::AttestationVerification(
+            "Invalid DER INTEGER tag".into()
+        ));
+    }
+    let len = data[1] as usize;
+    if data.len() < 2 + len {
+        return Err(Error::AttestationVerification(
+            "Invalid DER INTEGER length".into()
+        ));
+    }
+    // Handle potential leading zero for positive integers
+    let value_bytes = &data[2..2 + len];
+    if value_bytes.is_empty() {
+        return Ok(0);
+    }
+    // Take the last byte (handles both single byte and padded integers)
+    Ok(*value_bytes.last().unwrap())
+}
+
+/// Extract extension value by OID from VCEK certificate
+fn get_vcek_extension(vcek_der: &[u8], target_oid: &[u64]) -> Result<Option<Vec<u8>>> {
+    use x509_cert::Certificate;
+    use der::Decode;
+
+    let cert = Certificate::from_der(vcek_der)
+        .map_err(|e| Error::AttestationVerification(format!("Failed to parse VCEK: {}", e)))?;
+
+    if let Some(extensions) = &cert.tbs_certificate.extensions {
+        for ext in extensions.iter() {
+            if oid_matches(&ext.extn_id, target_oid) {
+                return Ok(Some(ext.extn_value.as_bytes().to_vec()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Validate VCEK certificate extensions against report TCB values
+fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> Result<()> {
+    let tcb_val = u64::from_le_bytes(reported_tcb.try_into().unwrap());
+    let bl_spl = (tcb_val & 0xFF) as u8;
+    let tee_spl = ((tcb_val >> 8) & 0xFF) as u8;
+    let snp_spl = ((tcb_val >> 48) & 0xFF) as u8;
+    let ucode_spl = ((tcb_val >> 56) & 0xFF) as u8;
+
+    // Validate BL_SPL
+    let vcek_bl = get_vcek_extension(vcek_der, OID_BL_SPL)?
+        .ok_or_else(|| Error::AttestationVerification("Missing BL_SPL in VCEK".into()))?;
+    let vcek_bl_val = decode_der_integer(&vcek_bl)?;
+    if vcek_bl_val != bl_spl {
+        return Err(Error::AttestationVerification(format!(
+            "VCEK BL_SPL ({}) does not match report ({})", vcek_bl_val, bl_spl
+        )));
+    }
+
+    // Validate TEE_SPL
+    let vcek_tee = get_vcek_extension(vcek_der, OID_TEE_SPL)?
+        .ok_or_else(|| Error::AttestationVerification("Missing TEE_SPL in VCEK".into()))?;
+    let vcek_tee_val = decode_der_integer(&vcek_tee)?;
+    if vcek_tee_val != tee_spl {
+        return Err(Error::AttestationVerification(format!(
+            "VCEK TEE_SPL ({}) does not match report ({})", vcek_tee_val, tee_spl
+        )));
+    }
+
+    // Validate SNP_SPL
+    let vcek_snp = get_vcek_extension(vcek_der, OID_SNP_SPL)?
+        .ok_or_else(|| Error::AttestationVerification("Missing SNP_SPL in VCEK".into()))?;
+    let vcek_snp_val = decode_der_integer(&vcek_snp)?;
+    if vcek_snp_val != snp_spl {
+        return Err(Error::AttestationVerification(format!(
+            "VCEK SNP_SPL ({}) does not match report ({})", vcek_snp_val, snp_spl
+        )));
+    }
+
+    // Validate UCODE_SPL
+    let vcek_ucode = get_vcek_extension(vcek_der, OID_UCODE_SPL)?
+        .ok_or_else(|| Error::AttestationVerification("Missing UCODE_SPL in VCEK".into()))?;
+    let vcek_ucode_val = decode_der_integer(&vcek_ucode)?;
+    if vcek_ucode_val != ucode_spl {
+        return Err(Error::AttestationVerification(format!(
+            "VCEK UCODE_SPL ({}) does not match report ({})", vcek_ucode_val, ucode_spl
+        )));
+    }
+
+    // Validate PRODUCT_NAME is "Genoa" (ASN.1 UTF8String: 0x16 0x05 "Genoa")
+    let vcek_product = get_vcek_extension(vcek_der, OID_PRODUCT_NAME)?
+        .ok_or_else(|| Error::AttestationVerification("Missing PRODUCT_NAME in VCEK".into()))?;
+    // Expected: UTF8String tag (0x16), length (0x05), "Genoa"
+    let expected_product = b"\x16\x05Genoa";
+    if vcek_product != expected_product {
+        return Err(Error::AttestationVerification(format!(
+            "VCEK PRODUCT_NAME is not Genoa: {:?}", vcek_product
+        )));
+    }
+
+    // Reject if CSP_ID is present (indicates cloud service provider cert, not chip-specific)
+    if get_vcek_extension(vcek_der, OID_CSP_ID)?.is_some() {
+        return Err(Error::AttestationVerification(
+            "VCEK contains unexpected CSP_ID extension".into()
+        ));
+    }
+
+    Ok(())
 }
 
 /// Verify the certificate chain with full cryptographic verification
