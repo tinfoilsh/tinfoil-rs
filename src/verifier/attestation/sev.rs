@@ -59,6 +59,11 @@ const CURRENT_TCB_OFFSET: usize = 0x38;
 const COMMITTED_TCB_OFFSET: usize = 0x1E0;
 const LAUNCH_TCB_OFFSET: usize = 0x1F0;
 
+// Committed version field offsets (for provisional firmware check)
+const COMMITTED_BUILD_OFFSET: usize = 0x1EC;
+const COMMITTED_MINOR_OFFSET: usize = 0x1ED;
+const COMMITTED_MAJOR_OFFSET: usize = 0x1EE;
+
 // Signer info field offset
 const SIGNER_INFO_OFFSET: usize = 0x48;
 
@@ -197,6 +202,57 @@ fn validate_signer_info(report: &[u8]) -> Result<bool> {
     Ok(mask_chip_key)
 }
 
+/// Validate committed TCB matches current TCB (reject provisional firmware)
+///
+/// Provisional firmware has committed_tcb != current_tcb, meaning the firmware
+/// has not yet been committed to the hardware. This is a security risk as the
+/// firmware could be rolled back.
+fn validate_committed_tcb(report: &[u8]) -> Result<()> {
+    let committed_tcb = u64::from_le_bytes(
+        report[COMMITTED_TCB_OFFSET..COMMITTED_TCB_OFFSET + 8].try_into().unwrap()
+    );
+    let current_tcb = u64::from_le_bytes(
+        report[CURRENT_TCB_OFFSET..CURRENT_TCB_OFFSET + 8].try_into().unwrap()
+    );
+
+    if committed_tcb != current_tcb {
+        return Err(Error::AttestationVerification(format!(
+            "Provisional firmware not allowed: committed_tcb (0x{:x}) != current_tcb (0x{:x})",
+            committed_tcb, current_tcb
+        )));
+    }
+
+    // Validate version fields match
+    let committed_build = report[COMMITTED_BUILD_OFFSET];
+    let current_build = report[CURRENT_BUILD_OFFSET];
+    if committed_build != current_build {
+        return Err(Error::AttestationVerification(format!(
+            "Provisional firmware: committed_build ({}) != current_build ({})",
+            committed_build, current_build
+        )));
+    }
+
+    let committed_minor = report[COMMITTED_MINOR_OFFSET];
+    let current_minor = report[CURRENT_MINOR_OFFSET];
+    if committed_minor != current_minor {
+        return Err(Error::AttestationVerification(format!(
+            "Provisional firmware: committed_minor ({}) != current_minor ({})",
+            committed_minor, current_minor
+        )));
+    }
+
+    let committed_major = report[COMMITTED_MAJOR_OFFSET];
+    let current_major = report[CURRENT_MAJOR_OFFSET];
+    if committed_major != current_major {
+        return Err(Error::AttestationVerification(format!(
+            "Provisional firmware: committed_major ({}) != current_major ({})",
+            committed_major, current_major
+        )));
+    }
+
+    Ok(())
+}
+
 /// Parse AMD SEV-SNP attestation report and extract measurements without cryptographic verification.
 /// For full security, use `verify_full()`.
 pub fn parse_report(body: &str) -> Result<Verification> {
@@ -322,6 +378,9 @@ fn validate_report_fields(report: &[u8]) -> Result<bool> {
 
     // Validate signer info field (returns maskChipKey for HWID validation)
     let mask_chip_key = validate_signer_info(report)?;
+
+    // Reject provisional firmware (committed TCB must match current TCB)
+    validate_committed_tcb(report)?;
 
     // Extract and validate guest policy
     let policy = u64::from_le_bytes(
