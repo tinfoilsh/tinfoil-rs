@@ -142,14 +142,24 @@ impl SecureClient {
         let pinned = tls::create_pinned_client(&verification.tls_public_key_fp)?;
         self.pinned_client = Some(pinned);
         
-        // 6. Store ground truth
+        // 6. Store ground truth with fingerprints
+        let code_measurement = self.expected_measurement
+            .clone()
+            .unwrap_or_else(|| verification.measurement.clone());
+        let enclave_measurement = verification.measurement;
+
+        // Compute fingerprints for the target type (enclave's type)
+        let target_type = &enclave_measurement.type_;
+        let code_fingerprint = code_measurement.fingerprint_for_target(target_type);
+        let enclave_fingerprint = enclave_measurement.fingerprint();
+
         self.ground_truth = Some(GroundTruth {
-            tls_public_key: verification.tls_public_key_fp.clone(),
+            tls_public_key: Some(verification.tls_public_key_fp.clone()),
             hpke_public_key: verification.hpke_public_key.clone(),
-            expected_measurement: self.expected_measurement
-                .clone()
-                .unwrap_or_else(|| verification.measurement.clone()),
-            enclave_measurement: verification.measurement,
+            code_measurement,
+            enclave_measurement,
+            code_fingerprint,
+            enclave_fingerprint,
         });
         
         Ok(self.ground_truth.as_ref().unwrap())
