@@ -239,20 +239,26 @@ fn verify_certificate_identity(cert_info: &CertificateInfo, expected_repo: &str)
     // Verify OIDC issuer is GitHub Actions
     if !cert_info.issuer.contains("token.actions.githubusercontent.com") {
         return Err(Error::SigstoreVerification(format!(
-            "Certificate not from GitHub Actions. Issuer: {}", 
+            "Certificate not from GitHub Actions. Issuer: {}",
             cert_info.issuer
         )));
     }
-    
-    // Verify repository matches
-    let expected_repo_url = format!("github.com/{}", expected_repo);
-    if !cert_info.repository.contains(&expected_repo_url) && !cert_info.subject_workflow.contains(&expected_repo_url) {
+
+    // Verify repository matches using regex pattern for workflow URI
+    let pattern = format!(
+        r"^https://github\.com/{}/.github/workflows/.*@refs/tags/",
+        regex::escape(expected_repo)
+    );
+    let re = regex::Regex::new(&pattern)
+        .map_err(|e| Error::SigstoreVerification(format!("Invalid regex: {}", e)))?;
+
+    if !re.is_match(&cert_info.subject_workflow) {
         return Err(Error::SigstoreVerification(format!(
-            "Certificate not for expected repository. Expected: {}, Got repo: {}, workflow: {}", 
-            expected_repo, cert_info.repository, cert_info.subject_workflow
+            "Certificate workflow doesn't match expected pattern. Expected repo: {}, Got: {}",
+            expected_repo, cert_info.subject_workflow
         )));
     }
-    
+
     Ok(())
 }
 
