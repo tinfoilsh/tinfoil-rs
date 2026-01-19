@@ -361,9 +361,9 @@ fn validate_report_structure(report: &[u8]) -> Result<()> {
     }
 
     let version = u32::from_le_bytes([report[0], report[1], report[2], report[3]]);
-    if version < 2 || version > 3 {
+    if version < 2 || (version > 3 && version != 5) {
         return Err(Error::AttestationVerification(format!(
-            "Unexpected report version: {}", version
+            "Unsupported report version: {} (supported: 2, 3, 5)", version
         )));
     }
 
