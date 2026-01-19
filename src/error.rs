@@ -22,6 +22,9 @@ pub enum Error {
     #[error("Sigstore verification failed: {0}")]
     SigstoreVerification(String),
 
+    #[error("GitHub API error: {0}")]
+    GitHub(String),
+
     #[error("Unsupported attestation format: {0}")]
     UnsupportedFormat(String),
 
