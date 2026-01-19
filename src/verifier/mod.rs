@@ -8,6 +8,6 @@ pub mod tls;
 
 // Re-export commonly used types
 pub use attestation::{
-    fetch, verify, verify_complete, verify_full, AttestationDocument, GroundTruth, Measurement,
+    fetch, parse_report, verify_complete, verify_full, AttestationDocument, GroundTruth, Measurement,
     MeasurementError, PredicateType, Verification,
 };

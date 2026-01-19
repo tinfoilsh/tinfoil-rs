@@ -71,8 +71,9 @@ const SIG_VALUE_SIZE: usize = 48;  // P-384 scalar size
 /// ```
 const AMD_ARK_GENOA_SPKI_FINGERPRINT: &str = "429a69c9422aa258ee4d8db5fcda9c6470ef15f8cd5a9cebd6cbc7d90b863831";
 
-/// Verify AMD SEV-SNP attestation and extract measurements
-pub fn verify(body: &str) -> Result<Verification> {
+/// Parse AMD SEV-SNP attestation report and extract measurements without cryptographic verification.
+/// For full security, use `verify_full()`.
+pub fn parse_report(body: &str) -> Result<Verification> {
     // 1. Decode and decompress
     let report_bytes = decode_report(body)?;
     

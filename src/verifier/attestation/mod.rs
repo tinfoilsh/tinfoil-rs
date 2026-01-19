@@ -54,21 +54,17 @@ pub async fn fetch(host: &str) -> Result<AttestationDocument> {
     Ok(doc)
 }
 
-/// Verify attestation document (basic verification - Step 1 only)
-/// 
-/// This performs hardware attestation verification:
-/// - Validates report structure
-/// - Extracts measurement and TLS fingerprint
-/// - Does NOT fetch VCEK or verify full certificate chain
-pub fn verify(doc: &AttestationDocument) -> Result<Verification> {
+/// Parse attestation document and extract fields without cryptographic verification.
+/// For full security, use `verify_full()` which validates the certificate chain and signature.
+pub fn parse_report(doc: &AttestationDocument) -> Result<Verification> {
     match doc.format {
-        PredicateType::SevGuestV2 => sev::verify(&doc.body),
+        PredicateType::SevGuestV2 => sev::parse_report(&doc.body),
         PredicateType::TdxGuestV2 => Err(Error::UnsupportedFormat(
             "Intel TDX attestation not yet implemented".into()
         )),
         PredicateType::SnpTdxMultiPlatformV1 => {
             // Multi-platform format - use SEV-SNP verification
-            sev::verify(&doc.body)
+            sev::parse_report(&doc.body)
         }
         PredicateType::Unknown => Err(Error::AttestationVerification(
             "Unknown attestation format".into()
