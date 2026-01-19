@@ -33,6 +33,26 @@ const CHIP_ID_OFFSET: usize = 416;
 const CHIP_ID_SIZE: usize = 64;
 const REPORTED_TCB_OFFSET: usize = 384;
 
+// Additional report field offsets for validation
+const POLICY_OFFSET: usize = 8;
+const CURRENT_BUILD_OFFSET: usize = 54;
+const CURRENT_MINOR_OFFSET: usize = 55;
+const CURRENT_MAJOR_OFFSET: usize = 56;
+
+// Minimum TCB values for production
+const MIN_BL_SPL: u8 = 0x07;
+const MIN_TEE_SPL: u8 = 0x00;
+const MIN_SNP_SPL: u8 = 0x0e;
+const MIN_UCODE_SPL: u8 = 0x48;
+const MIN_BUILD: u8 = 21;
+const MIN_VERSION_MAJOR: u8 = 1;
+const MIN_VERSION_MINOR: u8 = 55;
+
+// Guest policy bit masks (64-bit policy field)
+const POLICY_DEBUG_BIT: u64 = 1 << 19;
+const POLICY_MIGRATE_MA_BIT: u64 = 1 << 18;
+const POLICY_SMT_BIT: u64 = 1 << 16;
+
 // Signature component sizes (AMD SEV-SNP ECDSA P-384)
 // Each component (R, S) is stored in 72 bytes (48 bytes value + 24 bytes padding)
 // Values are in little-endian format
@@ -91,26 +111,28 @@ pub fn verify(body: &str) -> Result<Verification> {
 pub async fn verify_full(body: &str) -> Result<Verification> {
     // 1. Decode and decompress
     let report_bytes = decode_report(body)?;
-    
+
     // 2. Basic structure validation
     validate_report_structure(&report_bytes)?;
-    
-    // 3. Extract chip_id and TCB for VCEK lookup
+
+    // 3. Validate report fields (policy, version, TCB)
+    validate_report_fields(&report_bytes)?;
+
+    // 4. Extract chip_id and TCB for VCEK lookup
     let chip_id = &report_bytes[CHIP_ID_OFFSET..CHIP_ID_OFFSET + CHIP_ID_SIZE];
     let reported_tcb = &report_bytes[REPORTED_TCB_OFFSET..REPORTED_TCB_OFFSET + 8];
-    
-    // 4. Fetch and verify certificate chain
+
+    // 5. Fetch and verify certificate chain
     let vcek = fetch_vcek(chip_id, reported_tcb).await?;
     let cert_chain = fetch_cert_chain().await?;
-    
-    // 5. Verify certificate chain with full cryptographic verification
-    // This includes ARK pinning and RSA-PSS signature verification
+
+    // 6. Verify certificate chain with full cryptographic verification
     verify_cert_chain_crypto(&vcek, &cert_chain)?;
-    
-    // 6. Verify report signature against VCEK
+
+    // 7. Verify report signature against VCEK
     verify_report_signature_full(&report_bytes, &vcek)?;
-    
-    // 7. Extract measurements and keys
+
+    // 8. Extract measurements and keys
     let measurement_bytes = &report_bytes[MEASUREMENT_OFFSET..MEASUREMENT_OFFSET + MEASUREMENT_SIZE];
     let report_data = &report_bytes[REPORT_DATA_OFFSET..REPORT_DATA_OFFSET + REPORT_DATA_SIZE];
     let tls_fp = hex::encode(&report_data[..32]);
@@ -148,14 +170,100 @@ fn validate_report_structure(report: &[u8]) -> Result<()> {
             REPORT_SIZE, report.len()
         )));
     }
-    
+
     let version = u32::from_le_bytes([report[0], report[1], report[2], report[3]]);
     if version < 2 || version > 3 {
         return Err(Error::AttestationVerification(format!(
             "Unexpected report version: {}", version
         )));
     }
-    
+
+    Ok(())
+}
+
+/// Validate report fields against production requirements
+fn validate_report_fields(report: &[u8]) -> Result<()> {
+    // Extract and validate guest policy
+    let policy = u64::from_le_bytes(
+        report[POLICY_OFFSET..POLICY_OFFSET + 8].try_into().unwrap()
+    );
+
+    // Debug must be disabled
+    if policy & POLICY_DEBUG_BIT != 0 {
+        return Err(Error::AttestationVerification(
+            "Debug mode is enabled in guest policy".into()
+        ));
+    }
+
+    // Migrate MA must be disabled
+    if policy & POLICY_MIGRATE_MA_BIT != 0 {
+        return Err(Error::AttestationVerification(
+            "Migration agent is enabled in guest policy".into()
+        ));
+    }
+
+    // SMT must be enabled (for performance)
+    if policy & POLICY_SMT_BIT == 0 {
+        return Err(Error::AttestationVerification(
+            "SMT is disabled in guest policy".into()
+        ));
+    }
+
+    // Extract and validate firmware version
+    let build = report[CURRENT_BUILD_OFFSET];
+    let minor = report[CURRENT_MINOR_OFFSET];
+    let major = report[CURRENT_MAJOR_OFFSET];
+
+    if build < MIN_BUILD {
+        return Err(Error::AttestationVerification(format!(
+            "Firmware build {} is below minimum {}", build, MIN_BUILD
+        )));
+    }
+
+    // Compare version (major.minor)
+    let version = (major as u16) << 8 | (minor as u16);
+    let min_version = (MIN_VERSION_MAJOR as u16) << 8 | (MIN_VERSION_MINOR as u16);
+    if version < min_version {
+        return Err(Error::AttestationVerification(format!(
+            "Firmware version {}.{} is below minimum {}.{}",
+            major, minor, MIN_VERSION_MAJOR, MIN_VERSION_MINOR
+        )));
+    }
+
+    // Extract and validate TCB from reported_tcb field
+    let tcb = u64::from_le_bytes(
+        report[REPORTED_TCB_OFFSET..REPORTED_TCB_OFFSET + 8].try_into().unwrap()
+    );
+
+    let bl_spl = (tcb & 0xFF) as u8;
+    let tee_spl = ((tcb >> 8) & 0xFF) as u8;
+    let snp_spl = ((tcb >> 48) & 0xFF) as u8;
+    let ucode_spl = ((tcb >> 56) & 0xFF) as u8;
+
+    if bl_spl < MIN_BL_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "Boot loader SPL {} is below minimum {}", bl_spl, MIN_BL_SPL
+        )));
+    }
+
+    if tee_spl < MIN_TEE_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "TEE SPL {} is below minimum {}", tee_spl, MIN_TEE_SPL
+        )));
+    }
+
+    if snp_spl < MIN_SNP_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "SNP SPL {} is below minimum {}", snp_spl, MIN_SNP_SPL
+        )));
+    }
+
+    if ucode_spl < MIN_UCODE_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "Microcode SPL {} is below minimum {}", ucode_spl, MIN_UCODE_SPL
+        )));
+    }
+
     Ok(())
 }
 
@@ -236,25 +344,9 @@ async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
     Ok(vcek_der.to_vec())
 }
 
-/// Fetch AMD certificate chain (ASK + ARK)
+/// Get AMD certificate chain (ASK + ARK) from embedded assets
 async fn fetch_cert_chain() -> Result<Vec<u8>> {
-    let url = "https://kds-proxy.tinfoil.sh/vcek/v1/Genoa/cert_chain";
-    
-    let response = reqwest::get(url)
-        .await
-        .map_err(|e| Error::AttestationVerification(format!("Failed to fetch cert chain: {}", e)))?;
-    
-    if !response.status().is_success() {
-        return Err(Error::AttestationVerification(format!(
-            "Cert chain fetch failed: HTTP {}",
-            response.status()
-        )));
-    }
-    
-    let chain_pem = response.bytes().await
-        .map_err(|e| Error::AttestationVerification(format!("Failed to read cert chain: {}", e)))?;
-    
-    Ok(chain_pem.to_vec())
+    Ok(crate::embedded::GENOA_CERT_CHAIN.to_vec())
 }
 
 /// Parse PEM certificates from the chain
