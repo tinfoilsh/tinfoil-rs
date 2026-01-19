@@ -813,7 +813,14 @@ fn validate_vcek_hwid(vcek_der: &[u8], chip_id: &[u8], mask_chip_key: bool) -> R
     let hwid = get_vcek_extension(vcek_der, OID_HWID)?
         .ok_or_else(|| Error::AttestationVerification("Missing HWID in VCEK".into()))?;
 
-    // HWID is raw bytes (64 bytes for chip_id)
+    // HWID must be exactly 64 bytes
+    if hwid.len() != 64 {
+        return Err(Error::AttestationVerification(format!(
+            "VCEK HWID length is {}, expected 64 bytes", hwid.len()
+        )));
+    }
+
+    // HWID must match chip_id from the report
     if hwid != chip_id {
         return Err(Error::AttestationVerification(format!(
             "VCEK HWID does not match report CHIP_ID: expected {}, got {}",
@@ -907,7 +914,44 @@ fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -> Result<()
     // Parse certificates
     let vcek_cert = Certificate::from_der(vcek_der)
         .map_err(|e| Error::AttestationVerification(format!("Failed to parse VCEK: {}", e)))?;
-    
+
+    // Validate VCEK certificate format
+    // Version must be v3
+    if vcek_cert.tbs_certificate.version != x509_cert::certificate::Version::V3 {
+        return Err(Error::AttestationVerification(
+            "VCEK certificate version is not v3".into()
+        ));
+    }
+
+    // Public key must be EC with P-384 curve
+    // OID for ecPublicKey: 1.2.840.10045.2.1
+    // OID for secp384r1: 1.3.132.0.34
+    let vcek_spki = &vcek_cert.tbs_certificate.subject_public_key_info;
+    const OID_EC_PUBLIC_KEY: &[u64] = &[1, 2, 840, 10045, 2, 1];
+    const OID_SECP384R1: &[u64] = &[1, 3, 132, 0, 34];
+
+    if !oid_matches(&vcek_spki.algorithm.oid, OID_EC_PUBLIC_KEY) {
+        return Err(Error::AttestationVerification(format!(
+            "VCEK public key is not EC: {}", vcek_spki.algorithm.oid
+        )));
+    }
+
+    // Verify curve is P-384 (secp384r1)
+    if let Some(params) = &vcek_spki.algorithm.parameters {
+        use der::{Decode, Encode};
+        let curve_oid = der::oid::ObjectIdentifier::from_der(params.to_der().unwrap().as_slice())
+            .map_err(|_| Error::AttestationVerification("Failed to parse VCEK curve OID".into()))?;
+        if !oid_matches(&curve_oid, OID_SECP384R1) {
+            return Err(Error::AttestationVerification(format!(
+                "VCEK public key curve is not P-384: {}", curve_oid
+            )));
+        }
+    } else {
+        return Err(Error::AttestationVerification(
+            "VCEK public key missing curve parameters".into()
+        ));
+    }
+
     let chain_certs = parse_pem_chain(cert_chain_pem)?;
     if chain_certs.len() < 2 {
         return Err(Error::AttestationVerification(
@@ -977,7 +1021,15 @@ fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -> Result<()
             "Unexpected ASK CN: {}, expected SEV-Genoa", ask_cn
         )));
     }
-    
+
+    let vcek_subject = &vcek_cert.tbs_certificate.subject;
+    let vcek_cn = extract_cn(vcek_subject)?;
+    if vcek_cn != "SEV-VCEK" {
+        return Err(Error::AttestationVerification(format!(
+            "Unexpected VCEK CN: {}, expected SEV-VCEK", vcek_cn
+        )));
+    }
+
     // === STEP 3: Verify ARK self-signature (RSA-PSS SHA-384) ===
     let ark_pubkey = extract_pubkey_from_cert(ark_der)?;
     let ark_tbs = extract_tbs_from_cert(ark_der)?;
