@@ -26,8 +26,9 @@ pub struct AttestationDocument {
 }
 
 /// Measurement registers from the enclave
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Measurement {
+    #[serde(rename = "type")]
     pub type_: PredicateType,
     pub registers: Vec<String>,
 }
@@ -102,11 +103,38 @@ impl Measurement {
         Ok(())
     }
     
-    /// Compute fingerprint of measurement
+    /// Compute fingerprint of measurement for its own type.
     pub fn fingerprint(&self) -> String {
+        self.fingerprint_for_target(&self.type_)
+    }
+
+    /// Compute fingerprint for a specific target platform type.
+    ///
+    /// For SEV-SNP (SevGuestV2), uses only the first register.
+    /// For multi-platform source targeting SNP, extracts the SNP register.
+    pub fn fingerprint_for_target(&self, target_type: &PredicateType) -> String {
         use sha2::{Sha256, Digest};
-        
-        let joined = self.registers.join("|");
+
+        let registers: Vec<&str> = match (&self.type_, target_type) {
+            // Multi-platform source targeting SEV-SNP: use first register (SNP measurement)
+            (PredicateType::SnpTdxMultiPlatformV1, PredicateType::SevGuestV2) => {
+                vec![self.registers.first().map(|s| s.as_str()).unwrap_or("")]
+            }
+            // SEV-SNP measurement: use first register
+            (PredicateType::SevGuestV2, _) => {
+                vec![self.registers.first().map(|s| s.as_str()).unwrap_or("")]
+            }
+            // TDX measurement: all 5 registers
+            (PredicateType::TdxGuestV2, _) => {
+                self.registers.iter().map(|s| s.as_str()).collect()
+            }
+            // Default: use all registers
+            _ => {
+                self.registers.iter().map(|s| s.as_str()).collect()
+            }
+        };
+
+        let joined = registers.join("|");
         let hash = Sha256::digest(joined.as_bytes());
         hex::encode(hash)
     }
@@ -150,17 +178,25 @@ pub struct Verification {
 }
 
 /// Ground truth after full verification
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroundTruth {
     /// TLS certificate fingerprint to pin
-    pub tls_public_key: String,
-    
-    /// HPKE public key for EHBP (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_public_key: Option<String>,
+
+    /// HPKE public key for encrypted communication (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hpke_public_key: Option<String>,
-    
-    /// Expected measurement (from config or Sigstore)
-    pub expected_measurement: Measurement,
-    
-    /// Actual measurement (from enclave)
+
+    /// Code measurement (from Sigstore or config)
+    pub code_measurement: Measurement,
+
+    /// Enclave measurement (from hardware attestation)
     pub enclave_measurement: Measurement,
+
+    /// Fingerprint of code measurement
+    pub code_fingerprint: String,
+
+    /// Fingerprint of enclave measurement
+    pub enclave_fingerprint: String,
 }
