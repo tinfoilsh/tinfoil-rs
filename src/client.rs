@@ -109,7 +109,13 @@ impl SecureClient {
     pub fn ground_truth(&self) -> Option<&GroundTruth> {
         self.ground_truth.as_ref()
     }
-    
+
+    /// Get the ground truth as a JSON string
+    pub fn ground_truth_json(&self) -> Result<String> {
+        let gt = self.ground_truth.as_ref().ok_or(Error::NotVerified)?;
+        serde_json::to_string(gt).map_err(Error::Json)
+    }
+
     /// Verify the enclave attestation and set up TLS pinning
     /// 
     /// This performs full verification:
