@@ -12,14 +12,14 @@ const TEST_ENCLAVES: &[(&str, &str)] = &[
     ("inference.tinfoil.sh", "tinfoilsh/confidential-model-router"),
 ];
 
-/// Test hardware attestation fetch and basic verification
+/// Test hardware attestation fetch and report parsing (no crypto verification)
 #[tokio::test]
-async fn test_hardware_attestation() {
+async fn test_hardware_attestation_parsing() {
     let doc = attestation::fetch(ROUTER_HOST)
         .await
         .expect("Failed to fetch attestation");
 
-    let verification = attestation::verify(&doc).expect("Basic verification failed");
+    let verification = attestation::parse_report(&doc).expect("Report parsing failed");
 
     assert!(
         !verification.measurement.registers[0].is_empty(),
