@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 
 const ROUTER_URL: &str = "https://atc.tinfoil.sh/routers?platform=snp";
 
-/// Default router to use if discovery fails
+/// Default router hostname
 pub const DEFAULT_ROUTER: &str = "inference.tinfoil.sh";
 
 /// Default repository for the confidential model router
