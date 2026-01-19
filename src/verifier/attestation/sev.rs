@@ -67,6 +67,10 @@ const COMMITTED_MAJOR_OFFSET: usize = 0x1EE;
 // Signer info field offset
 const SIGNER_INFO_OFFSET: usize = 0x48;
 
+// Signature algorithm field offset (must be 1 for ECDSA P-384 SHA-384)
+const SIGNATURE_ALGO_OFFSET: usize = 0x34;
+const SIGNATURE_ALGO_ECDSA_P384_SHA384: u32 = 1;
+
 // AMD VCEK certificate OID extensions (arc: 1.3.6.1.4.1.3704.1)
 const OID_BL_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 1];
 const OID_TEE_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 2];
@@ -375,6 +379,17 @@ fn validate_report_structure(report: &[u8]) -> Result<()> {
 fn validate_report_fields(report: &[u8]) -> Result<bool> {
     // Validate all MBZ (Must Be Zero) fields first
     validate_mbz_fields(report)?;
+
+    // Validate signature algorithm (must be 1 = ECDSA P-384 SHA-384)
+    let signature_algo = u32::from_le_bytes(
+        report[SIGNATURE_ALGO_OFFSET..SIGNATURE_ALGO_OFFSET + 4].try_into().unwrap()
+    );
+    if signature_algo != SIGNATURE_ALGO_ECDSA_P384_SHA384 {
+        return Err(Error::AttestationVerification(format!(
+            "Unsupported signature algorithm: {}, only ECDSA P-384 SHA-384 (1) is supported",
+            signature_algo
+        )));
+    }
 
     // Validate signer info field (returns maskChipKey for HWID validation)
     let mask_chip_key = validate_signer_info(report)?;
