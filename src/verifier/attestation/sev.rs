@@ -964,10 +964,24 @@ fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -> Result<()
     
     let ask_cert = Certificate::from_der(ask_der)
         .map_err(|e| Error::AttestationVerification(format!("Failed to parse ASK: {}", e)))?;
-    
+
     let ark_cert = Certificate::from_der(ark_der)
         .map_err(|e| Error::AttestationVerification(format!("Failed to parse ARK: {}", e)))?;
-    
+
+    // Validate ARK certificate version (must be v3)
+    if ark_cert.tbs_certificate.version != x509_cert::certificate::Version::V3 {
+        return Err(Error::AttestationVerification(
+            "ARK certificate version is not v3".into()
+        ));
+    }
+
+    // Validate ASK certificate version (must be v3)
+    if ask_cert.tbs_certificate.version != x509_cert::certificate::Version::V3 {
+        return Err(Error::AttestationVerification(
+            "ASK certificate version is not v3".into()
+        ));
+    }
+
     // === STEP 1: Verify ARK public key matches pinned fingerprint ===
     // This is the root of trust - if this matches, we know we have AMD's genuine ARK
     let ark_fingerprint = compute_spki_fingerprint(ark_der)?;
