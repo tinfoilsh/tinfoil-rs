@@ -53,6 +53,11 @@ const POLICY_DEBUG_BIT: u64 = 1 << 19;
 const POLICY_MIGRATE_MA_BIT: u64 = 1 << 18;
 const POLICY_SMT_BIT: u64 = 1 << 16;
 
+// TCB field offsets for MBZ validation
+const CURRENT_TCB_OFFSET: usize = 0x38;
+const COMMITTED_TCB_OFFSET: usize = 0x1E0;
+const LAUNCH_TCB_OFFSET: usize = 0x1F0;
+
 // Signature component sizes (AMD SEV-SNP ECDSA P-384)
 // Each component (R, S) is stored in 72 bytes (48 bytes value + 24 bytes padding)
 // Values are in little-endian format
@@ -70,6 +75,79 @@ const SIG_VALUE_SIZE: usize = 48;  // P-384 scalar size
 ///   openssl pkey -pubin -outform DER | sha256sum
 /// ```
 const AMD_ARK_GENOA_SPKI_FINGERPRINT: &str = "429a69c9422aa258ee4d8db5fcda9c6470ef15f8cd5a9cebd6cbc7d90b863831";
+
+/// Validate that a byte range is all zeros (Must Be Zero)
+fn validate_mbz_bytes(report: &[u8], start: usize, end: usize, field_name: &str) -> Result<()> {
+    if report[start..end].iter().any(|&b| b != 0) {
+        return Err(Error::AttestationVerification(format!(
+            "MBZ field {} at [0x{:x}:0x{:x}] contains non-zero bytes",
+            field_name, start, end
+        )));
+    }
+    Ok(())
+}
+
+/// Validate that reserved bits 47-16 in a TCB field are zero
+fn validate_tcb_mbz(tcb: u64, field_name: &str) -> Result<()> {
+    // Bits 47-16 (32 bits) must be zero
+    let reserved_bits = (tcb >> 16) & 0xFFFF_FFFF;
+    if reserved_bits != 0 {
+        return Err(Error::AttestationVerification(format!(
+            "{} has non-zero reserved bits 47-16: 0x{:x}",
+            field_name, tcb
+        )));
+    }
+    Ok(())
+}
+
+/// Validate all MBZ (Must Be Zero) fields in the report per AMD SEV-SNP spec
+fn validate_mbz_fields(report: &[u8]) -> Result<()> {
+    let version = u32::from_le_bytes([report[0], report[1], report[2], report[3]]);
+
+    // Reserved after signer_info: 0x4C-0x50 (4 bytes)
+    validate_mbz_bytes(report, 0x4C, 0x50, "reserved_after_signer_info")?;
+
+    // Reserved area depends on version
+    // Version 3+: family/model/stepping at 0x188-0x18B, so MBZ is 0x18B-0x1A0
+    // Version 2: MBZ is 0x188-0x1A0
+    if version >= 3 {
+        validate_mbz_bytes(report, 0x18B, 0x1A0, "reserved_v3")?;
+    } else {
+        validate_mbz_bytes(report, 0x188, 0x1A0, "reserved_v2")?;
+    }
+
+    // Reserved after current version fields: 0x1EB-0x1EC (1 byte)
+    validate_mbz_bytes(report, 0x1EB, 0x1EC, "reserved_after_current_version")?;
+
+    // Reserved after committed version fields: 0x1EF-0x1F0 (1 byte)
+    validate_mbz_bytes(report, 0x1EF, 0x1F0, "reserved_after_committed_version")?;
+
+    // Reserved before signature: 0x1F8-0x2A0 (168 bytes)
+    validate_mbz_bytes(report, 0x1F8, 0x2A0, "reserved_before_signature")?;
+
+    // Validate TCB fields have reserved bits 47-16 as zero
+    let current_tcb = u64::from_le_bytes(
+        report[CURRENT_TCB_OFFSET..CURRENT_TCB_OFFSET + 8].try_into().unwrap()
+    );
+    validate_tcb_mbz(current_tcb, "current_tcb")?;
+
+    let reported_tcb = u64::from_le_bytes(
+        report[REPORTED_TCB_OFFSET..REPORTED_TCB_OFFSET + 8].try_into().unwrap()
+    );
+    validate_tcb_mbz(reported_tcb, "reported_tcb")?;
+
+    let committed_tcb = u64::from_le_bytes(
+        report[COMMITTED_TCB_OFFSET..COMMITTED_TCB_OFFSET + 8].try_into().unwrap()
+    );
+    validate_tcb_mbz(committed_tcb, "committed_tcb")?;
+
+    let launch_tcb = u64::from_le_bytes(
+        report[LAUNCH_TCB_OFFSET..LAUNCH_TCB_OFFSET + 8].try_into().unwrap()
+    );
+    validate_tcb_mbz(launch_tcb, "launch_tcb")?;
+
+    Ok(())
+}
 
 /// Parse AMD SEV-SNP attestation report and extract measurements without cryptographic verification.
 /// For full security, use `verify_full()`.
@@ -184,6 +262,9 @@ fn validate_report_structure(report: &[u8]) -> Result<()> {
 
 /// Validate report fields against production requirements
 fn validate_report_fields(report: &[u8]) -> Result<()> {
+    // Validate all MBZ (Must Be Zero) fields first
+    validate_mbz_fields(report)?;
+
     // Extract and validate guest policy
     let policy = u64::from_le_bytes(
         report[POLICY_OFFSET..POLICY_OFFSET + 8].try_into().unwrap()
