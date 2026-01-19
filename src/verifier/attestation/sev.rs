@@ -243,7 +243,7 @@ pub async fn verify_full(body: &str) -> Result<Verification> {
     validate_report_structure(&report_bytes)?;
 
     // 3. Validate report fields (policy, version, TCB)
-    validate_report_fields(&report_bytes)?;
+    let mask_chip_key = validate_report_fields(&report_bytes)?;
 
     // 4. Extract chip_id and TCB for VCEK lookup
     let chip_id = &report_bytes[CHIP_ID_OFFSET..CHIP_ID_OFFSET + CHIP_ID_SIZE];
@@ -259,10 +259,13 @@ pub async fn verify_full(body: &str) -> Result<Verification> {
     // 7. Validate VCEK extensions match report TCB
     validate_vcek_extensions(&vcek, reported_tcb)?;
 
-    // 8. Verify report signature against VCEK
+    // 8. Validate VCEK HWID matches chip_id
+    validate_vcek_hwid(&vcek, chip_id, mask_chip_key)?;
+
+    // 9. Verify report signature against VCEK
     verify_report_signature_full(&report_bytes, &vcek)?;
 
-    // 9. Extract measurements and keys
+    // 10. Extract measurements and keys
     let measurement_bytes = &report_bytes[MEASUREMENT_OFFSET..MEASUREMENT_OFFSET + MEASUREMENT_SIZE];
     let report_data = &report_bytes[REPORT_DATA_OFFSET..REPORT_DATA_OFFSET + REPORT_DATA_SIZE];
     let tls_fp = hex::encode(&report_data[..32]);
@@ -312,12 +315,13 @@ fn validate_report_structure(report: &[u8]) -> Result<()> {
 }
 
 /// Validate report fields against production requirements
-fn validate_report_fields(report: &[u8]) -> Result<()> {
+/// Returns maskChipKey flag for HWID validation
+fn validate_report_fields(report: &[u8]) -> Result<bool> {
     // Validate all MBZ (Must Be Zero) fields first
     validate_mbz_fields(report)?;
 
-    // Validate signer info field (returns maskChipKey for later HWID validation)
-    let _mask_chip_key = validate_signer_info(report)?;
+    // Validate signer info field (returns maskChipKey for HWID validation)
+    let mask_chip_key = validate_signer_info(report)?;
 
     // Extract and validate guest policy
     let policy = u64::from_le_bytes(
@@ -415,7 +419,7 @@ fn validate_report_fields(report: &[u8]) -> Result<()> {
         )));
     }
 
-    Ok(())
+    Ok(mask_chip_key)
 }
 
 /// Parse R and S from the signature bytes
@@ -612,6 +616,36 @@ fn get_vcek_extension(vcek_der: &[u8], target_oid: &[u64]) -> Result<Option<Vec<
         }
     }
     Ok(None)
+}
+
+/// Validate VCEK HWID matches report chip_id
+///
+/// If maskChipKey is set in the report, chip_id must be all zeros.
+/// Otherwise, HWID from VCEK must match chip_id from report.
+fn validate_vcek_hwid(vcek_der: &[u8], chip_id: &[u8], mask_chip_key: bool) -> Result<()> {
+    if mask_chip_key {
+        // If maskChipKey is set, chip_id must be all zeros
+        if chip_id.iter().any(|&b| b != 0) {
+            return Err(Error::AttestationVerification(
+                "maskChipKey is set but CHIP_ID is not zeroed".into()
+            ));
+        }
+        return Ok(());
+    }
+
+    // Extract HWID from VCEK OID extension
+    let hwid = get_vcek_extension(vcek_der, OID_HWID)?
+        .ok_or_else(|| Error::AttestationVerification("Missing HWID in VCEK".into()))?;
+
+    // HWID is raw bytes (64 bytes for chip_id)
+    if hwid != chip_id {
+        return Err(Error::AttestationVerification(format!(
+            "VCEK HWID does not match report CHIP_ID: expected {}, got {}",
+            hex::encode(chip_id), hex::encode(&hwid)
+        )));
+    }
+
+    Ok(())
 }
 
 /// Validate VCEK certificate extensions against report TCB values
