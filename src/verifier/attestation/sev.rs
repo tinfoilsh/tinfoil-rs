@@ -52,6 +52,7 @@ const MIN_VERSION_MINOR: u8 = 55;
 const POLICY_DEBUG_BIT: u64 = 1 << 19;
 const POLICY_MIGRATE_MA_BIT: u64 = 1 << 18;
 const POLICY_SMT_BIT: u64 = 1 << 16;
+const POLICY_RESERVED_BIT_17: u64 = 1 << 17;
 
 // TCB field offsets for MBZ validation
 const CURRENT_TCB_OFFSET: usize = 0x38;
@@ -269,6 +270,21 @@ fn validate_report_fields(report: &[u8]) -> Result<()> {
     let policy = u64::from_le_bytes(
         report[POLICY_OFFSET..POLICY_OFFSET + 8].try_into().unwrap()
     );
+
+    // Bit 17 must be 1 (reserved per AMD spec)
+    if policy & POLICY_RESERVED_BIT_17 == 0 {
+        return Err(Error::AttestationVerification(
+            "Policy bit 17 must be 1 (reserved)".into()
+        ));
+    }
+
+    // Bits 63-26 must be zero
+    if policy >> 26 != 0 {
+        return Err(Error::AttestationVerification(format!(
+            "Policy bits 63-26 must be zero, got 0x{:x}",
+            policy >> 26
+        )));
+    }
 
     // Debug must be disabled
     if policy & POLICY_DEBUG_BIT != 0 {
