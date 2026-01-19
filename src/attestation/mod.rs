@@ -1,12 +1,12 @@
 //! Attestation verification module
-//! 
+//!
 //! Implements the three-step Tinfoil verification process:
-//! 
+//!
 //! ## Step 1: Enclave Runtime Verification (Hardware Attestation)
 //! Verifies the enclave is running in genuine secure hardware:
 //! - Fetch attestation document from `/.well-known/tinfoil-attestation`
-//! - Parse SEV-SNP or TDX report
-//! - Verify AMD/Intel certificate chain to hardware root
+//! - Parse SEV-SNP report
+//! - Verify AMD certificate chain to hardware root
 //! - Extract measurement and TLS fingerprint
 //! 
 //! ## Step 2: Code Integrity Verification (Sigstore)
@@ -25,7 +25,6 @@
 
 pub mod types;
 pub mod sev;
-pub mod tdx;
 
 // Re-export public types
 pub use types::{AttestationDocument, PredicateType, Verification, Measurement, GroundTruth, MeasurementError};
@@ -64,9 +63,11 @@ pub async fn fetch(host: &str) -> Result<AttestationDocument> {
 pub fn verify(doc: &AttestationDocument) -> Result<Verification> {
     match doc.format {
         PredicateType::SevGuestV2 => sev::verify(&doc.body),
-        PredicateType::TdxGuestV2 => tdx::verify(&doc.body),
+        PredicateType::TdxGuestV2 => Err(Error::UnsupportedFormat(
+            "Intel TDX attestation not yet implemented".into()
+        )),
         PredicateType::SnpTdxMultiPlatformV1 => {
-            // Multi-platform format - try SEV-SNP first
+            // Multi-platform format - use SEV-SNP verification
             sev::verify(&doc.body)
         }
         PredicateType::Unknown => Err(Error::AttestationVerification(
@@ -84,11 +85,9 @@ pub fn verify(doc: &AttestationDocument) -> Result<Verification> {
 pub async fn verify_full(doc: &AttestationDocument) -> Result<Verification> {
     match doc.format {
         PredicateType::SevGuestV2 => sev::verify_full(&doc.body).await,
-        PredicateType::TdxGuestV2 => {
-            // TDX full verification not yet implemented
-            // Fall back to basic verification
-            tdx::verify(&doc.body)
-        }
+        PredicateType::TdxGuestV2 => Err(Error::UnsupportedFormat(
+            "Intel TDX attestation not yet implemented".into()
+        )),
         PredicateType::SnpTdxMultiPlatformV1 => {
             sev::verify_full(&doc.body).await
         }

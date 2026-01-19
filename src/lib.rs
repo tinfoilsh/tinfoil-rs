@@ -71,3 +71,4 @@ pub mod tls;
 pub use client::SecureClient;
 pub use error::Error;
 pub use api::{ChatMessage, ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse};
+pub use attestation::{GroundTruth, Measurement, PredicateType};
