@@ -79,8 +79,10 @@ impl SecureClient {
         let routers = match crate::discovery::fetch_routers().await {
             Ok(r) => r,
             Err(_) => {
-                // Fall back to default router
-                return Ok(Self::new(crate::discovery::DEFAULT_ROUTER, api_key));
+                // Fall back to default router, but still verify it
+                let mut client = Self::new(crate::discovery::DEFAULT_ROUTER, api_key);
+                client.verify().await?;
+                return Ok(client);
             }
         };
 
@@ -91,8 +93,10 @@ impl SecureClient {
             }
         }
 
-        // Fall back to default router
-        Ok(Self::new(crate::discovery::DEFAULT_ROUTER, api_key))
+        // Fall back to default router, but still verify it
+        let mut client = Self::new(crate::discovery::DEFAULT_ROUTER, api_key);
+        client.verify().await?;
+        Ok(client)
     }
 
     /// Get the enclave hostname
