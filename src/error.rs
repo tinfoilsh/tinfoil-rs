@@ -25,6 +25,9 @@ pub enum Error {
     #[error("GitHub API error: {0}")]
     GitHub(String),
 
+    #[error("Network error: {0}")]
+    Network(String),
+
     #[error("Unsupported attestation format: {0}")]
     UnsupportedFormat(String),
 
