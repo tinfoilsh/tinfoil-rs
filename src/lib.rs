@@ -60,6 +60,7 @@
 
 pub mod attestation;
 pub mod client;
+pub mod embedded;
 pub mod error;
 pub mod tls;
 pub mod api;
