@@ -22,13 +22,12 @@ struct InTotoStatement {
     _type_: String,
     predicate_type: String,
     predicate: serde_json::Value,
-    #[allow(dead_code)]
     subject: Vec<Subject>,
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct Subject {
+    #[allow(dead_code)]
     name: String,
     digest: std::collections::HashMap<String, String>,
 }
@@ -67,8 +66,8 @@ pub async fn verify_repo(repo: &str) -> Result<Measurement> {
     let cert_info = extract_certificate_info(&bundle)?;
     verify_certificate_identity(&cert_info, repo)?;
     
-    // 7. Extract measurement from verified bundle
-    extract_measurement_from_bundle(&bundle)
+    // 7. Extract measurement from verified bundle and verify digest matches
+    extract_measurement_from_bundle(&bundle, &digest)
 }
 
 /// Compute DSSE Pre-Authentication Encoding (PAE)
@@ -304,22 +303,36 @@ fn verify_certificate_identity(cert_info: &CertificateInfo, expected_repo: &str)
     Ok(())
 }
 
-/// Extract measurement from a bundle's DSSE envelope
-fn extract_measurement_from_bundle(bundle: &serde_json::Value) -> Result<Measurement> {
+/// Extract measurement from a bundle's DSSE envelope and verify digest matches
+fn extract_measurement_from_bundle(bundle: &serde_json::Value, expected_digest: &str) -> Result<Measurement> {
     let dsse_envelope = bundle.get("dsseEnvelope")
         .ok_or_else(|| Error::SigstoreVerification("No dsseEnvelope in bundle".into()))?;
-    
+
     let payload_b64 = dsse_envelope.get("payload")
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::SigstoreVerification("No payload in DSSE envelope".into()))?;
-    
+
     let payload_bytes = base64::engine::general_purpose::STANDARD
         .decode(payload_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode payload: {}", e)))?;
-    
+
     let statement: InTotoStatement = serde_json::from_slice(&payload_bytes)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to parse statement: {}", e)))?;
-    
+
+    // Verify that the provided digest matches the digest in the DSSE payload subject
+    let subject = statement.subject.first()
+        .ok_or_else(|| Error::SigstoreVerification("No subject in statement".into()))?;
+
+    let payload_digest = subject.digest.get("sha256")
+        .ok_or_else(|| Error::SigstoreVerification("No sha256 digest in subject".into()))?;
+
+    if payload_digest != expected_digest {
+        return Err(Error::SigstoreVerification(format!(
+            "Provided digest does not match verified DSSE payload digest. Expected: {}, Got: {}",
+            expected_digest, payload_digest
+        )));
+    }
+
     let measurement_type = match statement.predicate_type.as_str() {
         "https://tinfoil.sh/predicate/sev-snp-guest/v2" => PredicateType::SevGuestV2,
         "https://tinfoil.sh/predicate/tdx-guest/v2" => PredicateType::TdxGuestV2,
