@@ -71,6 +71,9 @@ const SIGNER_INFO_OFFSET: usize = 0x48;
 const SIGNATURE_ALGO_OFFSET: usize = 0x34;
 const SIGNATURE_ALGO_ECDSA_P384_SHA384: u32 = 1;
 
+// ECDSA P-384 signature size (R + S components, each 72 bytes = 48 bytes value + 24 bytes padding)
+const ECDSA_P384_SIGNATURE_SIZE: usize = 144;
+
 // AMD VCEK certificate OID extensions (arc: 1.3.6.1.4.1.3704.1)
 const OID_BL_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 1];
 const OID_TEE_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 2];
@@ -390,6 +393,15 @@ fn validate_report_fields(report: &[u8]) -> Result<bool> {
             signature_algo
         )));
     }
+
+    // For ECDSA P-384, validate that signature trailing bytes are zeros
+    // The signature area is 512 bytes, but ECDSA P-384 only uses 144 bytes
+    validate_mbz_bytes(
+        report,
+        SIGNATURE_OFFSET + ECDSA_P384_SIGNATURE_SIZE,
+        REPORT_SIZE,
+        "signature_padding"
+    )?;
 
     // Validate signer info field (returns maskChipKey for HWID validation)
     let mask_chip_key = validate_signer_info(report)?;
