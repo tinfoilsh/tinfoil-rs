@@ -58,14 +58,15 @@
 //! }
 //! ```
 
+pub mod api;
 pub mod attestation;
 pub mod client;
+pub mod discovery;
 pub mod embedded;
 pub mod error;
 pub mod github;
-pub mod tls;
-pub mod api;
 pub mod sigstore;
+pub mod tls;
 
 pub use client::SecureClient;
 pub use error::Error;
