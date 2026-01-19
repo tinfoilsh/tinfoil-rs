@@ -44,6 +44,12 @@ async fn test_correct_fingerprint_accepted() {
     let mut report_bytes = Vec::new();
     std::io::Read::read_to_end(&mut decoder, &mut report_bytes).expect("Decompress failed");
 
+    assert!(
+        report_bytes.len() >= 112,
+        "Attestation report too short: expected at least 112 bytes, got {}",
+        report_bytes.len()
+    );
+
     // TLS fingerprint is at offset 80, first 32 bytes
     let tls_fp = hex::encode(&report_bytes[80..112]);
 
