@@ -67,11 +67,34 @@ impl SecureClient {
         }
     }
     
-    /// Create a default client for inference.tinfoil.sh
-    pub fn default_client(api_key: impl Into<String>) -> Self {
-        Self::new("inference.tinfoil.sh", api_key)
+    /// Create a verified client using router discovery with fallback.
+    ///
+    /// This function:
+    /// 1. Fetches available routers from the discovery endpoint
+    /// 2. Tries each router until one verifies successfully
+    /// 3. Falls back to default router if all routers fail
+    pub async fn new_default_client(api_key: impl Into<String>) -> Result<Self> {
+        let api_key = api_key.into();
+
+        let routers = match crate::discovery::fetch_routers().await {
+            Ok(r) => r,
+            Err(_) => {
+                // Fall back to default router
+                return Ok(Self::new(crate::discovery::DEFAULT_ROUTER, api_key));
+            }
+        };
+
+        for router in routers {
+            let mut client = Self::new(&router, api_key.clone());
+            if client.verify().await.is_ok() {
+                return Ok(client);
+            }
+        }
+
+        // Fall back to default router
+        Ok(Self::new(crate::discovery::DEFAULT_ROUTER, api_key))
     }
-    
+
     /// Get the enclave hostname
     pub fn host(&self) -> &str {
         &self.host
@@ -288,12 +311,6 @@ mod tests {
         let client = SecureClient::new("inference.tinfoil.sh", "test-key");
         assert_eq!(client.host(), "inference.tinfoil.sh");
         assert!(!client.is_verified());
-    }
-    
-    #[test]
-    fn test_default_client() {
-        let client = SecureClient::default_client("test-key");
-        assert_eq!(client.host(), "inference.tinfoil.sh");
     }
     
     #[test]
