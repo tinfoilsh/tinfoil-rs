@@ -478,6 +478,40 @@ fn validate_report_fields(report: &[u8]) -> Result<bool> {
         )));
     }
 
+    // Validate LAUNCH_TCB meets minimum requirements
+    let launch_tcb = u64::from_le_bytes(
+        report[LAUNCH_TCB_OFFSET..LAUNCH_TCB_OFFSET + 8].try_into().unwrap()
+    );
+
+    let launch_bl_spl = (launch_tcb & 0xFF) as u8;
+    let launch_tee_spl = ((launch_tcb >> 8) & 0xFF) as u8;
+    let launch_snp_spl = ((launch_tcb >> 48) & 0xFF) as u8;
+    let launch_ucode_spl = ((launch_tcb >> 56) & 0xFF) as u8;
+
+    if launch_bl_spl < MIN_BL_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "Launch boot loader SPL {} is below minimum {}", launch_bl_spl, MIN_BL_SPL
+        )));
+    }
+
+    if launch_tee_spl < MIN_TEE_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "Launch TEE SPL {} is below minimum {}", launch_tee_spl, MIN_TEE_SPL
+        )));
+    }
+
+    if launch_snp_spl < MIN_SNP_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "Launch SNP SPL {} is below minimum {}", launch_snp_spl, MIN_SNP_SPL
+        )));
+    }
+
+    if launch_ucode_spl < MIN_UCODE_SPL {
+        return Err(Error::AttestationVerification(format!(
+            "Launch microcode SPL {} is below minimum {}", launch_ucode_spl, MIN_UCODE_SPL
+        )));
+    }
+
     Ok(mask_chip_key)
 }
 
