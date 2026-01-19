@@ -8,9 +8,9 @@
 //! 4. Validating the certificate is from GitHub Actions
 //! 5. Extracting the expected measurement
 
-use crate::attestation::types::{Measurement, PredicateType};
+use super::attestation::types::{Measurement, PredicateType};
+use super::github;
 use crate::error::{Error, Result};
-use crate::github;
 use base64::Engine;
 use serde::Deserialize;
 

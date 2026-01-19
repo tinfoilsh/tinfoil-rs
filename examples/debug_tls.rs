@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Cert count: {}", certs.len());
     
     // Compute fingerprint using our function
-    let fp = tinfoil::tls::cert_pubkey_fingerprint(&certs[0])?;
+    let fp = tinfoil::verifier::tls::cert_pubkey_fingerprint(&certs[0])?;
     println!("Our fingerprint:      {}", fp);
     
     // Also compute using raw bytes

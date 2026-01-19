@@ -30,7 +30,7 @@ pub mod sev;
 pub use types::{AttestationDocument, PredicateType, Verification, Measurement, GroundTruth, MeasurementError};
 
 use crate::error::{Error, Result};
-use crate::sigstore;
+use super::sigstore;
 
 /// Fetch attestation document from an enclave
 pub async fn fetch(host: &str) -> Result<AttestationDocument> {

@@ -346,7 +346,7 @@ async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
 
 /// Get AMD certificate chain (ASK + ARK) from embedded assets
 async fn fetch_cert_chain() -> Result<Vec<u8>> {
-    Ok(crate::embedded::GENOA_CERT_CHAIN.to_vec())
+    Ok(crate::verifier::embedded::GENOA_CERT_CHAIN.to_vec())
 }
 
 /// Parse PEM certificates from the chain
