@@ -61,6 +61,121 @@ fn load_rekor_keys() -> Result<Vec<(String, Vec<u8>, String)>> {
     Ok(keys)
 }
 
+/// Verify that the certificate in the bundle matches the certificate in the Rekor entry.
+///
+/// This is critical for security: the Rekor entry's canonicalizedBody contains the
+/// certificate that was actually logged. If we don't verify this binding, an attacker
+/// could substitute a different certificate in the bundle while keeping the valid
+/// Rekor entry, bypassing the transparency log protection.
+fn verify_certificate_binding(bundle: &serde_json::Value, canonicalized_body: &[u8]) -> Result<()> {
+    // Parse the canonicalizedBody as JSON
+    let entry: serde_json::Value = serde_json::from_slice(canonicalized_body)
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse canonicalizedBody: {}", e)))?;
+
+    // Determine the entry kind and extract certificate accordingly
+    let kind = entry.get("kind")
+        .and_then(|k| k.as_str())
+        .unwrap_or("unknown");
+
+    let rekor_cert_der = match kind {
+        "dsse" => {
+            // DSSE format: spec.signatures[0].verifier contains base64-encoded PEM
+            let verifier_b64 = entry
+                .get("spec")
+                .and_then(|s| s.get("signatures"))
+                .and_then(|s| s.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|sig| sig.get("verifier"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Error::SigstoreVerification(
+                    "Missing certificate in DSSE Rekor entry (spec.signatures[0].verifier)".into()
+                ))?;
+
+            // Decode base64 to get PEM string
+            let verifier_pem_bytes = base64::engine::general_purpose::STANDARD
+                .decode(verifier_b64)
+                .map_err(|e| Error::SigstoreVerification(format!("Failed to decode verifier: {}", e)))?;
+
+            let verifier_pem = String::from_utf8(verifier_pem_bytes)
+                .map_err(|e| Error::SigstoreVerification(format!("Invalid UTF-8 in verifier: {}", e)))?;
+
+            // Parse PEM to get DER
+            parse_pem_certificate(&verifier_pem)?
+        }
+        "hashedrekord" => {
+            // hashedrekord format: spec.signature.publicKey.content contains raw PEM
+            let rekor_cert_pem = entry
+                .get("spec")
+                .and_then(|s| s.get("signature"))
+                .and_then(|s| s.get("publicKey"))
+                .and_then(|pk| pk.get("content"))
+                .and_then(|c| c.as_str())
+                .ok_or_else(|| Error::SigstoreVerification(
+                    "Missing certificate in hashedrekord Rekor entry (spec.signature.publicKey.content)".into()
+                ))?;
+
+            parse_pem_certificate(rekor_cert_pem)?
+        }
+        _ => {
+            return Err(Error::SigstoreVerification(format!(
+                "Unknown Rekor entry kind: {}. Expected 'dsse' or 'hashedrekord'", kind
+            )));
+        }
+    };
+
+    // Get certificate from bundle (base64-encoded DER in verificationMaterial.certificate.rawBytes)
+    let bundle_cert_b64 = bundle
+        .get("verificationMaterial")
+        .and_then(|vm| vm.get("certificate"))
+        .and_then(|c| c.get("rawBytes"))
+        .and_then(|rb| rb.as_str())
+        .ok_or_else(|| Error::SigstoreVerification(
+            "Missing certificate in bundle (verificationMaterial.certificate.rawBytes)".into()
+        ))?;
+
+    // Decode the bundle certificate from base64
+    let bundle_cert_der = base64::engine::general_purpose::STANDARD
+        .decode(bundle_cert_b64)
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode bundle certificate: {}", e)))?;
+
+    // Compare the DER bytes
+    if rekor_cert_der != bundle_cert_der {
+        return Err(Error::SigstoreVerification(
+            "Certificate mismatch: bundle certificate does not match Rekor entry certificate. \
+             This could indicate a substitution attack.".into()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Parse a PEM-encoded certificate and return the DER bytes.
+fn parse_pem_certificate(pem: &str) -> Result<Vec<u8>> {
+    // Find the certificate content between BEGIN and END markers
+    let begin_marker = "-----BEGIN CERTIFICATE-----";
+    let end_marker = "-----END CERTIFICATE-----";
+
+    let start = pem.find(begin_marker)
+        .ok_or_else(|| Error::SigstoreVerification("Invalid PEM: missing BEGIN CERTIFICATE".into()))?;
+    let end = pem.find(end_marker)
+        .ok_or_else(|| Error::SigstoreVerification("Invalid PEM: missing END CERTIFICATE".into()))?;
+
+    if start >= end {
+        return Err(Error::SigstoreVerification("Invalid PEM: markers in wrong order".into()));
+    }
+
+    // Extract the base64 content (skip the BEGIN marker)
+    let b64_content: String = pem[start + begin_marker.len()..end]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+
+    // Decode the base64 to get DER bytes
+    base64::engine::general_purpose::STANDARD
+        .decode(&b64_content)
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode PEM certificate: {}", e)))
+}
+
 /// Verify Rekor transparency log entry with full cryptographic verification.
 ///
 /// This verifies:
@@ -68,6 +183,7 @@ fn load_rekor_keys() -> Result<Vec<(String, Vec<u8>, String)>> {
 /// 2. The integrated time is within the certificate's validity window
 /// 3. The checkpoint signature is valid (signed by Rekor's key)
 /// 4. The inclusion proof is valid (Merkle path from leaf to root)
+/// 5. The certificate in the bundle matches the one in the Rekor entry
 fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert_not_after: u64) -> Result<()> {
     use sha2::{Sha256, Digest};
 
@@ -175,6 +291,9 @@ fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert_not
     let body_bytes = base64::engine::general_purpose::STANDARD
         .decode(canonicalized_body_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode canonicalizedBody: {}", e)))?;
+
+    // Verify certificate binding: ensure the certificate in the bundle matches the one in the Rekor entry
+    verify_certificate_binding(bundle, &body_bytes)?;
 
     // RFC 6962 leaf hash: SHA256(0x00 || data)
     let mut leaf_hasher = Sha256::new();
