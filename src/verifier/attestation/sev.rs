@@ -269,9 +269,22 @@ fn validate_committed_tcb(report: &[u8]) -> Result<()> {
 
 /// Validate guest policy against required policy constraints.
 ///
-/// This checks both unauthorized capabilities (report has them but required doesn't allow)
-/// and required restrictions (report lacks what required mandates).
+/// This checks:
+/// 1. ABI version compatibility (required version must not exceed report version)
+/// 2. Unauthorized capabilities (report has them but required doesn't allow)
+/// 3. Required restrictions (report lacks what required mandates)
 fn validate_policy(report_policy: &SnpPolicy, required: &SnpPolicy) -> Result<()> {
+    // ABI version check - required version must not be greater than report version
+    let required_version = ((required.abi_major as u16) << 8) | (required.abi_minor as u16);
+    let report_version = ((report_policy.abi_major as u16) << 8) | (report_policy.abi_minor as u16);
+    if required_version > report_version {
+        return Err(Error::AttestationVerification(format!(
+            "Required ABI version ({}.{}) is greater than report's ABI version ({}.{})",
+            required.abi_major, required.abi_minor,
+            report_policy.abi_major, report_policy.abi_minor
+        )));
+    }
+
     // Unauthorized capabilities (report has them, required doesn't allow)
     if !required.migrate_ma && report_policy.migrate_ma {
         return Err(Error::AttestationVerification(
