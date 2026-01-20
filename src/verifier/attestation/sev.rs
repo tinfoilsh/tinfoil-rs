@@ -438,30 +438,28 @@ pub async fn verify_full_with_options(body: &str, options: &ValidationOptions) -
     // 2. Basic structure validation
     validate_report_structure(&report_bytes)?;
 
-    // 3. Validate report fields (policy, version, TCB) using provided options
-    let mask_chip_key = validate_report_fields_with_options(&report_bytes, options)?;
-
-    // 4. Extract chip_id and TCB for VCEK lookup
+    // 3. Extract chip_id and TCB for VCEK lookup
     let chip_id = &report_bytes[CHIP_ID_OFFSET..CHIP_ID_OFFSET + CHIP_ID_SIZE];
     let reported_tcb = &report_bytes[REPORTED_TCB_OFFSET..REPORTED_TCB_OFFSET + 8];
 
-    // 5. Fetch and verify certificate chain
+    // 4. Fetch and verify certificate chain
     let vcek = fetch_vcek(chip_id, reported_tcb).await?;
     let cert_chain = fetch_cert_chain().await?;
 
-    // 6. Verify certificate chain with full cryptographic verification
+    // 5. Verify certificate chain with full cryptographic verification
     verify_cert_chain_crypto(&vcek, &cert_chain)?;
 
-    // 7. Validate VCEK extensions match report TCB
-    validate_vcek_extensions(&vcek, reported_tcb)?;
+    // 6. Validate report with chain (matches Python's validate_report(report, chain, options))
+    // This combines report field validation with VCEK TCB validation
+    let mask_chip_key = validate_report_with_chain(&report_bytes, &vcek, options)?;
 
-    // 8. Validate VCEK HWID matches chip_id
+    // 7. Validate VCEK HWID matches chip_id
     validate_vcek_hwid(&vcek, chip_id, mask_chip_key)?;
 
-    // 9. Verify report signature against VCEK
+    // 8. Verify report signature against VCEK
     verify_report_signature_full(&report_bytes, &vcek)?;
 
-    // 10. Extract measurements and keys
+    // 9. Extract measurements and keys
     let measurement_bytes = &report_bytes[MEASUREMENT_OFFSET..MEASUREMENT_OFFSET + MEASUREMENT_SIZE];
     let report_data = &report_bytes[REPORT_DATA_OFFSET..REPORT_DATA_OFFSET + REPORT_DATA_SIZE];
     let tls_fp = hex::encode(&report_data[..32]);
@@ -508,6 +506,24 @@ fn validate_report_structure(report: &[u8]) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Validate report with certificate chain (matches Python's validate_report(report, chain, options)).
+///
+/// This function combines:
+/// 1. Report field validation (policy, version, TCB) using provided options
+/// 2. VCEK TCB validation (ensures VCEK cert extensions match report TCB)
+///
+/// Returns maskChipKey flag for HWID validation.
+fn validate_report_with_chain(report: &[u8], vcek: &[u8], options: &ValidationOptions) -> Result<bool> {
+    // Validate report fields using options
+    let mask_chip_key = validate_report_fields_with_options(report, options)?;
+
+    // Validate VCEK TCB matches report TCB (like Python's chain.validate_vcek_tcb())
+    let reported_tcb = &report[REPORTED_TCB_OFFSET..REPORTED_TCB_OFFSET + 8];
+    validate_vcek_extensions(vcek, reported_tcb)?;
+
+    Ok(mask_chip_key)
 }
 
 /// Validate report fields using configurable ValidationOptions.
