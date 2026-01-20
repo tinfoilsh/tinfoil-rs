@@ -183,6 +183,154 @@ pub struct Verification {
     pub hpke_public_key: Option<String>,
 }
 
+/// Decoded SNP policy field from attestation report
+#[derive(Debug, Clone, Default)]
+pub struct SnpPolicy {
+    pub abi_minor: u8,
+    pub abi_major: u8,
+    pub smt: bool,
+    pub migrate_ma: bool,
+    pub debug: bool,
+    pub single_socket: bool,
+    pub cxl_allowed: bool,
+    pub mem_aes256_xts: bool,
+    pub rapl_dis: bool,
+    pub ciphertext_hiding_dram: bool,
+    pub page_swap_disabled: bool,
+}
+
+impl SnpPolicy {
+    pub fn from_u64(value: u64) -> Self {
+        Self {
+            abi_minor: (value & 0xFF) as u8,
+            abi_major: ((value >> 8) & 0xFF) as u8,
+            smt: (value & (1 << 16)) != 0,
+            migrate_ma: (value & (1 << 18)) != 0,
+            debug: (value & (1 << 19)) != 0,
+            single_socket: (value & (1 << 20)) != 0,
+            cxl_allowed: (value & (1 << 21)) != 0,
+            mem_aes256_xts: (value & (1 << 22)) != 0,
+            rapl_dis: (value & (1 << 23)) != 0,
+            ciphertext_hiding_dram: (value & (1 << 24)) != 0,
+            page_swap_disabled: (value & (1 << 25)) != 0,
+        }
+    }
+}
+
+/// Decoded SNP platform info field from attestation report
+#[derive(Debug, Clone, Default)]
+pub struct SnpPlatformInfo {
+    pub smt_enabled: bool,
+    pub tsme_enabled: bool,
+    pub ecc_enabled: bool,
+    pub rapl_disabled: bool,
+    pub ciphertext_hiding_dram_enabled: bool,
+    pub alias_check_complete: bool,
+    pub tio_enabled: bool,
+}
+
+impl SnpPlatformInfo {
+    pub fn from_u64(value: u64) -> Self {
+        Self {
+            smt_enabled: (value & (1 << 0)) != 0,
+            tsme_enabled: (value & (1 << 1)) != 0,
+            ecc_enabled: (value & (1 << 2)) != 0,
+            rapl_disabled: (value & (1 << 3)) != 0,
+            ciphertext_hiding_dram_enabled: (value & (1 << 4)) != 0,
+            alias_check_complete: (value & (1 << 5)) != 0,
+            tio_enabled: (value & (1 << 7)) != 0,
+        }
+    }
+}
+
+/// TCB version components
+#[derive(Debug, Clone, Default)]
+pub struct TcbParts {
+    pub bl_spl: u8,
+    pub tee_spl: u8,
+    pub snp_spl: u8,
+    pub ucode_spl: u8,
+}
+
+impl TcbParts {
+    pub fn from_u64(tcb: u64) -> Self {
+        Self {
+            bl_spl: (tcb & 0xFF) as u8,
+            tee_spl: ((tcb >> 8) & 0xFF) as u8,
+            snp_spl: ((tcb >> 48) & 0xFF) as u8,
+            ucode_spl: ((tcb >> 56) & 0xFF) as u8,
+        }
+    }
+
+    pub fn meets_minimum(&self, min: &TcbParts) -> bool {
+        self.bl_spl >= min.bl_spl
+            && self.tee_spl >= min.tee_spl
+            && self.snp_spl >= min.snp_spl
+            && self.ucode_spl >= min.ucode_spl
+    }
+}
+
+/// Validation options for SEV-SNP attestation (mirrors Python's ValidationOptions)
+#[derive(Debug, Clone)]
+pub struct ValidationOptions {
+    /// Policy constraints
+    pub guest_policy: Option<SnpPolicy>,
+    pub minimum_guest_svn: Option<u32>,
+    pub minimum_build: Option<u8>,
+    pub minimum_version: Option<u16>, // (major << 8) | minor
+
+    /// TCB requirements
+    pub minimum_tcb: Option<TcbParts>,
+    pub minimum_launch_tcb: Option<TcbParts>,
+    pub permit_provisional_firmware: bool,
+
+    /// Platform info requirements
+    pub platform_info: Option<SnpPlatformInfo>,
+
+    /// VMPL requirement
+    pub vmpl: Option<u8>,
+}
+
+impl Default for ValidationOptions {
+    fn default() -> Self {
+        Self {
+            guest_policy: Some(SnpPolicy {
+                smt: true,
+                migrate_ma: false,
+                debug: false,
+                single_socket: false,
+                cxl_allowed: false,
+                mem_aes256_xts: false,
+                rapl_dis: false,
+                ciphertext_hiding_dram: false,
+                page_swap_disabled: false,
+                ..Default::default()
+            }),
+            minimum_guest_svn: Some(0),
+            minimum_build: Some(21),
+            minimum_version: Some((1 << 8) | 55), // 1.55
+            minimum_tcb: Some(TcbParts {
+                bl_spl: 0x7,
+                tee_spl: 0,
+                snp_spl: 0xe,
+                ucode_spl: 0x48,
+            }),
+            minimum_launch_tcb: Some(TcbParts {
+                bl_spl: 0x7,
+                tee_spl: 0,
+                snp_spl: 0xe,
+                ucode_spl: 0x48,
+            }),
+            permit_provisional_firmware: false,
+            platform_info: Some(SnpPlatformInfo {
+                smt_enabled: true,
+                ..Default::default()
+            }),
+            vmpl: Some(0),
+        }
+    }
+}
+
 /// Ground truth after full verification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroundTruth {
