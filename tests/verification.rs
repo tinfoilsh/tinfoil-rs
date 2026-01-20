@@ -12,25 +12,6 @@ const TEST_ENCLAVES: &[(&str, &str)] = &[
     ("inference.tinfoil.sh", "tinfoilsh/confidential-model-router"),
 ];
 
-/// Test hardware attestation fetch and report parsing (no crypto verification)
-#[tokio::test]
-async fn test_hardware_attestation_parsing() {
-    let doc = attestation::fetch(ROUTER_HOST)
-        .await
-        .expect("Failed to fetch attestation");
-
-    let verification = attestation::parse_report(&doc).expect("Report parsing failed");
-
-    assert!(
-        !verification.measurement.registers[0].is_empty(),
-        "Measurement should not be empty"
-    );
-    assert!(
-        !verification.tls_public_key_fp.is_empty(),
-        "TLS fingerprint should not be empty"
-    );
-}
-
 /// Test hardware attestation with full AMD certificate chain verification
 #[tokio::test]
 async fn test_full_hardware_attestation() {

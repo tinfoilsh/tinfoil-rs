@@ -17,7 +17,9 @@ use sha2::{Sha256, Sha384, Digest};
 use std::io::Read;
 
 use crate::error::{Error, Result};
-use super::types::{Measurement, PredicateType, SnpPlatformInfo, SnpPolicy, Verification};
+use super::types::{
+    Measurement, PredicateType, SnpPlatformInfo, SnpPolicy, TcbParts, ValidationOptions, Verification,
+};
 
 // SEV-SNP report offsets (v3 report structure)
 const REPORT_DATA_OFFSET: usize = 80;
@@ -39,19 +41,7 @@ const CURRENT_BUILD_OFFSET: usize = 488;  // 0x1E8
 const CURRENT_MINOR_OFFSET: usize = 489;  // 0x1E9
 const CURRENT_MAJOR_OFFSET: usize = 490;  // 0x1EA
 
-// Minimum TCB values for production
-const MIN_BL_SPL: u8 = 0x07;
-const MIN_TEE_SPL: u8 = 0x00;
-const MIN_SNP_SPL: u8 = 0x0e;
-const MIN_UCODE_SPL: u8 = 0x48;
-const MIN_BUILD: u8 = 21;
-const MIN_VERSION_MAJOR: u8 = 1;
-const MIN_VERSION_MINOR: u8 = 55;
-
 // Guest policy bit masks (64-bit policy field)
-const POLICY_DEBUG_BIT: u64 = 1 << 19;
-const POLICY_MIGRATE_MA_BIT: u64 = 1 << 18;
-const POLICY_SMT_BIT: u64 = 1 << 16;
 const POLICY_RESERVED_BIT_17: u64 = 1 << 17;
 
 // TCB field offsets for MBZ validation
@@ -399,53 +389,26 @@ fn validate_vmpl(report: &[u8], expected_vmpl: Option<u8>) -> Result<()> {
     Ok(())
 }
 
-/// Parse AMD SEV-SNP attestation report and extract measurements without cryptographic verification.
-/// For full security, use `verify_full()`.
-pub fn parse_report(body: &str) -> Result<Verification> {
-    // 1. Decode and decompress
-    let report_bytes = decode_report(body)?;
-
-    // 2. Basic structure validation
-    validate_report_structure(&report_bytes)?;
-    
-    // 3. Extract measurement (48 bytes at offset 144)
-    let measurement_bytes = &report_bytes[MEASUREMENT_OFFSET..MEASUREMENT_OFFSET + MEASUREMENT_SIZE];
-    
-    // 4. Extract report data (64 bytes at offset 80)
-    // First 32 bytes: TLS public key fingerprint
-    // Next 32 bytes: HPKE public key
-    let report_data = &report_bytes[REPORT_DATA_OFFSET..REPORT_DATA_OFFSET + REPORT_DATA_SIZE];
-    let tls_fp = hex::encode(&report_data[..32]);
-    let hpke_key = hex::encode(&report_data[32..]);
-    
-    // 5. Verify report signature
-    // This checks that the signature in the report is not trivially invalid
-    // Full VCEK chain verification requires async (fetching certs)
-    verify_report_signature_basic(&report_bytes)?;
-    
-    // 6. Build verification result
-    let measurement = Measurement {
-        type_: PredicateType::SevGuestV2,
-        registers: vec![hex::encode(measurement_bytes)],
-    };
-    
-    Ok(Verification {
-        measurement,
-        tls_public_key_fp: tls_fp,
-        hpke_public_key: Some(hpke_key),
-    })
+/// Full async verification including VCEK fetch and chain validation.
+///
+/// If `options` is `None`, uses `ValidationOptions::default()` which enforces
+/// production-grade security requirements.
+pub async fn verify_full(body: &str) -> Result<Verification> {
+    verify_full_with_options(body, &ValidationOptions::default()).await
 }
 
-/// Full async verification including VCEK fetch and chain validation
-pub async fn verify_full(body: &str) -> Result<Verification> {
+/// Full async verification with custom validation options.
+///
+/// Allows customizing policy, TCB, and platform requirements.
+pub async fn verify_full_with_options(body: &str, options: &ValidationOptions) -> Result<Verification> {
     // 1. Decode and decompress
     let report_bytes = decode_report(body)?;
 
     // 2. Basic structure validation
     validate_report_structure(&report_bytes)?;
 
-    // 3. Validate report fields (policy, version, TCB)
-    let mask_chip_key = validate_report_fields(&report_bytes)?;
+    // 3. Validate report fields (policy, version, TCB) using provided options
+    let mask_chip_key = validate_report_fields_with_options(&report_bytes, options)?;
 
     // 4. Extract chip_id and TCB for VCEK lookup
     let chip_id = &report_bytes[CHIP_ID_OFFSET..CHIP_ID_OFFSET + CHIP_ID_SIZE];
@@ -516,13 +479,13 @@ fn validate_report_structure(report: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Validate report fields against production requirements
-/// Returns maskChipKey flag for HWID validation
-fn validate_report_fields(report: &[u8]) -> Result<bool> {
-    // Validate all MBZ (Must Be Zero) fields first
+/// Validate report fields using configurable ValidationOptions.
+/// Returns maskChipKey flag for HWID validation.
+fn validate_report_fields_with_options(report: &[u8], options: &ValidationOptions) -> Result<bool> {
+    // Validate all MBZ (Must Be Zero) fields first (always required)
     validate_mbz_fields(report)?;
 
-    // Validate signature algorithm (must be 1 = ECDSA P-384 SHA-384)
+    // Validate signature algorithm (must be 1 = ECDSA P-384 SHA-384) (always required)
     let signature_algo = u32::from_le_bytes(
         report[SIGNATURE_ALGO_OFFSET..SIGNATURE_ALGO_OFFSET + 4].try_into().unwrap()
     );
@@ -534,7 +497,6 @@ fn validate_report_fields(report: &[u8]) -> Result<bool> {
     }
 
     // For ECDSA P-384, validate that signature trailing bytes are zeros
-    // The signature area is 512 bytes, but ECDSA P-384 only uses 144 bytes
     validate_mbz_bytes(
         report,
         SIGNATURE_OFFSET + ECDSA_P384_SIGNATURE_SIZE,
@@ -545,206 +507,122 @@ fn validate_report_fields(report: &[u8]) -> Result<bool> {
     // Validate signer info field (returns maskChipKey for HWID validation)
     let mask_chip_key = validate_signer_info(report)?;
 
-    // Reject provisional firmware (committed TCB must match current TCB)
-    validate_committed_tcb(report)?;
+    // Validate provisional firmware if not permitted
+    if !options.permit_provisional_firmware {
+        validate_committed_tcb(report)?;
+    }
 
     // Extract and validate guest policy
-    let policy = u64::from_le_bytes(
+    let policy_raw = u64::from_le_bytes(
         report[POLICY_OFFSET..POLICY_OFFSET + 8].try_into().unwrap()
     );
 
-    // Bit 17 must be 1 (reserved per AMD spec)
-    if policy & POLICY_RESERVED_BIT_17 == 0 {
+    // Bit 17 must be 1 (reserved per AMD spec) - always required
+    if policy_raw & POLICY_RESERVED_BIT_17 == 0 {
         return Err(Error::AttestationVerification(
             "Policy bit 17 must be 1 (reserved)".into()
         ));
     }
 
-    // Bits 63-26 must be zero
-    if policy >> 26 != 0 {
+    // Bits 63-26 must be zero - always required
+    if policy_raw >> 26 != 0 {
         return Err(Error::AttestationVerification(format!(
             "Policy bits 63-26 must be zero, got 0x{:x}",
-            policy >> 26
+            policy_raw >> 26
         )));
     }
 
-    // Debug must be disabled
-    if policy & POLICY_DEBUG_BIT != 0 {
-        return Err(Error::AttestationVerification(
-            "Debug mode is enabled in guest policy".into()
-        ));
+    // Validate guest policy if specified
+    if let Some(ref required_policy) = options.guest_policy {
+        let report_policy = SnpPolicy::from_u64(policy_raw);
+        validate_policy(&report_policy, required_policy)?;
     }
 
-    // Migrate MA must be disabled
-    if policy & POLICY_MIGRATE_MA_BIT != 0 {
-        return Err(Error::AttestationVerification(
-            "Migration agent is enabled in guest policy".into()
-        ));
-    }
-
-    // SMT must be enabled (for performance)
-    if policy & POLICY_SMT_BIT == 0 {
-        return Err(Error::AttestationVerification(
-            "SMT is disabled in guest policy".into()
-        ));
-    }
-
-    // Extract and validate firmware version
+    // Extract and validate firmware version if specified
     let build = report[CURRENT_BUILD_OFFSET];
     let minor = report[CURRENT_MINOR_OFFSET];
     let major = report[CURRENT_MAJOR_OFFSET];
 
-    if build < MIN_BUILD {
-        return Err(Error::AttestationVerification(format!(
-            "Firmware build {} is below minimum {}", build, MIN_BUILD
-        )));
+    if let Some(min_build) = options.minimum_build {
+        if build < min_build {
+            return Err(Error::AttestationVerification(format!(
+                "Firmware build {} is below minimum {}", build, min_build
+            )));
+        }
     }
 
-    // Compare version (major.minor)
-    let version = (major as u16) << 8 | (minor as u16);
-    let min_version = (MIN_VERSION_MAJOR as u16) << 8 | (MIN_VERSION_MINOR as u16);
-    if version < min_version {
-        return Err(Error::AttestationVerification(format!(
-            "Firmware version {}.{} is below minimum {}.{}",
-            major, minor, MIN_VERSION_MAJOR, MIN_VERSION_MINOR
-        )));
+    if let Some(min_version) = options.minimum_version {
+        let version = (major as u16) << 8 | (minor as u16);
+        if version < min_version {
+            let min_major = (min_version >> 8) as u8;
+            let min_minor = (min_version & 0xFF) as u8;
+            return Err(Error::AttestationVerification(format!(
+                "Firmware version {}.{} is below minimum {}.{}",
+                major, minor, min_major, min_minor
+            )));
+        }
     }
 
-    // Extract and validate TCB from reported_tcb field
-    let tcb = u64::from_le_bytes(
-        report[REPORTED_TCB_OFFSET..REPORTED_TCB_OFFSET + 8].try_into().unwrap()
-    );
+    // Validate TCB from reported_tcb, current_tcb, committed_tcb, and launch_tcb
+    if let Some(ref min_tcb) = options.minimum_tcb {
+        // Check reported_tcb
+        let reported_tcb = u64::from_le_bytes(
+            report[REPORTED_TCB_OFFSET..REPORTED_TCB_OFFSET + 8].try_into().unwrap()
+        );
+        let reported_parts = TcbParts::from_u64(reported_tcb);
+        if !reported_parts.meets_minimum(min_tcb) {
+            return Err(Error::AttestationVerification(format!(
+                "Reported TCB ({:?}) below minimum ({:?})", reported_parts, min_tcb
+            )));
+        }
 
-    let bl_spl = (tcb & 0xFF) as u8;
-    let tee_spl = ((tcb >> 8) & 0xFF) as u8;
-    let snp_spl = ((tcb >> 48) & 0xFF) as u8;
-    let ucode_spl = ((tcb >> 56) & 0xFF) as u8;
+        // Check current_tcb
+        let current_tcb = u64::from_le_bytes(
+            report[CURRENT_TCB_OFFSET..CURRENT_TCB_OFFSET + 8].try_into().unwrap()
+        );
+        let current_parts = TcbParts::from_u64(current_tcb);
+        if !current_parts.meets_minimum(min_tcb) {
+            return Err(Error::AttestationVerification(format!(
+                "Current TCB ({:?}) below minimum ({:?})", current_parts, min_tcb
+            )));
+        }
 
-    if bl_spl < MIN_BL_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "Boot loader SPL {} is below minimum {}", bl_spl, MIN_BL_SPL
-        )));
+        // Check committed_tcb
+        let committed_tcb = u64::from_le_bytes(
+            report[COMMITTED_TCB_OFFSET..COMMITTED_TCB_OFFSET + 8].try_into().unwrap()
+        );
+        let committed_parts = TcbParts::from_u64(committed_tcb);
+        if !committed_parts.meets_minimum(min_tcb) {
+            return Err(Error::AttestationVerification(format!(
+                "Committed TCB ({:?}) below minimum ({:?})", committed_parts, min_tcb
+            )));
+        }
     }
 
-    if tee_spl < MIN_TEE_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "TEE SPL {} is below minimum {}", tee_spl, MIN_TEE_SPL
-        )));
+    // Validate launch_tcb separately if specified (may have different requirements)
+    if let Some(ref min_launch_tcb) = options.minimum_launch_tcb {
+        let launch_tcb = u64::from_le_bytes(
+            report[LAUNCH_TCB_OFFSET..LAUNCH_TCB_OFFSET + 8].try_into().unwrap()
+        );
+        let launch_parts = TcbParts::from_u64(launch_tcb);
+        if !launch_parts.meets_minimum(min_launch_tcb) {
+            return Err(Error::AttestationVerification(format!(
+                "Launch TCB ({:?}) below minimum ({:?})", launch_parts, min_launch_tcb
+            )));
+        }
     }
 
-    if snp_spl < MIN_SNP_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "SNP SPL {} is below minimum {}", snp_spl, MIN_SNP_SPL
-        )));
+    // Validate platform info if specified
+    if let Some(ref required_platform_info) = options.platform_info {
+        let platform_info_raw = u64::from_le_bytes(
+            report[PLATFORM_INFO_OFFSET..PLATFORM_INFO_OFFSET + 8].try_into().unwrap()
+        );
+        let report_platform_info = SnpPlatformInfo::from_u64(platform_info_raw);
+        validate_platform_info(&report_platform_info, required_platform_info)?;
     }
 
-    if ucode_spl < MIN_UCODE_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "Microcode SPL {} is below minimum {}", ucode_spl, MIN_UCODE_SPL
-        )));
-    }
-
-    // Validate CURRENT_TCB meets minimum requirements
-    let current_tcb = u64::from_le_bytes(
-        report[CURRENT_TCB_OFFSET..CURRENT_TCB_OFFSET + 8].try_into().unwrap()
-    );
-
-    let cur_bl_spl = (current_tcb & 0xFF) as u8;
-    let cur_tee_spl = ((current_tcb >> 8) & 0xFF) as u8;
-    let cur_snp_spl = ((current_tcb >> 48) & 0xFF) as u8;
-    let cur_ucode_spl = ((current_tcb >> 56) & 0xFF) as u8;
-
-    if cur_bl_spl < MIN_BL_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "Current boot loader SPL {} is below minimum {}", cur_bl_spl, MIN_BL_SPL
-        )));
-    }
-
-    if cur_tee_spl < MIN_TEE_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "Current TEE SPL {} is below minimum {}", cur_tee_spl, MIN_TEE_SPL
-        )));
-    }
-
-    if cur_snp_spl < MIN_SNP_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "Current SNP SPL {} is below minimum {}", cur_snp_spl, MIN_SNP_SPL
-        )));
-    }
-
-    if cur_ucode_spl < MIN_UCODE_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "Current microcode SPL {} is below minimum {}", cur_ucode_spl, MIN_UCODE_SPL
-        )));
-    }
-
-    // Validate COMMITTED_TCB meets minimum requirements
-    let committed_tcb = u64::from_le_bytes(
-        report[COMMITTED_TCB_OFFSET..COMMITTED_TCB_OFFSET + 8].try_into().unwrap()
-    );
-
-    let com_bl_spl = (committed_tcb & 0xFF) as u8;
-    let com_tee_spl = ((committed_tcb >> 8) & 0xFF) as u8;
-    let com_snp_spl = ((committed_tcb >> 48) & 0xFF) as u8;
-    let com_ucode_spl = ((committed_tcb >> 56) & 0xFF) as u8;
-
-    if com_bl_spl < MIN_BL_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "Committed boot loader SPL {} is below minimum {}", com_bl_spl, MIN_BL_SPL
-        )));
-    }
-
-    if com_tee_spl < MIN_TEE_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "Committed TEE SPL {} is below minimum {}", com_tee_spl, MIN_TEE_SPL
-        )));
-    }
-
-    if com_snp_spl < MIN_SNP_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "Committed SNP SPL {} is below minimum {}", com_snp_spl, MIN_SNP_SPL
-        )));
-    }
-
-    if com_ucode_spl < MIN_UCODE_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "Committed microcode SPL {} is below minimum {}", com_ucode_spl, MIN_UCODE_SPL
-        )));
-    }
-
-    // Validate LAUNCH_TCB meets minimum requirements
-    let launch_tcb = u64::from_le_bytes(
-        report[LAUNCH_TCB_OFFSET..LAUNCH_TCB_OFFSET + 8].try_into().unwrap()
-    );
-
-    let launch_bl_spl = (launch_tcb & 0xFF) as u8;
-    let launch_tee_spl = ((launch_tcb >> 8) & 0xFF) as u8;
-    let launch_snp_spl = ((launch_tcb >> 48) & 0xFF) as u8;
-    let launch_ucode_spl = ((launch_tcb >> 56) & 0xFF) as u8;
-
-    if launch_bl_spl < MIN_BL_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "Launch boot loader SPL {} is below minimum {}", launch_bl_spl, MIN_BL_SPL
-        )));
-    }
-
-    if launch_tee_spl < MIN_TEE_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "Launch TEE SPL {} is below minimum {}", launch_tee_spl, MIN_TEE_SPL
-        )));
-    }
-
-    if launch_snp_spl < MIN_SNP_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "Launch SNP SPL {} is below minimum {}", launch_snp_spl, MIN_SNP_SPL
-        )));
-    }
-
-    if launch_ucode_spl < MIN_UCODE_SPL {
-        return Err(Error::AttestationVerification(format!(
-            "Launch microcode SPL {} is below minimum {}", launch_ucode_spl, MIN_UCODE_SPL
-        )));
-    }
+    // Validate VMPL if specified
+    validate_vmpl(report, options.vmpl)?;
 
     Ok(mask_chip_key)
 }
@@ -768,28 +646,6 @@ fn parse_signature_components(sig_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     let s_be: Vec<u8> = s_le.iter().copied().rev().collect();
     
     Ok((r_be, s_be))
-}
-
-fn verify_report_signature_basic(report: &[u8]) -> Result<()> {
-    let sig_bytes = &report[SIGNATURE_OFFSET..SIGNATURE_OFFSET + SIGNATURE_SIZE];
-    
-    // Basic check: signature should not be all zeros
-    if sig_bytes.iter().all(|&b| b == 0) {
-        return Err(Error::AttestationVerification(
-            "Invalid signature: all zeros".into()
-        ));
-    }
-    
-    // Parse and validate R and S components
-    let (r_be, s_be) = parse_signature_components(sig_bytes)?;
-    
-    if r_be.iter().all(|&b| b == 0) || s_be.iter().all(|&b| b == 0) {
-        return Err(Error::AttestationVerification(
-            "Invalid ECDSA signature components".into()
-        ));
-    }
-    
-    Ok(())
 }
 
 /// Fetch VCEK certificate from AMD KDS via Tinfoil's proxy
