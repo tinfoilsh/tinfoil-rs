@@ -61,13 +61,16 @@ fn load_rekor_keys() -> Result<Vec<(String, Vec<u8>, String)>> {
     Ok(keys)
 }
 
-/// Verify Rekor transparency log entry.
+/// Verify Rekor transparency log entry with full cryptographic verification.
 ///
 /// This verifies:
 /// 1. The tlog entry exists in the bundle
-/// 2. The Signed Entry Timestamp (SET) is valid (signed by Rekor's key)
-/// 3. The integrated time is within the certificate's validity window
+/// 2. The integrated time is within the certificate's validity window
+/// 3. The checkpoint signature is valid (signed by Rekor's key)
+/// 4. The inclusion proof is valid (Merkle path from leaf to root)
 fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert_not_after: u64) -> Result<()> {
+    use sha2::{Sha256, Digest};
+
     // Get tlog entries from verification material
     let tlog_entries = bundle
         .get("verificationMaterial")
@@ -95,17 +98,11 @@ fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert_not
         )));
     }
 
-    // Verify inclusion proof exists (required for v0.2+ bundles)
-    let inclusion_proof = entry.get("inclusionProof");
-    if inclusion_proof.is_none() {
-        return Err(Error::SigstoreVerification("Missing inclusion proof in tlog entry".into()));
-    }
+    // Get inclusion proof (required for v0.2+ bundles)
+    let inclusion_proof = entry.get("inclusionProof")
+        .ok_or_else(|| Error::SigstoreVerification("Missing inclusion proof in tlog entry".into()))?;
 
-    // Verify the SET (Signed Entry Timestamp)
-    // The SET proves the entry was logged by Rekor at the claimed time
-    let _inclusion_promise = entry.get("inclusionPromise");
-
-    // Load Rekor public keys
+    // Load Rekor public keys from trusted root
     let rekor_keys = load_rekor_keys()?;
 
     // Get the log ID from the entry to select the right key
@@ -116,7 +113,7 @@ fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert_not
         .ok_or_else(|| Error::SigstoreVerification("Missing logId in tlog entry".into()))?;
 
     // Find matching Rekor key
-    let (_, _key_der, _key_type) = rekor_keys
+    let (_, key_der, key_type) = rekor_keys
         .iter()
         .find(|(id, _, _)| id == log_id)
         .ok_or_else(|| Error::SigstoreVerification(format!(
@@ -125,30 +122,220 @@ fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert_not
             rekor_keys.iter().map(|(id, _, _)| id.as_str()).collect::<Vec<_>>()
         )))?;
 
-    // Verify the SET signature using the canonicalized body
+    // Get checkpoint (signed tree head)
+    let checkpoint = inclusion_proof
+        .get("checkpoint")
+        .and_then(|c| c.get("envelope"))
+        .and_then(|e| e.as_str())
+        .ok_or_else(|| Error::SigstoreVerification("Missing checkpoint in inclusion proof".into()))?;
+
+    // Verify checkpoint signature
+    verify_checkpoint_signature(checkpoint, key_der, key_type)?;
+
+    // Get root hash from inclusion proof
+    let root_hash_b64 = inclusion_proof
+        .get("rootHash")
+        .and_then(|r| r.as_str())
+        .ok_or_else(|| Error::SigstoreVerification("Missing rootHash in inclusion proof".into()))?;
+
+    let root_hash = base64::engine::general_purpose::STANDARD
+        .decode(root_hash_b64)
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode rootHash: {}", e)))?;
+
+    // Get log index and tree size
+    let log_index = inclusion_proof
+        .get("logIndex")
+        .and_then(|i| i.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or_else(|| Error::SigstoreVerification("Missing logIndex in inclusion proof".into()))?;
+
+    let tree_size = inclusion_proof
+        .get("treeSize")
+        .and_then(|t| t.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or_else(|| Error::SigstoreVerification("Missing treeSize in inclusion proof".into()))?;
+
+    // Get Merkle proof hashes
+    let proof_hashes: Vec<Vec<u8>> = inclusion_proof
+        .get("hashes")
+        .and_then(|h| h.as_array())
+        .ok_or_else(|| Error::SigstoreVerification("Missing hashes in inclusion proof".into()))?
+        .iter()
+        .filter_map(|h| h.as_str())
+        .map(|s| base64::engine::general_purpose::STANDARD.decode(s))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode proof hash: {}", e)))?;
+
+    // Compute leaf hash from canonicalizedBody
     let canonicalized_body_b64 = entry
         .get("canonicalizedBody")
         .and_then(|b| b.as_str())
         .ok_or_else(|| Error::SigstoreVerification("Missing canonicalizedBody in tlog entry".into()))?;
 
-    let set_b64 = inclusion_proof
-        .and_then(|p| p.get("checkpoint"))
-        .and_then(|c| c.get("envelope"))
-        .and_then(|e| e.as_str());
-
-    // For v0.2 bundles with inclusion proof, verify the checkpoint is present
-    // The checkpoint contains a signed tree head that proves the entry is in the log
-    if set_b64.is_none() {
-        // Try getting SET from inclusion promise (v0.1 bundles)
-        let _promise_set = entry
-            .get("inclusionPromise")
-            .and_then(|p| p.get("signedEntryTimestamp"));
-    }
-
-    // Verify the canonicalized body can be decoded and contains expected fields
-    let _body_bytes = base64::engine::general_purpose::STANDARD
+    let body_bytes = base64::engine::general_purpose::STANDARD
         .decode(canonicalized_body_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode canonicalizedBody: {}", e)))?;
+
+    // RFC 6962 leaf hash: SHA256(0x00 || data)
+    let mut leaf_hasher = Sha256::new();
+    leaf_hasher.update([0x00]);
+    leaf_hasher.update(&body_bytes);
+    let leaf_hash: [u8; 32] = leaf_hasher.finalize().into();
+
+    // Verify Merkle inclusion proof
+    verify_merkle_inclusion(&leaf_hash, log_index, tree_size, &proof_hashes, &root_hash)?;
+
+    Ok(())
+}
+
+/// Verify checkpoint signature using the appropriate key type.
+fn verify_checkpoint_signature(checkpoint: &str, key_der: &[u8], key_type: &str) -> Result<()> {
+    // Parse checkpoint note format:
+    // <origin>\n<tree_size>\n<root_hash_base64>\n[<extension_lines>]\n\n— <origin> <signature_base64>\n
+    let parts: Vec<&str> = checkpoint.split("\n\n").collect();
+    if parts.len() < 2 {
+        return Err(Error::SigstoreVerification("Invalid checkpoint format: missing signature section".into()));
+    }
+
+    let note_body = parts[0];
+    let signature_line = parts[1].trim();
+
+    // Signature line format: "— <origin> <signature_base64>"
+    if !signature_line.starts_with("— ") {
+        return Err(Error::SigstoreVerification("Invalid checkpoint signature line format".into()));
+    }
+
+    let sig_parts: Vec<&str> = signature_line[4..].splitn(2, ' ').collect();
+    if sig_parts.len() < 2 {
+        return Err(Error::SigstoreVerification("Invalid checkpoint signature format".into()));
+    }
+
+    let signature_b64 = sig_parts[1].trim();
+    let signature_bytes = base64::engine::general_purpose::STANDARD
+        .decode(signature_b64)
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode checkpoint signature: {}", e)))?;
+
+    // The message to verify is the note body with a trailing newline
+    let message = format!("{}\n", note_body);
+
+    match key_type {
+        "PKIX_ECDSA_P256_SHA_256" => {
+            verify_ecdsa_p256_signature(message.as_bytes(), &signature_bytes, key_der)
+        }
+        "PKIX_ED25519" => {
+            verify_ed25519_signature(message.as_bytes(), &signature_bytes, key_der)
+        }
+        _ => Err(Error::SigstoreVerification(format!(
+            "Unsupported Rekor key type: {}", key_type
+        ))),
+    }
+}
+
+/// Verify ECDSA P-256 signature (for original Rekor log).
+fn verify_ecdsa_p256_signature(message: &[u8], signature: &[u8], key_der: &[u8]) -> Result<()> {
+    use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+    use p256::pkcs8::DecodePublicKey;
+
+    // Checkpoint signatures include a 4-byte key hint prefix
+    if signature.len() < 4 {
+        return Err(Error::SigstoreVerification("Checkpoint signature too short".into()));
+    }
+    let sig_bytes = &signature[4..];
+
+    // Parse the public key from SPKI DER
+    let verifying_key = VerifyingKey::from_public_key_der(key_der)
+        .map_err(|e| Error::SigstoreVerification(format!("Invalid Rekor ECDSA public key: {}", e)))?;
+
+    // Parse the signature (DER-encoded)
+    let sig = Signature::from_der(sig_bytes)
+        .map_err(|e| Error::SigstoreVerification(format!("Invalid ECDSA signature format: {}", e)))?;
+
+    // Verify
+    verifying_key.verify(message, &sig)
+        .map_err(|_| Error::SigstoreVerification("Checkpoint ECDSA signature verification failed".into()))?;
+
+    Ok(())
+}
+
+/// Verify Ed25519 signature (for Rekor log2025-1).
+fn verify_ed25519_signature(message: &[u8], signature: &[u8], key_der: &[u8]) -> Result<()> {
+    use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+
+    // Checkpoint signatures include a 4-byte key hint prefix
+    if signature.len() < 4 + 64 {
+        return Err(Error::SigstoreVerification("Ed25519 checkpoint signature too short".into()));
+    }
+    let sig_bytes = &signature[4..4 + 64];
+
+    // Ed25519 public key in SPKI format: skip the SPKI header to get raw 32-byte key
+    // SPKI for Ed25519: 30 2a 30 05 06 03 2b 65 70 03 21 00 <32 bytes>
+    if key_der.len() < 44 {
+        return Err(Error::SigstoreVerification("Invalid Ed25519 SPKI key length".into()));
+    }
+    let raw_key = &key_der[key_der.len() - 32..];
+
+    let verifying_key = VerifyingKey::try_from(raw_key)
+        .map_err(|e| Error::SigstoreVerification(format!("Invalid Rekor Ed25519 public key: {}", e)))?;
+
+    let sig = Signature::try_from(sig_bytes)
+        .map_err(|e| Error::SigstoreVerification(format!("Invalid Ed25519 signature format: {}", e)))?;
+
+    verifying_key.verify(message, &sig)
+        .map_err(|_| Error::SigstoreVerification("Checkpoint Ed25519 signature verification failed".into()))?;
+
+    Ok(())
+}
+
+/// Verify RFC 6962 Merkle inclusion proof.
+fn verify_merkle_inclusion(
+    leaf_hash: &[u8; 32],
+    index: u64,
+    tree_size: u64,
+    proof: &[Vec<u8>],
+    expected_root: &[u8],
+) -> Result<()> {
+    use sha2::{Sha256, Digest};
+
+    if index >= tree_size {
+        return Err(Error::SigstoreVerification(format!(
+            "Log index {} >= tree size {}", index, tree_size
+        )));
+    }
+
+    let mut current_hash = *leaf_hash;
+    let mut idx = index;
+    let mut size = tree_size;
+
+    for sibling in proof {
+        if sibling.len() != 32 {
+            return Err(Error::SigstoreVerification("Invalid proof hash length".into()));
+        }
+
+        // RFC 6962 interior node hash: SHA256(0x01 || left || right)
+        let mut hasher = Sha256::new();
+        hasher.update([0x01]);
+
+        // Determine if current node is left or right child
+        if idx % 2 == 0 && idx + 1 < size {
+            // Current is left child
+            hasher.update(current_hash);
+            hasher.update(sibling);
+        } else {
+            // Current is right child
+            hasher.update(sibling);
+            hasher.update(current_hash);
+        }
+
+        current_hash = hasher.finalize().into();
+        idx /= 2;
+        size = (size + 1) / 2;
+    }
+
+    if current_hash.as_slice() != expected_root {
+        return Err(Error::SigstoreVerification(
+            "Merkle inclusion proof verification failed: computed root does not match".into()
+        ));
+    }
 
     Ok(())
 }
