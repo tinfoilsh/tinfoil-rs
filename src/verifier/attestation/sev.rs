@@ -342,6 +342,13 @@ fn validate_policy(report_policy: &SnpPolicy, required: &SnpPolicy) -> Result<()
 /// This checks both unauthorized capabilities (report has them but required doesn't allow)
 /// and required features (report lacks what required mandates).
 fn validate_platform_info(report_info: &SnpPlatformInfo, required: &SnpPlatformInfo) -> Result<()> {
+    // Unauthorized features (report has it enabled, but required doesn't allow it)
+    if report_info.smt_enabled && !required.smt_enabled {
+        return Err(Error::AttestationVerification(
+            "Unauthorized platform feature SMT enabled".into()
+        ));
+    }
+
     // Required capabilities (report must have these if required mandates them)
     if required.smt_enabled && !report_info.smt_enabled {
         return Err(Error::AttestationVerification(
