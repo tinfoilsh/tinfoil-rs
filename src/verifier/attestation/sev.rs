@@ -891,7 +891,7 @@ fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> Result<()> 
         )));
     }
 
-    // Validate PRODUCT_NAME is "Genoa" (ASN.1 UTF8String: 0x16 0x05 "Genoa")
+    // Validate PRODUCT_NAME is "Genoa" (ASN.1 IA5String: 0x16 0x05 "Genoa")
     let vcek_product = get_vcek_extension(vcek_der, OID_PRODUCT_NAME)?
         .ok_or_else(|| Error::AttestationVerification("Missing PRODUCT_NAME in VCEK".into()))?;
     // Expected: UTF8String tag (0x16), length (0x05), "Genoa"
