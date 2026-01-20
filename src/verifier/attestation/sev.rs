@@ -17,7 +17,7 @@ use sha2::{Sha256, Sha384, Digest};
 use std::io::Read;
 
 use crate::error::{Error, Result};
-use super::types::{Measurement, PredicateType, SnpPolicy, Verification};
+use super::types::{Measurement, PredicateType, SnpPlatformInfo, SnpPolicy, Verification};
 
 // SEV-SNP report offsets (v3 report structure)
 const REPORT_DATA_OFFSET: usize = 80;
@@ -63,6 +63,9 @@ const LAUNCH_TCB_OFFSET: usize = 0x1F0;
 const COMMITTED_BUILD_OFFSET: usize = 0x1EC;
 const COMMITTED_MINOR_OFFSET: usize = 0x1ED;
 const COMMITTED_MAJOR_OFFSET: usize = 0x1EE;
+
+// Platform info field offset
+const PLATFORM_INFO_OFFSET: usize = 0x40;
 
 // Signer info field offset
 const SIGNER_INFO_OFFSET: usize = 0x48;
@@ -311,6 +314,51 @@ fn validate_policy(report_policy: &SnpPolicy, required: &SnpPolicy) -> Result<()
     if required.page_swap_disabled && !report_policy.page_swap_disabled {
         return Err(Error::AttestationVerification(
             "Page swap disabled required but not present".into()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate platform info against required platform info constraints.
+///
+/// This checks both unauthorized capabilities (report has them but required doesn't allow)
+/// and required features (report lacks what required mandates).
+fn validate_platform_info(report_info: &SnpPlatformInfo, required: &SnpPlatformInfo) -> Result<()> {
+    // Required capabilities (report must have these if required mandates them)
+    if required.smt_enabled && !report_info.smt_enabled {
+        return Err(Error::AttestationVerification(
+            "SMT required but not enabled on platform".into()
+        ));
+    }
+    if required.tsme_enabled && !report_info.tsme_enabled {
+        return Err(Error::AttestationVerification(
+            "TSME required but not enabled on platform".into()
+        ));
+    }
+    if required.ecc_enabled && !report_info.ecc_enabled {
+        return Err(Error::AttestationVerification(
+            "ECC required but not enabled on platform".into()
+        ));
+    }
+    if required.rapl_disabled && !report_info.rapl_disabled {
+        return Err(Error::AttestationVerification(
+            "RAPL disabled required but RAPL is enabled on platform".into()
+        ));
+    }
+    if required.ciphertext_hiding_dram_enabled && !report_info.ciphertext_hiding_dram_enabled {
+        return Err(Error::AttestationVerification(
+            "Ciphertext hiding in DRAM required but not enabled on platform".into()
+        ));
+    }
+    if required.alias_check_complete && !report_info.alias_check_complete {
+        return Err(Error::AttestationVerification(
+            "Alias check completion required but not complete on platform".into()
+        ));
+    }
+    if required.tio_enabled && !report_info.tio_enabled {
+        return Err(Error::AttestationVerification(
+            "TIO required but not enabled on platform".into()
         ));
     }
 
