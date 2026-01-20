@@ -554,10 +554,15 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
     // Validate signer info field (returns maskChipKey for HWID validation)
     let mask_chip_key = validate_signer_info(report)?;
 
-    // Validate provisional firmware if not permitted
-    if !options.permit_provisional_firmware {
-        validate_committed_tcb(report)?;
+    // Reject permit_provisional_firmware=true (not supported, matches Python reference)
+    if options.permit_provisional_firmware {
+        return Err(Error::AttestationVerification(
+            "permit_provisional_firmware=true is not supported".into()
+        ));
     }
+
+    // Validate committed TCB (always required since permit_provisional_firmware must be false)
+    validate_committed_tcb(report)?;
 
     // Extract and validate guest policy
     let policy_raw = u64::from_le_bytes(
