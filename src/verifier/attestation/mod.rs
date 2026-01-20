@@ -27,7 +27,10 @@ pub mod types;
 pub mod sev;
 
 // Re-export public types
-pub use types::{AttestationDocument, PredicateType, Verification, Measurement, GroundTruth, MeasurementError};
+pub use types::{
+    AttestationDocument, GroundTruth, Measurement, MeasurementError, PredicateType,
+    SnpPlatformInfo, SnpPolicy, TcbParts, ValidationOptions, Verification,
+};
 
 use crate::error::{Error, Result};
 use super::sigstore;
@@ -54,38 +57,33 @@ pub async fn fetch(host: &str) -> Result<AttestationDocument> {
     Ok(doc)
 }
 
-/// Parse attestation document and extract fields without cryptographic verification.
-/// For full security, use `verify_full()` which validates the certificate chain and signature.
-pub fn parse_report(doc: &AttestationDocument) -> Result<Verification> {
-    match doc.format {
-        PredicateType::SevGuestV2 => sev::parse_report(&doc.body),
-        PredicateType::TdxGuestV2 => Err(Error::UnsupportedFormat(
-            "Intel TDX attestation not yet implemented".into()
-        )),
-        PredicateType::SnpTdxMultiPlatformV1 => {
-            // Multi-platform format - use SEV-SNP verification
-            sev::parse_report(&doc.body)
-        }
-        PredicateType::Unknown => Err(Error::AttestationVerification(
-            "Unknown attestation format".into()
-        )),
-    }
-}
-
 /// Full verification with AMD certificate chain (Step 1 complete)
-/// 
+///
 /// This performs complete hardware attestation verification:
 /// - Fetches VCEK from AMD KDS
 /// - Validates VCEK → ASK → ARK certificate chain
 /// - Verifies report signature against VCEK
+///
+/// Uses default `ValidationOptions` for production-grade security.
 pub async fn verify_full(doc: &AttestationDocument) -> Result<Verification> {
+    verify_full_with_options(doc, &ValidationOptions::default()).await
+}
+
+/// Full verification with custom validation options.
+///
+/// Allows customizing policy, TCB, platform, and VMPL requirements.
+/// Use `ValidationOptions::default()` for production-grade security.
+pub async fn verify_full_with_options(
+    doc: &AttestationDocument,
+    options: &ValidationOptions,
+) -> Result<Verification> {
     match doc.format {
-        PredicateType::SevGuestV2 => sev::verify_full(&doc.body).await,
+        PredicateType::SevGuestV2 => sev::verify_full_with_options(&doc.body, options).await,
         PredicateType::TdxGuestV2 => Err(Error::UnsupportedFormat(
             "Intel TDX attestation not yet implemented".into()
         )),
         PredicateType::SnpTdxMultiPlatformV1 => {
-            sev::verify_full(&doc.body).await
+            sev::verify_full_with_options(&doc.body, options).await
         }
         PredicateType::Unknown => Err(Error::AttestationVerification(
             "Unknown attestation format".into()
