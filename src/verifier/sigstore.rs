@@ -19,11 +19,38 @@ use serde::Deserialize;
 /// This avoids TUF network calls and provides offline verification capability.
 const TRUSTED_ROOT_JSON: &str = include_str!("../../assets/trusted_root.json");
 
-/// Parsed trusted root for Rekor public keys
+/// Parsed trusted root for Rekor public keys and Fulcio CAs
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TrustedRoot {
     tlogs: Vec<Tlog>,
+    certificate_authorities: Vec<CertificateAuthority>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CertificateAuthority {
+    cert_chain: CertChain,
+    valid_for: ValidityPeriod,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CertChain {
+    certificates: Vec<CertificateEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CertificateEntry {
+    raw_bytes: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidityPeriod {
+    start: String,
+    end: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -59,6 +86,182 @@ fn load_rekor_keys() -> Result<Vec<(String, Vec<u8>, String)>> {
         keys.push((tlog.log_id.key_id, key_der, tlog.public_key.key_details));
     }
     Ok(keys)
+}
+
+/// Represents a Fulcio CA with its certificate chain and validity period
+struct FulcioCa {
+    /// Certificate chain: first is intermediate (issuer), last is root
+    cert_chain_der: Vec<Vec<u8>>,
+    /// Validity start as Unix timestamp
+    valid_from: u64,
+    /// Validity end as Unix timestamp (None = no end)
+    valid_until: Option<u64>,
+}
+
+/// Load Fulcio Certificate Authorities from embedded trust root
+fn load_fulcio_cas() -> Result<Vec<FulcioCa>> {
+    let root: TrustedRoot = serde_json::from_str(TRUSTED_ROOT_JSON)
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse trusted root: {}", e)))?;
+
+    let mut cas = Vec::new();
+    for ca in root.certificate_authorities {
+        let mut cert_chain_der = Vec::new();
+        for cert in &ca.cert_chain.certificates {
+            let der = base64::engine::general_purpose::STANDARD
+                .decode(&cert.raw_bytes)
+                .map_err(|e| Error::SigstoreVerification(format!("Failed to decode Fulcio cert: {}", e)))?;
+            cert_chain_der.push(der);
+        }
+
+        let valid_from = parse_rfc3339_to_unix(&ca.valid_for.start)?;
+        let valid_until = ca.valid_for.end.as_ref().map(|e| parse_rfc3339_to_unix(e)).transpose()?;
+
+        cas.push(FulcioCa {
+            cert_chain_der,
+            valid_from,
+            valid_until,
+        });
+    }
+    Ok(cas)
+}
+
+/// Parse RFC3339 timestamp to Unix timestamp
+fn parse_rfc3339_to_unix(s: &str) -> Result<u64> {
+    // Parse ISO 8601 / RFC 3339 format manually
+    // Format: "2022-04-13T20:06:15Z" or "2022-12-31T23:59:59.999Z"
+    let s = s.trim_end_matches('Z');
+    let (date_part, time_part) = s.split_once('T')
+        .ok_or_else(|| Error::SigstoreVerification(format!("Invalid timestamp format: {}", s)))?;
+
+    let date_parts: Vec<&str> = date_part.split('-').collect();
+    if date_parts.len() != 3 {
+        return Err(Error::SigstoreVerification(format!("Invalid date format: {}", date_part)));
+    }
+
+    let year: i32 = date_parts[0].parse().map_err(|_| Error::SigstoreVerification("Invalid year".into()))?;
+    let month: u32 = date_parts[1].parse().map_err(|_| Error::SigstoreVerification("Invalid month".into()))?;
+    let day: u32 = date_parts[2].parse().map_err(|_| Error::SigstoreVerification("Invalid day".into()))?;
+
+    // Handle time with optional fractional seconds
+    let time_base = time_part.split('.').next().unwrap_or(time_part);
+    let time_parts: Vec<&str> = time_base.split(':').collect();
+    if time_parts.len() != 3 {
+        return Err(Error::SigstoreVerification(format!("Invalid time format: {}", time_part)));
+    }
+
+    let hour: u32 = time_parts[0].parse().map_err(|_| Error::SigstoreVerification("Invalid hour".into()))?;
+    let minute: u32 = time_parts[1].parse().map_err(|_| Error::SigstoreVerification("Invalid minute".into()))?;
+    let second: u32 = time_parts[2].parse().map_err(|_| Error::SigstoreVerification("Invalid second".into()))?;
+
+    // Calculate days since Unix epoch (1970-01-01)
+    let days = days_since_epoch(year, month, day);
+    let secs = (days as u64) * 86400 + (hour as u64) * 3600 + (minute as u64) * 60 + (second as u64);
+
+    Ok(secs)
+}
+
+/// Calculate days since Unix epoch for a given date
+fn days_since_epoch(year: i32, month: u32, day: u32) -> i64 {
+    // Days in each month (non-leap year)
+    const DAYS_IN_MONTH: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+    fn is_leap_year(y: i32) -> bool {
+        (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+    }
+
+    let mut days: i64 = 0;
+
+    // Add days for years since 1970
+    for y in 1970..year {
+        days += if is_leap_year(y) { 366 } else { 365 };
+    }
+
+    // Add days for months in current year
+    for m in 1..month {
+        days += DAYS_IN_MONTH[(m - 1) as usize] as i64;
+        if m == 2 && is_leap_year(year) {
+            days += 1;
+        }
+    }
+
+    // Add days in current month
+    days += (day - 1) as i64;
+
+    days
+}
+
+/// Verify that the signing certificate was issued by a trusted Fulcio CA.
+///
+/// This validates:
+/// 1. The certificate's issuer matches a Fulcio CA's subject
+/// 2. The certificate's signature was created by the Fulcio CA
+/// 3. The CA was valid at the time the certificate was issued
+fn verify_fulcio_chain(cert_der: &[u8], cert_not_before: u64) -> Result<()> {
+    use x509_cert::Certificate;
+    use der::{Decode, Encode};
+    use p384::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+
+    let signing_cert = Certificate::from_der(cert_der)
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse signing certificate: {}", e)))?;
+
+    let fulcio_cas = load_fulcio_cas()?;
+
+    // Try each Fulcio CA
+    for ca in &fulcio_cas {
+        // Check if CA was valid when the signing cert was issued
+        if cert_not_before < ca.valid_from {
+            continue;
+        }
+        if let Some(end) = ca.valid_until {
+            if cert_not_before > end {
+                continue;
+            }
+        }
+
+        // The first certificate in the chain is the intermediate that signs leaf certs
+        if ca.cert_chain_der.is_empty() {
+            continue;
+        }
+
+        let issuer_cert = Certificate::from_der(&ca.cert_chain_der[0])
+            .map_err(|e| Error::SigstoreVerification(format!("Failed to parse Fulcio CA cert: {}", e)))?;
+
+        // Verify issuer DN matches
+        if signing_cert.tbs_certificate.issuer != issuer_cert.tbs_certificate.subject {
+            continue;
+        }
+
+        // Extract the issuer's public key and verify the signature
+        let issuer_pubkey_bytes = issuer_cert.tbs_certificate
+            .subject_public_key_info
+            .subject_public_key
+            .raw_bytes();
+
+        // Fulcio uses P-384 for the intermediate CA
+        let verifying_key = match VerifyingKey::from_sec1_bytes(issuer_pubkey_bytes) {
+            Ok(k) => k,
+            Err(_) => continue, // Try next CA if key doesn't parse
+        };
+
+        // Get the TBS (to-be-signed) certificate bytes and signature
+        let tbs_bytes = signing_cert.tbs_certificate.to_der()
+            .map_err(|e| Error::SigstoreVerification(format!("Failed to encode TBS: {}", e)))?;
+
+        let sig_bytes = signing_cert.signature.raw_bytes();
+        let signature = match Signature::from_der(sig_bytes) {
+            Ok(s) => s,
+            Err(_) => continue, // Try next CA
+        };
+
+        // Verify the signature
+        if verifying_key.verify(&tbs_bytes, &signature).is_ok() {
+            return Ok(());
+        }
+    }
+
+    Err(Error::SigstoreVerification(
+        "Certificate not issued by any trusted Fulcio CA".into()
+    ))
 }
 
 /// Verify that the certificate in the bundle matches the certificate in the Rekor entry.
@@ -580,7 +783,8 @@ pub struct CertificateInfo {
 /// 3. Verifies the DSSE signature cryptographically
 /// 4. Validates certificate is from GitHub Actions for the repo
 /// 5. Verifies Rekor transparency log entry (mandatory)
-/// 6. Extracts and returns the measurement
+/// 6. Verifies certificate was issued by trusted Fulcio CA
+/// 7. Extracts and returns the measurement
 pub async fn verify_repo(repo: &str) -> Result<Measurement> {
     // 1. Fetch latest release digest
     let digest = github::fetch_latest_digest(repo).await?;
@@ -600,15 +804,18 @@ pub async fn verify_repo(repo: &str) -> Result<Measurement> {
     verify_certificate_identity(&cert_info, repo)?;
 
     // 6. Verify Rekor transparency log entry (mandatory)
-    let (cert_not_before, cert_not_after) = extract_cert_validity(&bundle)?;
+    let (cert_der, cert_not_before, cert_not_after) = extract_cert_with_validity(&bundle)?;
     verify_rekor_entry(&bundle, cert_not_before, cert_not_after)?;
 
-    // 7. Extract measurement from verified bundle and verify digest matches
+    // 7. Verify certificate was issued by trusted Fulcio CA
+    verify_fulcio_chain(&cert_der, cert_not_before)?;
+
+    // 8. Extract measurement from verified bundle and verify digest matches
     extract_measurement_from_bundle(&bundle, &digest)
 }
 
-/// Extract certificate validity window (not_before, not_after) as Unix timestamps
-fn extract_cert_validity(bundle: &serde_json::Value) -> Result<(u64, u64)> {
+/// Extract certificate DER bytes and validity window (not_before, not_after) as Unix timestamps
+fn extract_cert_with_validity(bundle: &serde_json::Value) -> Result<(Vec<u8>, u64, u64)> {
     use x509_cert::Certificate;
     use der::Decode;
 
@@ -630,7 +837,7 @@ fn extract_cert_validity(bundle: &serde_json::Value) -> Result<(u64, u64)> {
     let not_before = cert.tbs_certificate.validity.not_before.to_unix_duration().as_secs();
     let not_after = cert.tbs_certificate.validity.not_after.to_unix_duration().as_secs();
 
-    Ok((not_before, not_after))
+    Ok((cert_der, not_before, not_after))
 }
 
 /// Compute DSSE Pre-Authentication Encoding (PAE)
