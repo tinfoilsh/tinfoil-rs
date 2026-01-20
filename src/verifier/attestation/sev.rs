@@ -67,6 +67,9 @@ const COMMITTED_MAJOR_OFFSET: usize = 0x1EE;
 // Platform info field offset
 const PLATFORM_INFO_OFFSET: usize = 0x40;
 
+// VMPL (Virtual Machine Privilege Level) field offset
+const VMPL_OFFSET: usize = 0x30;
+
 // Signer info field offset
 const SIGNER_INFO_OFFSET: usize = 0x48;
 
@@ -365,12 +368,43 @@ fn validate_platform_info(report_info: &SnpPlatformInfo, required: &SnpPlatformI
     Ok(())
 }
 
+/// Validate VMPL (Virtual Machine Privilege Level) from report.
+///
+/// VMPL is a 4-bit value (0-3) indicating the privilege level:
+/// - VMPL 0: Most privileged (typically hypervisor/firmware)
+/// - VMPL 3: Least privileged (typically guest application)
+///
+/// For production workloads, we typically expect VMPL 0.
+fn validate_vmpl(report: &[u8], expected_vmpl: Option<u8>) -> Result<()> {
+    let vmpl = u32::from_le_bytes(
+        report[VMPL_OFFSET..VMPL_OFFSET + 4].try_into().unwrap()
+    );
+
+    // VMPL must be in valid range 0-3
+    if vmpl > 3 {
+        return Err(Error::AttestationVerification(format!(
+            "VMPL {} is not in valid range 0-3", vmpl
+        )));
+    }
+
+    // If specific VMPL is required, verify it matches
+    if let Some(expected) = expected_vmpl {
+        if vmpl != expected as u32 {
+            return Err(Error::AttestationVerification(format!(
+                "VMPL mismatch: expected {}, got {}", expected, vmpl
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Parse AMD SEV-SNP attestation report and extract measurements without cryptographic verification.
 /// For full security, use `verify_full()`.
 pub fn parse_report(body: &str) -> Result<Verification> {
     // 1. Decode and decompress
     let report_bytes = decode_report(body)?;
-    
+
     // 2. Basic structure validation
     validate_report_structure(&report_bytes)?;
     
