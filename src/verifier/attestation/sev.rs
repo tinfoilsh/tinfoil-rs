@@ -1071,6 +1071,11 @@ fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -> Result<()
         )));
     }
 
+    // Verify AMD location fields for all certificates
+    validate_amd_location(ark_subject, "ARK")?;
+    validate_amd_location(ask_subject, "ASK")?;
+    validate_amd_location(vcek_subject, "VCEK")?;
+
     // === STEP 3: Verify ARK self-signature (RSA-PSS SHA-384) ===
     let ark_pubkey = extract_pubkey_from_cert(ark_der)?;
     let ark_tbs = extract_tbs_from_cert(ark_der)?;
@@ -1118,6 +1123,71 @@ fn verify_rsa_pss_signature(
     verifying_key.verify(tbs_der, &sig)
         .map_err(|e| Error::AttestationVerification(format!("{} verification failed: {}", context, e)))?;
     
+    Ok(())
+}
+
+/// Validate that a certificate's subject/issuer has AMD's expected location fields.
+///
+/// AMD certificates should have:
+/// - Country: US
+/// - State: CA
+/// - Locality: Santa Clara
+/// - Organization: Advanced Micro Devices
+/// - Organizational Unit: Engineering
+fn validate_amd_location(name: &x509_cert::name::Name, cert_name: &str) -> Result<()> {
+    use x509_cert::der::oid::db::rfc4519::{C, ST, L, O, OU};
+    use der::asn1::Utf8StringRef;
+    use der::{Decode, Encode};
+
+    fn extract_attr(name: &x509_cert::name::Name, oid: &der::oid::ObjectIdentifier) -> Option<String> {
+        for rdn in name.0.iter() {
+            for atv in rdn.0.iter() {
+                if &atv.oid == oid {
+                    let value_bytes = atv.value.value();
+                    if let Ok(s) = Utf8StringRef::from_der(atv.value.to_der().unwrap_or_default().as_slice()) {
+                        return Some(s.as_str().to_string());
+                    }
+                    if let Ok(s) = std::str::from_utf8(value_bytes) {
+                        return Some(s.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    let country = extract_attr(name, &C);
+    let state = extract_attr(name, &ST);
+    let locality = extract_attr(name, &L);
+    let org = extract_attr(name, &O);
+    let org_unit = extract_attr(name, &OU);
+
+    if country.as_deref() != Some("US") {
+        return Err(Error::AttestationVerification(format!(
+            "{} certificate country is not US: {:?}", cert_name, country
+        )));
+    }
+    if state.as_deref() != Some("CA") {
+        return Err(Error::AttestationVerification(format!(
+            "{} certificate state is not CA: {:?}", cert_name, state
+        )));
+    }
+    if locality.as_deref() != Some("Santa Clara") {
+        return Err(Error::AttestationVerification(format!(
+            "{} certificate locality is not Santa Clara: {:?}", cert_name, locality
+        )));
+    }
+    if org.as_deref() != Some("Advanced Micro Devices") {
+        return Err(Error::AttestationVerification(format!(
+            "{} certificate organization is not Advanced Micro Devices: {:?}", cert_name, org
+        )));
+    }
+    if org_unit.as_deref() != Some("Engineering") {
+        return Err(Error::AttestationVerification(format!(
+            "{} certificate organizational unit is not Engineering: {:?}", cert_name, org_unit
+        )));
+    }
+
     Ok(())
 }
 
