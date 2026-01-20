@@ -17,7 +17,7 @@ use sha2::{Sha256, Sha384, Digest};
 use std::io::Read;
 
 use crate::error::{Error, Result};
-use super::types::{Measurement, PredicateType, Verification};
+use super::types::{Measurement, PredicateType, SnpPolicy, Verification};
 
 // SEV-SNP report offsets (v3 report structure)
 const REPORT_DATA_OFFSET: usize = 80;
@@ -255,6 +255,63 @@ fn validate_committed_tcb(report: &[u8]) -> Result<()> {
             "Provisional firmware: committed_major ({}) != current_major ({})",
             committed_major, current_major
         )));
+    }
+
+    Ok(())
+}
+
+/// Validate guest policy against required policy constraints.
+///
+/// This checks both unauthorized capabilities (report has them but required doesn't allow)
+/// and required restrictions (report lacks what required mandates).
+fn validate_policy(report_policy: &SnpPolicy, required: &SnpPolicy) -> Result<()> {
+    // Unauthorized capabilities (report has them, required doesn't allow)
+    if !required.migrate_ma && report_policy.migrate_ma {
+        return Err(Error::AttestationVerification(
+            "Unauthorized migration agent capability".into()
+        ));
+    }
+    if !required.debug && report_policy.debug {
+        return Err(Error::AttestationVerification(
+            "Debug mode not allowed".into()
+        ));
+    }
+    if !required.smt && report_policy.smt {
+        return Err(Error::AttestationVerification(
+            "Unauthorized SMT capability".into()
+        ));
+    }
+    if !required.cxl_allowed && report_policy.cxl_allowed {
+        return Err(Error::AttestationVerification(
+            "Unauthorized CXL capability".into()
+        ));
+    }
+    if !required.mem_aes256_xts && report_policy.mem_aes256_xts {
+        return Err(Error::AttestationVerification(
+            "Unauthorized memory encryption mode (AES-256-XTS)".into()
+        ));
+    }
+
+    // Required restrictions (report lacks what required mandates)
+    if required.single_socket && !report_policy.single_socket {
+        return Err(Error::AttestationVerification(
+            "Single socket restriction required but not present".into()
+        ));
+    }
+    if required.rapl_dis && !report_policy.rapl_dis {
+        return Err(Error::AttestationVerification(
+            "RAPL disabled required but not present".into()
+        ));
+    }
+    if required.ciphertext_hiding_dram && !report_policy.ciphertext_hiding_dram {
+        return Err(Error::AttestationVerification(
+            "Ciphertext hiding in DRAM required but not enforced".into()
+        ));
+    }
+    if required.page_swap_disabled && !report_policy.page_swap_disabled {
+        return Err(Error::AttestationVerification(
+            "Page swap disabled required but not present".into()
+        ));
     }
 
     Ok(())
