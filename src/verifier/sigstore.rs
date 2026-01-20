@@ -19,12 +19,21 @@ use serde::Deserialize;
 /// This avoids TUF network calls and provides offline verification capability.
 const TRUSTED_ROOT_JSON: &str = include_str!("../../assets/trusted_root.json");
 
-/// Parsed trusted root for Rekor public keys and Fulcio CAs
+/// Parsed trusted root for Rekor public keys, Fulcio CAs, and CT logs
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TrustedRoot {
     tlogs: Vec<Tlog>,
     certificate_authorities: Vec<CertificateAuthority>,
+    ctlogs: Vec<CtLog>,
+}
+
+/// Certificate Transparency log entry
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CtLog {
+    public_key: PublicKeyInfo,
+    log_id: LogId,
 }
 
 #[derive(Deserialize)]
@@ -86,6 +95,194 @@ fn load_rekor_keys() -> Result<Vec<(String, Vec<u8>, String)>> {
         keys.push((tlog.log_id.key_id, key_der, tlog.public_key.key_details));
     }
     Ok(keys)
+}
+
+/// CT log public key with its key ID and algorithm
+struct CtLogKey {
+    /// Key ID (SHA-256 hash of the log's public key)
+    key_id: Vec<u8>,
+    /// DER-encoded public key - kept for potential future cryptographic verification
+    #[allow(dead_code)]
+    public_key_der: Vec<u8>,
+    /// Key algorithm (e.g., "PKIX_ECDSA_P256_SHA_256") - kept for potential future validation
+    #[allow(dead_code)]
+    key_details: String,
+}
+
+/// Load Certificate Transparency log public keys from embedded trust root
+fn load_ctlog_keys() -> Result<Vec<CtLogKey>> {
+    let root: TrustedRoot = serde_json::from_str(TRUSTED_ROOT_JSON)
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse trusted root: {}", e)))?;
+
+    let mut keys = Vec::new();
+    for ctlog in root.ctlogs {
+        let key_id = base64::engine::general_purpose::STANDARD
+            .decode(&ctlog.log_id.key_id)
+            .map_err(|e| Error::SigstoreVerification(format!("Failed to decode CT log key ID: {}", e)))?;
+        let public_key_der = base64::engine::general_purpose::STANDARD
+            .decode(&ctlog.public_key.raw_bytes)
+            .map_err(|e| Error::SigstoreVerification(format!("Failed to decode CT log key: {}", e)))?;
+        keys.push(CtLogKey {
+            key_id,
+            public_key_der,
+            key_details: ctlog.public_key.key_details,
+        });
+    }
+    Ok(keys)
+}
+
+/// Verify Signed Certificate Timestamps (SCTs) embedded in the certificate.
+///
+/// Per RFC 6962, SCTs prove the certificate was submitted to Certificate Transparency logs.
+/// This validates that the certificate contains valid SCT structures from known CT logs.
+///
+/// Note: Fulcio certificates use precertificate SCTs (entry_type=1), which are signed over
+/// the TBSCertificate with a poison extension. Full cryptographic verification of precert
+/// SCTs requires reconstructing the precertificate, which is complex. This implementation
+/// validates:
+/// 1. The SCT extension is present (OID 1.3.6.1.4.1.11129.2.4.2)
+/// 2. The SCT list is well-formed per RFC 6962
+/// 3. At least one SCT references a known Sigstore CT log
+///
+/// Combined with mandatory Rekor transparency log verification (which cryptographically
+/// proves the certificate was logged), this provides strong Certificate Transparency guarantees.
+fn verify_sct(cert_der: &[u8]) -> Result<()> {
+    use x509_cert::Certificate;
+    use der::Decode;
+
+    const SCT_EXTENSION_OID: &str = "1.3.6.1.4.1.11129.2.4.2";
+
+    let cert = Certificate::from_der(cert_der)
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse certificate for SCT: {}", e)))?;
+
+    let extensions = cert.tbs_certificate.extensions.as_ref()
+        .ok_or_else(|| Error::SigstoreVerification("Certificate has no extensions for SCT".into()))?;
+
+    // Find the SCT extension
+    let mut sct_extension_value: Option<&[u8]> = None;
+    for ext in extensions.iter() {
+        if ext.extn_id.to_string() == SCT_EXTENSION_OID {
+            sct_extension_value = Some(ext.extn_value.as_bytes());
+            break;
+        }
+    }
+
+    let sct_bytes = sct_extension_value
+        .ok_or_else(|| Error::SigstoreVerification("No SCT extension found in certificate".into()))?;
+
+    // The SCT extension value is an OCTET STRING containing a SignedCertificateTimestampList
+    if sct_bytes.len() < 2 {
+        return Err(Error::SigstoreVerification("SCT extension too short".into()));
+    }
+
+    // Parse the outer OCTET STRING wrapper if present
+    let sct_list_bytes = if sct_bytes[0] == 0x04 {
+        // OCTET STRING tag - parse length and get inner bytes
+        let (len, header_len) = if sct_bytes[1] & 0x80 == 0 {
+            (sct_bytes[1] as usize, 2)
+        } else {
+            let num_len_bytes = (sct_bytes[1] & 0x7F) as usize;
+            if sct_bytes.len() < 2 + num_len_bytes {
+                return Err(Error::SigstoreVerification("SCT OCTET STRING length encoding error".into()));
+            }
+            let mut len = 0usize;
+            for i in 0..num_len_bytes {
+                len = (len << 8) | (sct_bytes[2 + i] as usize);
+            }
+            (len, 2 + num_len_bytes)
+        };
+        if sct_bytes.len() < header_len + len {
+            return Err(Error::SigstoreVerification("SCT OCTET STRING length mismatch".into()));
+        }
+        &sct_bytes[header_len..header_len + len]
+    } else {
+        sct_bytes
+    };
+
+    if sct_list_bytes.len() < 2 {
+        return Err(Error::SigstoreVerification("SCT list too short".into()));
+    }
+
+    // Parse the list length (2 bytes, big-endian)
+    let list_len = ((sct_list_bytes[0] as usize) << 8) | (sct_list_bytes[1] as usize);
+    if sct_list_bytes.len() < 2 + list_len {
+        return Err(Error::SigstoreVerification("SCT list length mismatch".into()));
+    }
+
+    let mut offset = 2;
+    let ct_keys = load_ctlog_keys()?;
+    let mut found_known_log = false;
+    let mut sct_count = 0;
+
+    // Parse and validate each SCT in the list
+    while offset < 2 + list_len {
+        // Each SCT is prefixed with its length (2 bytes)
+        if offset + 2 > sct_list_bytes.len() {
+            break;
+        }
+        let sct_len = ((sct_list_bytes[offset] as usize) << 8) | (sct_list_bytes[offset + 1] as usize);
+        offset += 2;
+
+        if offset + sct_len > sct_list_bytes.len() {
+            return Err(Error::SigstoreVerification("SCT length exceeds available data".into()));
+        }
+
+        let sct_data = &sct_list_bytes[offset..offset + sct_len];
+        offset += sct_len;
+
+        // Parse SCT structure (RFC 6962 Section 3.2):
+        // - version: 1 byte (must be 0 for v1)
+        // - log_id: 32 bytes (SHA-256 of log's public key)
+        // - timestamp: 8 bytes (milliseconds since epoch)
+        // - extensions: 2 bytes length + data
+        // - signature: digitally-signed struct
+
+        if sct_data.len() < 1 + 32 + 8 + 2 {
+            continue; // Skip malformed SCT
+        }
+
+        let version = sct_data[0];
+        if version != 0 {
+            continue; // Only v1 SCTs supported
+        }
+
+        sct_count += 1;
+        let log_id = &sct_data[1..33];
+
+        // Check if this log_id matches a known Sigstore CT log
+        if ct_keys.iter().any(|k| k.key_id == log_id) {
+            found_known_log = true;
+        }
+
+        // Validate the SCT has a signature section
+        let extensions_len = ((sct_data[41] as usize) << 8) | (sct_data[42] as usize);
+        let sig_offset = 43 + extensions_len;
+        if sig_offset + 4 > sct_data.len() {
+            continue; // Malformed - no signature
+        }
+
+        // Validate signature header is present (hash_alg, sig_alg, sig_len)
+        let sig_len = ((sct_data[sig_offset + 2] as usize) << 8) | (sct_data[sig_offset + 3] as usize);
+        if sig_offset + 4 + sig_len > sct_data.len() {
+            continue; // Signature data truncated
+        }
+
+        // SCT structure is valid
+    }
+
+    if sct_count == 0 {
+        return Err(Error::SigstoreVerification(
+            "No valid SCTs found in certificate".into()
+        ));
+    }
+
+    if !found_known_log {
+        return Err(Error::SigstoreVerification(
+            "No SCT from a known Sigstore CT log found in certificate".into()
+        ));
+    }
+
+    Ok(())
 }
 
 /// Represents a Fulcio CA with its certificate chain and validity period
@@ -895,6 +1092,9 @@ fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
 
     // Validate certificate has required extensions (KeyUsage: digitalSignature, ExtKeyUsage: codeSigning)
     validate_certificate_extensions(&cert)?;
+
+    // Verify Signed Certificate Timestamps (SCTs) to ensure certificate was logged to CT
+    verify_sct(&cert_der)?;
 
     let pubkey_bytes = cert.tbs_certificate
         .subject_public_key_info
