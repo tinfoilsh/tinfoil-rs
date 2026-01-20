@@ -589,7 +589,14 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
     if let Some(min_build) = options.minimum_build {
         if build < min_build {
             return Err(Error::AttestationVerification(format!(
-                "Firmware build {} is below minimum {}", build, min_build
+                "Current firmware build {} is below minimum {}", build, min_build
+            )));
+        }
+        // Also check committed build (matches Python reference)
+        let committed_build = report[COMMITTED_BUILD_OFFSET];
+        if committed_build < min_build {
+            return Err(Error::AttestationVerification(format!(
+                "Committed firmware build {} is below minimum {}", committed_build, min_build
             )));
         }
     }
@@ -600,8 +607,20 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
             let min_major = (min_version >> 8) as u8;
             let min_minor = (min_version & 0xFF) as u8;
             return Err(Error::AttestationVerification(format!(
-                "Firmware version {}.{} is below minimum {}.{}",
+                "Current firmware version {}.{} is below minimum {}.{}",
                 major, minor, min_major, min_minor
+            )));
+        }
+        // Also check committed version (matches Python reference)
+        let committed_major = report[COMMITTED_MAJOR_OFFSET];
+        let committed_minor = report[COMMITTED_MINOR_OFFSET];
+        let committed_version = (committed_major as u16) << 8 | (committed_minor as u16);
+        if committed_version < min_version {
+            let min_major = (min_version >> 8) as u8;
+            let min_minor = (min_version & 0xFF) as u8;
+            return Err(Error::AttestationVerification(format!(
+                "Committed firmware version {}.{} is below minimum {}.{}",
+                committed_major, committed_minor, min_major, min_minor
             )));
         }
     }
