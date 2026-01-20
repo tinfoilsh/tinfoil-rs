@@ -1426,14 +1426,21 @@ mod tests {
     
     #[test]
     fn test_measurement_fingerprint() {
-        let m = Measurement {
+        // Single register: returns raw value (matches Python algorithm)
+        let m_single = Measurement {
             type_: PredicateType::SevGuestV2,
             registers: vec!["abc123".to_string()],
         };
-        
-        let fp = m.fingerprint();
-        assert!(!fp.is_empty());
-        assert_eq!(fp.len(), 64);
+        let fp_single = m_single.fingerprint();
+        assert_eq!(fp_single, "abc123"); // Raw value, not hash
+
+        // Multiple registers: returns hash of type_url + registers.join("")
+        let m_multi = Measurement {
+            type_: PredicateType::TdxGuestV2,
+            registers: vec!["reg1".to_string(), "reg2".to_string()],
+        };
+        let fp_multi = m_multi.fingerprint();
+        assert_eq!(fp_multi.len(), 64); // SHA-256 hex is 64 chars
     }
     
     #[test]

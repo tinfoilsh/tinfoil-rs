@@ -7,15 +7,28 @@ use serde::{Deserialize, Serialize};
 pub enum PredicateType {
     #[serde(rename = "https://tinfoil.sh/predicate/sev-snp-guest/v2")]
     SevGuestV2,
-    
+
     #[serde(rename = "https://tinfoil.sh/predicate/tdx-guest/v2")]
     TdxGuestV2,
-    
+
     #[serde(rename = "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1")]
     SnpTdxMultiPlatformV1,
-    
+
     #[serde(other)]
     Unknown,
+}
+
+impl PredicateType {
+    /// Returns the URL string representation of this predicate type.
+    /// Used for fingerprint computation to match Python's algorithm.
+    pub fn as_url(&self) -> &'static str {
+        match self {
+            PredicateType::SevGuestV2 => "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+            PredicateType::TdxGuestV2 => "https://tinfoil.sh/predicate/tdx-guest/v2",
+            PredicateType::SnpTdxMultiPlatformV1 => "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1",
+            PredicateType::Unknown => "unknown",
+        }
+    }
 }
 
 /// Raw attestation document from the enclave
@@ -110,6 +123,10 @@ impl Measurement {
     }
     
     /// Compute fingerprint of measurement for its own type.
+    ///
+    /// Algorithm matches Python's tinfoil implementation:
+    /// - If single register, returns the raw register value (no hashing)
+    /// - Otherwise, hashes: type_url + registers.join("")
     pub fn fingerprint(&self) -> String {
         self.fingerprint_for_target(&self.type_)
     }
@@ -118,6 +135,10 @@ impl Measurement {
     ///
     /// For SEV-SNP (SevGuestV2), uses only the first register.
     /// For multi-platform source targeting SNP, extracts the SNP register.
+    ///
+    /// Algorithm matches Python's tinfoil implementation:
+    /// - If single register, returns the raw register value (no hashing)
+    /// - Otherwise, hashes: type_url + registers.join("")
     pub fn fingerprint_for_target(&self, target_type: &PredicateType) -> String {
         use sha2::{Sha256, Digest};
 
@@ -140,8 +161,14 @@ impl Measurement {
             }
         };
 
-        let joined = registers.join("|");
-        let hash = Sha256::digest(joined.as_bytes());
+        // Match Python: if single register, return raw value (no hashing)
+        if registers.len() == 1 {
+            return registers[0].to_string();
+        }
+
+        // Match Python: hash type_url + registers.join("") (empty separator)
+        let all_data = format!("{}{}", self.type_.as_url(), registers.join(""));
+        let hash = Sha256::digest(all_data.as_bytes());
         hex::encode(hash)
     }
 }
@@ -488,10 +515,12 @@ mod tests {
     fn test_fingerprint_consistency() {
         // Test that multi-platform source targeting SEV-SNP produces the same
         // fingerprint as the corresponding SEV-SNP enclave measurement
+        let snp_measurement = "33162608e171154bae88886365341dad7eb5821ba87785041f7f2f6281511a65b01069894cfebad5370939e05a0a1ca1";
+
         let router_mp = Measurement {
             type_: PredicateType::SnpTdxMultiPlatformV1,
             registers: vec![
-                "33162608e171154bae88886365341dad7eb5821ba87785041f7f2f6281511a65b01069894cfebad5370939e05a0a1ca1".into(),
+                snp_measurement.into(),
                 "896d8b9138548e63779a121b8c2b1a087ddaa39901e1fd096319ff0005b9699fe04dd13adb33063a1d65dd4bcdc2f5b1".into(),
                 "fbe40d6adb70ef8047dbfbd9be05fcf39d9dd32d5b88c70dd5c06024d3a8d79a5d2e9e9723d3b3cb206bfd887eddcdec".into(),
             ],
@@ -499,14 +528,15 @@ mod tests {
 
         let snp_enclave = Measurement {
             type_: PredicateType::SevGuestV2,
-            registers: vec!["33162608e171154bae88886365341dad7eb5821ba87785041f7f2f6281511a65b01069894cfebad5370939e05a0a1ca1".into()],
+            registers: vec![snp_measurement.into()],
         };
 
         // Fingerprints should match when targeting SEV-SNP
+        // Both result in single register, so raw value is returned (not hash)
         let source_fp = router_mp.fingerprint_for_target(&PredicateType::SevGuestV2);
         let enclave_fp = snp_enclave.fingerprint();
 
         assert_eq!(source_fp, enclave_fp);
-        assert_eq!(source_fp, "08ea4d8c2e8da077c682529d3cd1d1500d84e100df6b81781e38733f0589cfa1");
+        assert_eq!(source_fp, snp_measurement); // Raw register, not hash
     }
 }
