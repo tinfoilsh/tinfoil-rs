@@ -892,7 +892,10 @@ fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
     
     let cert = Certificate::from_der(&cert_der)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to parse certificate: {}", e)))?;
-    
+
+    // Validate certificate has required extensions (KeyUsage: digitalSignature, ExtKeyUsage: codeSigning)
+    validate_certificate_extensions(&cert)?;
+
     let pubkey_bytes = cert.tbs_certificate
         .subject_public_key_info
         .subject_public_key
@@ -989,6 +992,72 @@ fn decode_asn1_string(bytes: &[u8]) -> Option<String> {
     }
 
     String::from_utf8(bytes[header_len..total_len].to_vec()).ok()
+}
+
+/// Validate certificate extensions for Fulcio code signing requirements.
+///
+/// Per Sigstore specification, a valid Fulcio certificate must have:
+/// 1. KeyUsage extension with digitalSignature bit set
+/// 2. ExtendedKeyUsage extension containing codeSigning OID (1.3.6.1.5.5.7.3.3)
+fn validate_certificate_extensions(cert: &x509_cert::Certificate) -> Result<()> {
+    // OIDs for standard extensions
+    const KEY_USAGE_OID: &str = "2.5.29.15";
+    const EXT_KEY_USAGE_OID: &str = "2.5.29.37";
+
+    let extensions = cert.tbs_certificate.extensions.as_ref()
+        .ok_or_else(|| Error::SigstoreVerification("Certificate has no extensions".into()))?;
+
+    let mut has_digital_signature = false;
+    let mut has_code_signing = false;
+
+    for ext in extensions.iter() {
+        let oid_str = ext.extn_id.to_string();
+
+        if oid_str == KEY_USAGE_OID {
+            // KeyUsage is a BIT STRING. The digitalSignature bit is bit 0.
+            // The extension value is wrapped in an OCTET STRING, containing the BIT STRING.
+            let raw = ext.extn_value.as_bytes();
+            // Parse: OCTET STRING contains BIT STRING (tag 0x03)
+            if raw.len() >= 4 && raw[0] == 0x03 {
+                let bit_string_len = raw[1] as usize;
+                if bit_string_len >= 2 && raw.len() >= 2 + bit_string_len {
+                    // raw[2] is the number of unused bits in the last byte
+                    // raw[3] is the actual key usage bits
+                    let key_usage_bits = raw[3];
+                    // digitalSignature is bit 0 (most significant bit in the byte)
+                    if key_usage_bits & 0x80 != 0 {
+                        has_digital_signature = true;
+                    }
+                }
+            }
+        } else if oid_str == EXT_KEY_USAGE_OID {
+            // ExtendedKeyUsage is a SEQUENCE of OIDs
+            let raw = ext.extn_value.as_bytes();
+            // The raw bytes contain a SEQUENCE of OID values
+            // We'll check if the codeSigning OID bytes are present
+            // codeSigning OID: 1.3.6.1.5.5.7.3.3 encoded as: 06 08 2B 06 01 05 05 07 03 03
+            let code_signing_der: [u8; 10] = [0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x03];
+
+            // Search for the OID within the extension value
+            if raw.windows(code_signing_der.len()).any(|w| w == code_signing_der) {
+                has_code_signing = true;
+            }
+        }
+    }
+
+    if !has_digital_signature {
+        return Err(Error::SigstoreVerification(
+            "Certificate KeyUsage does not include digitalSignature".into()
+        ));
+    }
+
+    if !has_code_signing {
+        return Err(Error::SigstoreVerification(
+            "Certificate ExtendedKeyUsage does not include codeSigning".into()
+        ));
+    }
+
+    Ok(())
 }
 
 /// Extract certificate info from the bundle
