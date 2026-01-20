@@ -779,13 +779,20 @@ fn decode_der_integer(data: &[u8]) -> Result<u8> {
             "Invalid DER INTEGER length".into()
         ));
     }
-    // Handle potential leading zero for positive integers
     let value_bytes = &data[2..2 + len];
     if value_bytes.is_empty() {
         return Ok(0);
     }
-    // Take the last byte (handles both single byte and padded integers)
-    Ok(*value_bytes.last().unwrap())
+    // DER integers may have a leading 0x00 byte to indicate positive sign
+    // For u8, we allow: [0x00, val] or [val] where val <= 255
+    match value_bytes.len() {
+        1 => Ok(value_bytes[0]),
+        2 if value_bytes[0] == 0x00 => Ok(value_bytes[1]),
+        _ => Err(Error::AttestationVerification(format!(
+            "DER INTEGER value {} does not fit in u8",
+            hex::encode(value_bytes)
+        ))),
+    }
 }
 
 /// Extract extension value by OID from VCEK certificate
@@ -894,7 +901,7 @@ fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> Result<()> 
     // Validate PRODUCT_NAME is "Genoa" (ASN.1 IA5String: 0x16 0x05 "Genoa")
     let vcek_product = get_vcek_extension(vcek_der, OID_PRODUCT_NAME)?
         .ok_or_else(|| Error::AttestationVerification("Missing PRODUCT_NAME in VCEK".into()))?;
-    // Expected: UTF8String tag (0x16), length (0x05), "Genoa"
+    // Expected: IA5String tag (0x16), length (0x05), "Genoa"
     let expected_product = b"\x16\x05Genoa";
     if vcek_product != expected_product {
         return Err(Error::AttestationVerification(format!(
