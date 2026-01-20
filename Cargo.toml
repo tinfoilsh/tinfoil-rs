@@ -26,7 +26,10 @@ sev = { version = "7", default-features = false, features = ["snp", "crypto_noss
 
 # Crypto primitives
 sha2 = "0.10"
-x509-cert = "0.2"
+x509-cert = { version = "0.2", features = ["sct"] }
+
+# TLS encoding for SCT verification (used by x509-cert's sct feature)
+tls_codec = { version = "0.4", features = ["derive"] }
 der = "0.7"
 p384 = "0.13"
 p256 = "0.13"  # For Fulcio certificate ECDSA (P-256/secp256r1)
@@ -60,6 +63,10 @@ hex = "0.4"
 
 # Regex for certificate identity matching
 regex = "1"
+
+# NOTE: sigstore-rs 0.13.0 uses Rust 2024 edition with let-chains (stabilized in 1.88.0)
+# which don't compile on Rust 1.87. We implement verification manually in src/sigstore.rs.
+# sigstore = { version = "0.13", default-features = false, features = ["verify", "cert", "rekor", "rustls-tls"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
