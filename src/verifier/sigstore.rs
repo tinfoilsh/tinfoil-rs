@@ -101,12 +101,23 @@ fn load_rekor_keys() -> Result<Vec<(String, Vec<u8>, String)>> {
 struct CtLogKey {
     /// Key ID (SHA-256 hash of the log's public key)
     key_id: Vec<u8>,
-    /// DER-encoded public key - kept for potential future cryptographic verification
-    #[allow(dead_code)]
+    /// DER-encoded public key (SPKI format)
     public_key_der: Vec<u8>,
-    /// Key algorithm (e.g., "PKIX_ECDSA_P256_SHA_256") - kept for potential future validation
-    #[allow(dead_code)]
+    /// Key algorithm (e.g., "PKIX_ECDSA_P256_SHA_256")
     key_details: String,
+}
+
+/// Parsed SCT data
+struct ParsedSct {
+    version: u8,
+    log_id: Vec<u8>,
+    timestamp: u64,
+    extensions: Vec<u8>,
+    #[allow(dead_code)]
+    hash_algorithm: u8,
+    #[allow(dead_code)]
+    signature_algorithm: u8,
+    signature: Vec<u8>,
 }
 
 /// Load Certificate Transparency log public keys from embedded trust root
@@ -131,32 +142,132 @@ fn load_ctlog_keys() -> Result<Vec<CtLogKey>> {
     Ok(keys)
 }
 
+/// SCT extension OID (1.3.6.1.4.1.11129.2.4.2)
+const SCT_EXTENSION_OID: &str = "1.3.6.1.4.1.11129.2.4.2";
+
 /// Verify Signed Certificate Timestamps (SCTs) embedded in the certificate.
 ///
 /// Per RFC 6962, SCTs prove the certificate was submitted to Certificate Transparency logs.
-/// This validates that the certificate contains valid SCT structures from known CT logs.
-///
-/// Note: Fulcio certificates use precertificate SCTs (entry_type=1), which are signed over
-/// the TBSCertificate with a poison extension. Full cryptographic verification of precert
-/// SCTs requires reconstructing the precertificate, which is complex. This implementation
-/// validates:
-/// 1. The SCT extension is present (OID 1.3.6.1.4.1.11129.2.4.2)
-/// 2. The SCT list is well-formed per RFC 6962
-/// 3. At least one SCT references a known Sigstore CT log
-///
-/// Combined with mandatory Rekor transparency log verification (which cryptographically
-/// proves the certificate was logged), this provides strong Certificate Transparency guarantees.
-fn verify_sct(cert_der: &[u8]) -> Result<()> {
+/// This performs full cryptographic verification of precertificate SCTs:
+/// 1. Parses SCTs from the certificate extension
+/// 2. Reconstructs the PreCert (issuer key hash + TBS without SCT extension)
+/// 3. Builds the digitally-signed struct per RFC 6962
+/// 4. Verifies the ECDSA signature against the CT log's public key
+/// 5. Requires at least one valid SCT from a known Sigstore CT log
+fn verify_sct(cert_der: &[u8], issuer_spki_der: &[u8]) -> Result<()> {
+    use sha2::{Sha256, Digest};
     use x509_cert::Certificate;
-    use der::Decode;
-
-    const SCT_EXTENSION_OID: &str = "1.3.6.1.4.1.11129.2.4.2";
+    use der::{Decode, Encode};
+    use p256::ecdsa::{Signature, signature::Verifier};
 
     let cert = Certificate::from_der(cert_der)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to parse certificate for SCT: {}", e)))?;
 
+    // Parse SCTs from the certificate
+    let scts = parse_scts_from_cert(&cert)?;
+    if scts.is_empty() {
+        return Err(Error::SigstoreVerification("No valid SCTs found in certificate".into()));
+    }
+
+    // Compute issuer key hash (SHA-256 of issuer's SPKI)
+    let issuer_key_hash: [u8; 32] = Sha256::digest(issuer_spki_der).into();
+
+    // Build PreCert: TBS certificate with SCT extension removed
+    let mut tbs_precert = cert.tbs_certificate.clone();
+    if let Some(ref extensions) = tbs_precert.extensions {
+        let filtered: Vec<_> = extensions.iter()
+            .filter(|ext| ext.extn_id.to_string() != SCT_EXTENSION_OID)
+            .cloned()
+            .collect();
+        tbs_precert.extensions = if filtered.is_empty() { None } else { Some(filtered) };
+    }
+
+    let tbs_precert_der = tbs_precert.to_der()
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to encode TBS: {}", e)))?;
+
+    // Load CT log keys
+    let ct_keys = load_ctlog_keys()?;
+
+    // Try to verify at least one SCT
+    let mut verified_count = 0;
+
+    for sct in &scts {
+        // Find matching CT log by key ID
+        let ct_key = match ct_keys.iter().find(|k| k.key_id == sct.log_id) {
+            Some(k) => k,
+            None => continue, // Unknown log, skip
+        };
+
+        // Build the digitally-signed struct (RFC 6962 Section 3.2)
+        // struct {
+        //     Version sct_version;           // 1 byte
+        //     SignatureType signature_type;  // 1 byte (0 = certificate_timestamp)
+        //     uint64 timestamp;              // 8 bytes
+        //     LogEntryType entry_type;       // 2 bytes (1 = precert_entry)
+        //     PreCert signed_entry;          // issuer_key_hash[32] + uint24 len + tbs
+        //     CtExtensions extensions;       // uint16 len + data
+        // }
+        let mut signed_data = Vec::new();
+        signed_data.push(sct.version);           // version
+        signed_data.push(0x00);                  // signature_type = certificate_timestamp
+        signed_data.extend_from_slice(&sct.timestamp.to_be_bytes()); // timestamp (8 bytes BE)
+        signed_data.extend_from_slice(&[0x00, 0x01]); // entry_type = precert_entry
+
+        // PreCert: issuer_key_hash + uint24(tbs_len) + tbs
+        signed_data.extend_from_slice(&issuer_key_hash);
+        let tbs_len = tbs_precert_der.len() as u32;
+        signed_data.push((tbs_len >> 16) as u8);
+        signed_data.push((tbs_len >> 8) as u8);
+        signed_data.push(tbs_len as u8);
+        signed_data.extend_from_slice(&tbs_precert_der);
+
+        // Extensions
+        let ext_len = sct.extensions.len() as u16;
+        signed_data.extend_from_slice(&ext_len.to_be_bytes());
+        signed_data.extend_from_slice(&sct.extensions);
+
+        // Verify ECDSA P-256 signature
+        // CT log keys are SPKI format, extract raw public key
+        if ct_key.key_details != "PKIX_ECDSA_P256_SHA_256" {
+            continue; // Unsupported key type
+        }
+
+        let verifying_key = match parse_p256_public_key(&ct_key.public_key_der) {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+
+        let signature = match Signature::from_der(&sct.signature) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        if verifying_key.verify(&signed_data, &signature).is_ok() {
+            verified_count += 1;
+            break; // One verified SCT is sufficient
+        }
+    }
+
+    if verified_count == 0 {
+        return Err(Error::SigstoreVerification(
+            "No SCT signature verified against known CT logs".into()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Parse P-256 public key from SPKI DER format
+fn parse_p256_public_key(spki_der: &[u8]) -> Result<p256::ecdsa::VerifyingKey> {
+    use p256::pkcs8::DecodePublicKey;
+    p256::ecdsa::VerifyingKey::from_public_key_der(spki_der)
+        .map_err(|e| Error::SigstoreVerification(format!("Invalid P-256 public key: {}", e)))
+}
+
+/// Parse SCTs from certificate extension
+fn parse_scts_from_cert(cert: &x509_cert::Certificate) -> Result<Vec<ParsedSct>> {
     let extensions = cert.tbs_certificate.extensions.as_ref()
-        .ok_or_else(|| Error::SigstoreVerification("Certificate has no extensions for SCT".into()))?;
+        .ok_or_else(|| Error::SigstoreVerification("Certificate has no extensions".into()))?;
 
     // Find the SCT extension
     let mut sct_extension_value: Option<&[u8]> = None;
@@ -170,31 +281,13 @@ fn verify_sct(cert_der: &[u8]) -> Result<()> {
     let sct_bytes = sct_extension_value
         .ok_or_else(|| Error::SigstoreVerification("No SCT extension found in certificate".into()))?;
 
-    // The SCT extension value is an OCTET STRING containing a SignedCertificateTimestampList
-    if sct_bytes.len() < 2 {
-        return Err(Error::SigstoreVerification("SCT extension too short".into()));
-    }
-
     // Parse the outer OCTET STRING wrapper if present
-    let sct_list_bytes = if sct_bytes[0] == 0x04 {
-        // OCTET STRING tag - parse length and get inner bytes
-        let (len, header_len) = if sct_bytes[1] & 0x80 == 0 {
-            (sct_bytes[1] as usize, 2)
-        } else {
-            let num_len_bytes = (sct_bytes[1] & 0x7F) as usize;
-            if sct_bytes.len() < 2 + num_len_bytes {
-                return Err(Error::SigstoreVerification("SCT OCTET STRING length encoding error".into()));
-            }
-            let mut len = 0usize;
-            for i in 0..num_len_bytes {
-                len = (len << 8) | (sct_bytes[2 + i] as usize);
-            }
-            (len, 2 + num_len_bytes)
-        };
-        if sct_bytes.len() < header_len + len {
+    let sct_list_bytes = if sct_bytes.len() >= 2 && sct_bytes[0] == 0x04 {
+        let (len, header_len) = parse_der_length(&sct_bytes[1..])?;
+        if sct_bytes.len() < 1 + header_len + len {
             return Err(Error::SigstoreVerification("SCT OCTET STRING length mismatch".into()));
         }
-        &sct_bytes[header_len..header_len + len]
+        &sct_bytes[1 + header_len..1 + header_len + len]
     } else {
         sct_bytes
     };
@@ -209,14 +302,10 @@ fn verify_sct(cert_der: &[u8]) -> Result<()> {
         return Err(Error::SigstoreVerification("SCT list length mismatch".into()));
     }
 
+    let mut scts = Vec::new();
     let mut offset = 2;
-    let ct_keys = load_ctlog_keys()?;
-    let mut found_known_log = false;
-    let mut sct_count = 0;
 
-    // Parse and validate each SCT in the list
     while offset < 2 + list_len {
-        // Each SCT is prefixed with its length (2 bytes)
         if offset + 2 > sct_list_bytes.len() {
             break;
         }
@@ -227,62 +316,118 @@ fn verify_sct(cert_der: &[u8]) -> Result<()> {
             return Err(Error::SigstoreVerification("SCT length exceeds available data".into()));
         }
 
-        let sct_data = &sct_list_bytes[offset..offset + sct_len];
+        if let Some(sct) = parse_single_sct(&sct_list_bytes[offset..offset + sct_len]) {
+            scts.push(sct);
+        }
         offset += sct_len;
-
-        // Parse SCT structure (RFC 6962 Section 3.2):
-        // - version: 1 byte (must be 0 for v1)
-        // - log_id: 32 bytes (SHA-256 of log's public key)
-        // - timestamp: 8 bytes (milliseconds since epoch)
-        // - extensions: 2 bytes length + data
-        // - signature: digitally-signed struct
-
-        if sct_data.len() < 1 + 32 + 8 + 2 {
-            continue; // Skip malformed SCT
-        }
-
-        let version = sct_data[0];
-        if version != 0 {
-            continue; // Only v1 SCTs supported
-        }
-
-        sct_count += 1;
-        let log_id = &sct_data[1..33];
-
-        // Check if this log_id matches a known Sigstore CT log
-        if ct_keys.iter().any(|k| k.key_id == log_id) {
-            found_known_log = true;
-        }
-
-        // Validate the SCT has a signature section
-        let extensions_len = ((sct_data[41] as usize) << 8) | (sct_data[42] as usize);
-        let sig_offset = 43 + extensions_len;
-        if sig_offset + 4 > sct_data.len() {
-            continue; // Malformed - no signature
-        }
-
-        // Validate signature header is present (hash_alg, sig_alg, sig_len)
-        let sig_len = ((sct_data[sig_offset + 2] as usize) << 8) | (sct_data[sig_offset + 3] as usize);
-        if sig_offset + 4 + sig_len > sct_data.len() {
-            continue; // Signature data truncated
-        }
-
-        // SCT structure is valid
     }
 
-    if sct_count == 0 {
-        return Err(Error::SigstoreVerification(
-            "No valid SCTs found in certificate".into()
-        ));
+    Ok(scts)
+}
+
+/// Parse DER length encoding, returns (length, bytes_consumed)
+fn parse_der_length(bytes: &[u8]) -> Result<(usize, usize)> {
+    if bytes.is_empty() {
+        return Err(Error::SigstoreVerification("Empty DER length".into()));
+    }
+    if bytes[0] & 0x80 == 0 {
+        Ok((bytes[0] as usize, 1))
+    } else {
+        let num_len_bytes = (bytes[0] & 0x7F) as usize;
+        if bytes.len() < 1 + num_len_bytes {
+            return Err(Error::SigstoreVerification("DER length encoding error".into()));
+        }
+        let mut len = 0usize;
+        for i in 0..num_len_bytes {
+            len = (len << 8) | (bytes[1 + i] as usize);
+        }
+        Ok((len, 1 + num_len_bytes))
+    }
+}
+
+/// Parse a single SCT from raw bytes
+fn parse_single_sct(data: &[u8]) -> Option<ParsedSct> {
+    // RFC 6962 Section 3.2:
+    // version: 1 byte (must be 0 for v1)
+    // log_id: 32 bytes
+    // timestamp: 8 bytes (milliseconds since epoch)
+    // extensions: 2 bytes length + data
+    // hash_alg: 1 byte
+    // sig_alg: 1 byte
+    // signature: 2 bytes length + data
+
+    if data.len() < 1 + 32 + 8 + 2 {
+        return None;
     }
 
-    if !found_known_log {
-        return Err(Error::SigstoreVerification(
-            "No SCT from a known Sigstore CT log found in certificate".into()
-        ));
+    let version = data[0];
+    if version != 0 {
+        return None; // Only v1 supported
     }
 
-    Ok(())
+    let log_id = data[1..33].to_vec();
+    let timestamp = u64::from_be_bytes(data[33..41].try_into().ok()?);
+
+    let extensions_len = ((data[41] as usize) << 8) | (data[42] as usize);
+    let ext_end = 43 + extensions_len;
+    if data.len() < ext_end + 4 {
+        return None;
+    }
+
+    let extensions = data[43..ext_end].to_vec();
+
+    let hash_algorithm = data[ext_end];
+    let signature_algorithm = data[ext_end + 1];
+
+    let sig_len = ((data[ext_end + 2] as usize) << 8) | (data[ext_end + 3] as usize);
+    let sig_start = ext_end + 4;
+    if data.len() < sig_start + sig_len {
+        return None;
+    }
+
+    let signature = data[sig_start..sig_start + sig_len].to_vec();
+
+    Some(ParsedSct {
+        version,
+        log_id,
+        timestamp,
+        extensions,
+        hash_algorithm,
+        signature_algorithm,
+        signature,
+    })
+}
+
+/// Find the issuer certificate's SPKI for a given certificate
+fn find_issuer_spki(cert: &x509_cert::Certificate) -> Result<Vec<u8>> {
+    use der::{Decode, Encode};
+
+    let fulcio_cas = load_fulcio_cas()?;
+
+    // Try each Fulcio CA to find the matching issuer
+    for ca in &fulcio_cas {
+        if ca.cert_chain_der.is_empty() {
+            continue;
+        }
+
+        let issuer_cert = match x509_cert::Certificate::from_der(&ca.cert_chain_der[0]) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Check if issuer DN matches
+        if cert.tbs_certificate.issuer == issuer_cert.tbs_certificate.subject {
+            // Return the issuer's SPKI in DER format
+            return issuer_cert.tbs_certificate
+                .subject_public_key_info
+                .to_der()
+                .map_err(|e| Error::SigstoreVerification(format!("Failed to encode issuer SPKI: {}", e)));
+        }
+    }
+
+    Err(Error::SigstoreVerification(
+        "Could not find issuer certificate for SCT verification".into()
+    ))
 }
 
 /// Represents a Fulcio CA with its certificate chain and validity period
@@ -1093,8 +1238,11 @@ fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
     // Validate certificate has required extensions (KeyUsage: digitalSignature, ExtKeyUsage: codeSigning)
     validate_certificate_extensions(&cert)?;
 
-    // Verify Signed Certificate Timestamps (SCTs) to ensure certificate was logged to CT
-    verify_sct(&cert_der)?;
+    // Find the issuer certificate's SPKI for SCT verification
+    let issuer_spki_der = find_issuer_spki(&cert)?;
+
+    // Verify Signed Certificate Timestamps (SCTs) with full cryptographic verification
+    verify_sct(&cert_der, &issuer_spki_der)?;
 
     let pubkey_bytes = cert.tbs_certificate
         .subject_public_key_info
