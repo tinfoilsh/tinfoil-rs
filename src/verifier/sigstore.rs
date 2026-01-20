@@ -149,6 +149,89 @@ fn verify_certificate_binding(bundle: &serde_json::Value, canonicalized_body: &[
     Ok(())
 }
 
+/// Verify that the signature in the bundle matches the signature in the Rekor entry.
+///
+/// This is critical for security: the Rekor entry's canonicalizedBody contains the
+/// signature that was actually logged. If we don't verify this binding, an attacker
+/// could substitute a different signature in the bundle while keeping the valid
+/// Rekor entry.
+fn verify_signature_binding(bundle: &serde_json::Value, canonicalized_body: &[u8]) -> Result<()> {
+    // Parse the canonicalizedBody as JSON
+    let entry: serde_json::Value = serde_json::from_slice(canonicalized_body)
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse canonicalizedBody: {}", e)))?;
+
+    // Determine the entry kind and extract signature accordingly
+    let kind = entry.get("kind")
+        .and_then(|k| k.as_str())
+        .unwrap_or("unknown");
+
+    let rekor_signature_bytes = match kind {
+        "dsse" => {
+            // DSSE format: spec.signatures[0].signature contains base64-encoded signature
+            let sig_b64 = entry
+                .get("spec")
+                .and_then(|s| s.get("signatures"))
+                .and_then(|s| s.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|sig| sig.get("signature"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Error::SigstoreVerification(
+                    "Missing signature in DSSE Rekor entry (spec.signatures[0].signature)".into()
+                ))?;
+
+            base64::engine::general_purpose::STANDARD
+                .decode(sig_b64)
+                .map_err(|e| Error::SigstoreVerification(format!("Failed to decode Rekor signature: {}", e)))?
+        }
+        "hashedrekord" => {
+            // hashedrekord format: spec.signature.content contains base64-encoded signature
+            let sig_b64 = entry
+                .get("spec")
+                .and_then(|s| s.get("signature"))
+                .and_then(|s| s.get("content"))
+                .and_then(|c| c.as_str())
+                .ok_or_else(|| Error::SigstoreVerification(
+                    "Missing signature in hashedrekord Rekor entry (spec.signature.content)".into()
+                ))?;
+
+            base64::engine::general_purpose::STANDARD
+                .decode(sig_b64)
+                .map_err(|e| Error::SigstoreVerification(format!("Failed to decode Rekor signature: {}", e)))?
+        }
+        _ => {
+            return Err(Error::SigstoreVerification(format!(
+                "Unknown Rekor entry kind: {}. Expected 'dsse' or 'hashedrekord'", kind
+            )));
+        }
+    };
+
+    // Get signature from bundle's DSSE envelope
+    let bundle_sig_b64 = bundle
+        .get("dsseEnvelope")
+        .and_then(|dsse| dsse.get("signatures"))
+        .and_then(|s| s.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|sig| sig.get("sig"))
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| Error::SigstoreVerification(
+            "Missing signature in bundle (dsseEnvelope.signatures[0].sig)".into()
+        ))?;
+
+    let bundle_sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(bundle_sig_b64)
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode bundle signature: {}", e)))?;
+
+    // Compare the signatures
+    if rekor_signature_bytes != bundle_sig_bytes {
+        return Err(Error::SigstoreVerification(
+            "Signature mismatch: bundle signature does not match Rekor entry signature. \
+             This could indicate a substitution attack.".into()
+        ));
+    }
+
+    Ok(())
+}
+
 /// Parse a PEM-encoded certificate and return the DER bytes.
 fn parse_pem_certificate(pem: &str) -> Result<Vec<u8>> {
     // Find the certificate content between BEGIN and END markers
@@ -184,6 +267,7 @@ fn parse_pem_certificate(pem: &str) -> Result<Vec<u8>> {
 /// 3. The checkpoint signature is valid (signed by Rekor's key)
 /// 4. The inclusion proof is valid (Merkle path from leaf to root)
 /// 5. The certificate in the bundle matches the one in the Rekor entry
+/// 6. The signature in the bundle matches the one in the Rekor entry
 fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert_not_after: u64) -> Result<()> {
     use sha2::{Sha256, Digest};
 
@@ -294,6 +378,9 @@ fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert_not
 
     // Verify certificate binding: ensure the certificate in the bundle matches the one in the Rekor entry
     verify_certificate_binding(bundle, &body_bytes)?;
+
+    // Verify signature binding: ensure the signature in the bundle matches the one in the Rekor entry
+    verify_signature_binding(bundle, &body_bytes)?;
 
     // RFC 6962 leaf hash: SHA256(0x00 || data)
     let mut leaf_hasher = Sha256::new();
