@@ -31,6 +31,7 @@ x509-cert = { version = "0.2", features = ["sct"] }
 # TLS encoding for SCT verification (used by x509-cert's sct feature)
 tls_codec = { version = "0.4", features = ["derive"] }
 der = "0.7"
+const-oid = { version = "0.9", features = ["db"] }
 p384 = "0.13"
 p256 = "0.13"  # For Fulcio certificate ECDSA (P-256/secp256r1)
 ecdsa = { version = "0.16", features = ["verifying"] }

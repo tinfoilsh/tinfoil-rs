@@ -10,6 +10,7 @@
 //! 6. Extracting the expected measurement
 
 // Submodules adapted from sigstore-rs (Apache 2.0 License)
+pub mod certificate;
 pub mod keyring;
 pub mod transparency;
 
@@ -864,13 +865,8 @@ struct Subject {
     digest: std::collections::HashMap<String, String>,
 }
 
-/// Verification certificate info extracted from bundle
-#[derive(Debug)]
-pub struct CertificateInfo {
-    pub issuer: String,
-    pub subject_workflow: String,
-    pub repository: String,
-}
+// Re-export CertificateInfo from certificate module
+pub use certificate::CertificateInfo;
 
 /// Verify a repository and return the expected measurement.
 ///
@@ -897,7 +893,7 @@ pub async fn verify_repo(repo: &str) -> Result<Measurement> {
     verify_dsse_signature(&bundle)?;
 
     // 5. Verify certificate is from GitHub Actions for this repo
-    let cert_info = extract_certificate_info(&bundle)?;
+    let cert_info = extract_certificate_info_from_bundle(&bundle)?;
     verify_certificate_identity(&cert_info, repo)?;
 
     // 6. Verify Rekor transparency log entry (mandatory)
@@ -991,7 +987,7 @@ fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
         .map_err(|e| Error::SigstoreVerification(format!("Failed to parse certificate: {}", e)))?;
 
     // Validate certificate has required extensions (KeyUsage: digitalSignature, ExtKeyUsage: codeSigning)
-    validate_certificate_extensions(&cert)?;
+    certificate::validate_certificate_extensions(&cert)?;
 
     // Find the issuer certificate's SPKI for SCT verification
     let issuer_spki_der = find_issuer_spki(&cert)?;
@@ -1057,114 +1053,8 @@ fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-/// Decode an ASN.1 string from extension value bytes.
-/// Fulcio uses UTF8String (tag 0x0C) for these extensions.
-fn decode_asn1_string(bytes: &[u8]) -> Option<String> {
-    if bytes.len() < 2 {
-        return None;
-    }
-
-    // Check for UTF8String (0x0C) or IA5String (0x16) or PrintableString (0x13)
-    let tag = bytes[0];
-    if tag != 0x0C && tag != 0x16 && tag != 0x13 {
-        return None;
-    }
-
-    // Parse length - handle both short and long form
-    let length_byte = bytes[1];
-    let (len, header_len) = if length_byte & 0x80 == 0 {
-        // Short form: length < 128, single byte
-        (length_byte as usize, 2)
-    } else {
-        // Long form: first byte indicates number of length bytes
-        let num_length_bytes = (length_byte & 0x7F) as usize;
-        if num_length_bytes == 0 || num_length_bytes > 4 || bytes.len() < 2 + num_length_bytes {
-            return None;
-        }
-
-        let mut len: usize = 0;
-        for i in 0..num_length_bytes {
-            len = (len << 8) | (bytes[2 + i] as usize);
-        }
-        (len, 2 + num_length_bytes)
-    };
-
-    let total_len = header_len.checked_add(len)?;
-    if bytes.len() < total_len {
-        return None;
-    }
-
-    String::from_utf8(bytes[header_len..total_len].to_vec()).ok()
-}
-
-/// Validate certificate extensions for Fulcio code signing requirements.
-///
-/// Per Sigstore specification, a valid Fulcio certificate must have:
-/// 1. KeyUsage extension with digitalSignature bit set
-/// 2. ExtendedKeyUsage extension containing codeSigning OID (1.3.6.1.5.5.7.3.3)
-fn validate_certificate_extensions(cert: &x509_cert::Certificate) -> Result<()> {
-    // OIDs for standard extensions
-    const KEY_USAGE_OID: &str = "2.5.29.15";
-    const EXT_KEY_USAGE_OID: &str = "2.5.29.37";
-
-    let extensions = cert.tbs_certificate.extensions.as_ref()
-        .ok_or_else(|| Error::SigstoreVerification("Certificate has no extensions".into()))?;
-
-    let mut has_digital_signature = false;
-    let mut has_code_signing = false;
-
-    for ext in extensions.iter() {
-        let oid_str = ext.extn_id.to_string();
-
-        if oid_str == KEY_USAGE_OID {
-            // KeyUsage is a BIT STRING. The digitalSignature bit is bit 0.
-            // The extension value is wrapped in an OCTET STRING, containing the BIT STRING.
-            let raw = ext.extn_value.as_bytes();
-            // Parse: OCTET STRING contains BIT STRING (tag 0x03)
-            if raw.len() >= 4 && raw[0] == 0x03 {
-                let bit_string_len = raw[1] as usize;
-                if bit_string_len >= 2 && raw.len() >= 2 + bit_string_len {
-                    // raw[2] is the number of unused bits in the last byte
-                    // raw[3] is the actual key usage bits
-                    let key_usage_bits = raw[3];
-                    // digitalSignature is bit 0 (most significant bit in the byte)
-                    if key_usage_bits & 0x80 != 0 {
-                        has_digital_signature = true;
-                    }
-                }
-            }
-        } else if oid_str == EXT_KEY_USAGE_OID {
-            // ExtendedKeyUsage is a SEQUENCE of OIDs
-            let raw = ext.extn_value.as_bytes();
-            // The raw bytes contain a SEQUENCE of OID values
-            // We'll check if the codeSigning OID bytes are present
-            // codeSigning OID: 1.3.6.1.5.5.7.3.3 encoded as: 06 08 2B 06 01 05 05 07 03 03
-            let code_signing_der: [u8; 10] = [0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x03];
-
-            // Search for the OID within the extension value
-            if raw.windows(code_signing_der.len()).any(|w| w == code_signing_der) {
-                has_code_signing = true;
-            }
-        }
-    }
-
-    if !has_digital_signature {
-        return Err(Error::SigstoreVerification(
-            "Certificate KeyUsage does not include digitalSignature".into()
-        ));
-    }
-
-    if !has_code_signing {
-        return Err(Error::SigstoreVerification(
-            "Certificate ExtendedKeyUsage does not include codeSigning".into()
-        ));
-    }
-
-    Ok(())
-}
-
 /// Extract certificate info from the bundle
-fn extract_certificate_info(bundle: &serde_json::Value) -> Result<CertificateInfo> {
+fn extract_certificate_info_from_bundle(bundle: &serde_json::Value) -> Result<CertificateInfo> {
     use x509_cert::Certificate;
     use der::Decode;
 
@@ -1183,38 +1073,8 @@ fn extract_certificate_info(bundle: &serde_json::Value) -> Result<CertificateInf
     let cert = Certificate::from_der(&cert_der)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to parse certificate: {}", e)))?;
 
-    // Extract extensions
-    let mut issuer = String::new();
-    let mut repository = String::new();
-    let mut subject_workflow = String::new();
-
-    if let Some(extensions) = &cert.tbs_certificate.extensions {
-        for ext in extensions.iter() {
-            let oid_str = ext.extn_id.to_string();
-            let raw_bytes = ext.extn_value.as_bytes();
-
-            // Decode as ASN.1 string, fall back to raw UTF-8 if that fails
-            let value = decode_asn1_string(raw_bytes)
-                .unwrap_or_else(|| String::from_utf8_lossy(raw_bytes).to_string());
-
-            // Fulcio OIDC Issuer (1.3.6.1.4.1.57264.1.1)
-            if oid_str == "1.3.6.1.4.1.57264.1.1" {
-                issuer = value;
-            } else if oid_str == "1.3.6.1.4.1.57264.1.9" {
-                // Build Signer URI
-                subject_workflow = value;
-            } else if oid_str == "1.3.6.1.4.1.57264.1.12" {
-                // Source Repository URI
-                repository = value;
-            }
-        }
-    }
-
-    Ok(CertificateInfo {
-        issuer,
-        subject_workflow,
-        repository,
-    })
+    // Use the certificate module's extract function
+    certificate::extract_certificate_info(&cert)
 }
 
 /// Verify that the certificate is from GitHub Actions for the expected repo
