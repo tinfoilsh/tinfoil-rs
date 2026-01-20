@@ -38,6 +38,16 @@ const REPORTED_TCB_OFFSET: usize = 384;
 // Additional report field offsets for validation
 const GUEST_SVN_OFFSET: usize = 0x04;
 const POLICY_OFFSET: usize = 8;
+const FAMILY_ID_OFFSET: usize = 0x10;
+const FAMILY_ID_SIZE: usize = 16;
+const IMAGE_ID_OFFSET: usize = 0x20;
+const IMAGE_ID_SIZE: usize = 16;
+const HOST_DATA_OFFSET: usize = 0xC0;
+const HOST_DATA_SIZE: usize = 32;
+const REPORT_ID_OFFSET: usize = 0x140;
+const REPORT_ID_SIZE: usize = 32;
+const REPORT_ID_MA_OFFSET: usize = 0x160;
+const REPORT_ID_MA_SIZE: usize = 32;
 const CURRENT_BUILD_OFFSET: usize = 488;  // 0x1E8
 const CURRENT_MINOR_OFFSET: usize = 489;  // 0x1E9
 const CURRENT_MAJOR_OFFSET: usize = 490;  // 0x1EA
@@ -636,6 +646,87 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
 
     // Validate VMPL if specified
     validate_vmpl(report, options.vmpl)?;
+
+    // Validate optional field equality checks
+    if let Some(ref expected) = options.report_data {
+        let actual = &report[REPORT_DATA_OFFSET..REPORT_DATA_OFFSET + REPORT_DATA_SIZE];
+        if actual != expected.as_slice() {
+            return Err(Error::AttestationVerification(format!(
+                "report_data mismatch: expected {}, got {}",
+                hex::encode(expected), hex::encode(actual)
+            )));
+        }
+    }
+
+    if let Some(ref expected) = options.host_data {
+        let actual = &report[HOST_DATA_OFFSET..HOST_DATA_OFFSET + HOST_DATA_SIZE];
+        if actual != expected.as_slice() {
+            return Err(Error::AttestationVerification(format!(
+                "host_data mismatch: expected {}, got {}",
+                hex::encode(expected), hex::encode(actual)
+            )));
+        }
+    }
+
+    if let Some(ref expected) = options.image_id {
+        let actual = &report[IMAGE_ID_OFFSET..IMAGE_ID_OFFSET + IMAGE_ID_SIZE];
+        if actual != expected.as_slice() {
+            return Err(Error::AttestationVerification(format!(
+                "image_id mismatch: expected {}, got {}",
+                hex::encode(expected), hex::encode(actual)
+            )));
+        }
+    }
+
+    if let Some(ref expected) = options.family_id {
+        let actual = &report[FAMILY_ID_OFFSET..FAMILY_ID_OFFSET + FAMILY_ID_SIZE];
+        if actual != expected.as_slice() {
+            return Err(Error::AttestationVerification(format!(
+                "family_id mismatch: expected {}, got {}",
+                hex::encode(expected), hex::encode(actual)
+            )));
+        }
+    }
+
+    if let Some(ref expected) = options.report_id {
+        let actual = &report[REPORT_ID_OFFSET..REPORT_ID_OFFSET + REPORT_ID_SIZE];
+        if actual != expected.as_slice() {
+            return Err(Error::AttestationVerification(format!(
+                "report_id mismatch: expected {}, got {}",
+                hex::encode(expected), hex::encode(actual)
+            )));
+        }
+    }
+
+    if let Some(ref expected) = options.report_id_ma {
+        let actual = &report[REPORT_ID_MA_OFFSET..REPORT_ID_MA_OFFSET + REPORT_ID_MA_SIZE];
+        if actual != expected.as_slice() {
+            return Err(Error::AttestationVerification(format!(
+                "report_id_ma mismatch: expected {}, got {}",
+                hex::encode(expected), hex::encode(actual)
+            )));
+        }
+    }
+
+    if let Some(ref expected) = options.measurement {
+        let actual = &report[MEASUREMENT_OFFSET..MEASUREMENT_OFFSET + MEASUREMENT_SIZE];
+        if actual != expected.as_slice() {
+            return Err(Error::AttestationVerification(format!(
+                "measurement mismatch: expected {}, got {}",
+                hex::encode(expected), hex::encode(actual)
+            )));
+        }
+    }
+
+    if let Some(ref expected) = options.chip_id {
+        let actual = &report[CHIP_ID_OFFSET..CHIP_ID_OFFSET + CHIP_ID_SIZE];
+        if actual != expected.as_slice() {
+            return Err(Error::AttestationVerification(format!(
+                "chip_id mismatch: expected {}, got {}",
+                hex::encode(expected), hex::encode(actual)
+            )));
+        }
+    }
 
     Ok(mask_chip_key)
 }
