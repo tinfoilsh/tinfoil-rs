@@ -289,6 +289,17 @@ pub struct ValidationOptions {
 
     /// VMPL requirement
     pub vmpl: Option<u8>,
+
+    /// Optional field equality checks
+    /// When set, the corresponding report field must exactly match the provided value
+    pub report_data: Option<[u8; 64]>,
+    pub host_data: Option<[u8; 32]>,
+    pub image_id: Option<[u8; 16]>,
+    pub family_id: Option<[u8; 16]>,
+    pub report_id: Option<[u8; 32]>,
+    pub report_id_ma: Option<[u8; 32]>,
+    pub measurement: Option<[u8; 48]>,
+    pub chip_id: Option<[u8; 64]>,
 }
 
 impl Default for ValidationOptions {
@@ -327,6 +338,14 @@ impl Default for ValidationOptions {
                 ..Default::default()
             }),
             vmpl: Some(0),
+            report_data: None,
+            host_data: None,
+            image_id: None,
+            family_id: None,
+            report_id: None,
+            report_id_ma: None,
+            measurement: None,
+            chip_id: None,
         }
     }
 }
