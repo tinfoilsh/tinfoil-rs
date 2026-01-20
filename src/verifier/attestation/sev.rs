@@ -36,6 +36,7 @@ const CHIP_ID_SIZE: usize = 64;
 const REPORTED_TCB_OFFSET: usize = 384;
 
 // Additional report field offsets for validation
+const GUEST_SVN_OFFSET: usize = 0x04;
 const POLICY_OFFSET: usize = 8;
 const CURRENT_BUILD_OFFSET: usize = 488;  // 0x1E8
 const CURRENT_MINOR_OFFSET: usize = 489;  // 0x1E9
@@ -536,6 +537,18 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
     if let Some(ref required_policy) = options.guest_policy {
         let report_policy = SnpPolicy::from_u64(policy_raw);
         validate_policy(&report_policy, required_policy)?;
+    }
+
+    // Validate Guest SVN if specified
+    if let Some(min_guest_svn) = options.minimum_guest_svn {
+        let guest_svn = u32::from_le_bytes(
+            report[GUEST_SVN_OFFSET..GUEST_SVN_OFFSET + 4].try_into().unwrap()
+        );
+        if guest_svn < min_guest_svn {
+            return Err(Error::AttestationVerification(format!(
+                "Guest SVN {} is below minimum {}", guest_svn, min_guest_svn
+            )));
+        }
     }
 
     // Extract and validate firmware version if specified
