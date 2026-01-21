@@ -11,6 +11,7 @@
 
 // Submodules adapted from sigstore-rs (Apache 2.0 License)
 pub mod certificate;
+pub mod dsse;
 pub mod fulcio;
 pub mod keyring;
 pub mod rekor;
@@ -22,33 +23,6 @@ use super::github;
 use crate::error::{Error, Result};
 use base64::Engine;
 use serde::Deserialize;
-
-/// Verify Signed Certificate Timestamps (SCTs) embedded in the certificate.
-///
-/// Uses the sigstore-rs adapted transparency module for RFC 6962 compliant verification:
-/// 1. Parses SCTs from the certificate using x509-cert types
-/// 2. Reconstructs the PreCert (issuer key hash + TBS without SCT extension)
-/// 3. Builds the digitally-signed struct with proper TLS encoding
-/// 4. Verifies the ECDSA signature against the CT log's public key
-/// 5. Requires at least one valid SCT from a known Sigstore CT log
-fn verify_sct(cert_der: &[u8], issuer_spki_der: &[u8]) -> Result<()> {
-    use x509_cert::Certificate;
-    use der::Decode;
-
-    let cert = Certificate::from_der(cert_der)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse certificate for SCT: {}", e)))?;
-
-    // Create SCT wrapper using the transparency module
-    let embedded_sct = transparency::CertificateEmbeddedSCT::new_with_spki(&cert, issuer_spki_der)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to extract SCT: {}", e)))?;
-
-    // Load CT log keyring
-    let ct_keyring = trust::load_ctlog_keyring()?;
-
-    // Verify SCT using the sigstore-rs adapted verification
-    transparency::verify_sct(&embedded_sct, &ct_keyring)
-        .map_err(|e| Error::SigstoreVerification(format!("SCT verification failed: {}", e)))
-}
 
 /// In-toto statement from the decoded payload
 #[derive(Debug, Deserialize)]
@@ -93,7 +67,7 @@ pub async fn verify_repo(repo: &str) -> Result<Measurement> {
         .map_err(|e| Error::SigstoreVerification(format!("Failed to parse bundle: {}", e)))?;
 
     // 4. Verify DSSE signature cryptographically
-    verify_dsse_signature(&bundle)?;
+    dsse::verify_dsse_signature(&bundle)?;
 
     // 5. Verify certificate is from GitHub Actions for this repo
     let cert_info = extract_certificate_info_from_bundle(&bundle)?;
@@ -134,126 +108,6 @@ fn extract_cert_with_validity(bundle: &serde_json::Value) -> Result<(Vec<u8>, u6
     let not_after = cert.tbs_certificate.validity.not_after.to_unix_duration().as_secs();
 
     Ok((cert_der, not_before, not_after))
-}
-
-/// Compute DSSE Pre-Authentication Encoding (PAE)
-/// 
-/// PAE(type, body) = "DSSEv1" + SP + LEN(type) + SP + type + SP + LEN(body) + SP + body
-/// Where:
-///   SP = ASCII space (0x20)
-///   LEN(s) = ASCII decimal encoding of the byte length of s
-fn compute_pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
-    let type_bytes = payload_type.as_bytes();
-    let type_len = type_bytes.len().to_string();
-    let body_len = payload.len().to_string();
-    
-    let mut pae = Vec::new();
-    pae.extend_from_slice(b"DSSEv1");
-    pae.push(0x20); // SP
-    pae.extend_from_slice(type_len.as_bytes());
-    pae.push(0x20); // SP
-    pae.extend_from_slice(type_bytes);
-    pae.push(0x20); // SP
-    pae.extend_from_slice(body_len.as_bytes());
-    pae.push(0x20); // SP
-    pae.extend_from_slice(payload);
-    
-    pae
-}
-
-/// Verify the DSSE envelope signature cryptographically
-/// 
-/// DSSE (Dead Simple Signing Envelope) verification:
-/// 1. Extract certificate public key from bundle
-/// 2. Compute PAE (Pre-Authentication Encoding) of payload
-/// 3. Verify ECDSA signature over PAE
-fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
-    use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
-    
-    // Get the certificate
-    let cert_b64 = bundle
-        .get("verificationMaterial")
-        .and_then(|vm| vm.get("certificate"))
-        .and_then(|c| c.get("rawBytes"))
-        .and_then(|rb| rb.as_str())
-        .ok_or_else(|| Error::SigstoreVerification("No certificate in bundle".into()))?;
-    
-    let cert_der = base64::engine::general_purpose::STANDARD
-        .decode(cert_b64)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode certificate: {}", e)))?;
-    
-    // Parse certificate and extract public key
-    use x509_cert::Certificate;
-    use der::Decode;
-    
-    let cert = Certificate::from_der(&cert_der)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse certificate: {}", e)))?;
-
-    // Validate certificate has required extensions (KeyUsage: digitalSignature, ExtKeyUsage: codeSigning)
-    certificate::validate_certificate_extensions(&cert)?;
-
-    // Find the issuer certificate's SPKI for SCT verification
-    let issuer_spki_der = fulcio::find_issuer_spki(&cert)?;
-
-    // Verify Signed Certificate Timestamps (SCTs) with full cryptographic verification
-    verify_sct(&cert_der, &issuer_spki_der)?;
-
-    let pubkey_bytes = cert.tbs_certificate
-        .subject_public_key_info
-        .subject_public_key
-        .raw_bytes();
-    
-    // The public key should be P-256 (secp256r1) - Fulcio uses this
-    let verifying_key = VerifyingKey::from_sec1_bytes(pubkey_bytes)
-        .map_err(|e| Error::SigstoreVerification(format!("Invalid public key: {}", e)))?;
-    
-    // Get DSSE envelope
-    let dsse = bundle.get("dsseEnvelope")
-        .ok_or_else(|| Error::SigstoreVerification("No dsseEnvelope in bundle".into()))?;
-    
-    let payload_type = dsse.get("payloadType")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::SigstoreVerification("No payloadType".into()))?;
-    
-    let payload_b64 = dsse.get("payload")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::SigstoreVerification("No payload".into()))?;
-    
-    let signature_b64 = dsse.get("signatures")
-        .and_then(|s| s.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|sig| sig.get("sig"))
-        .and_then(|s| s.as_str())
-        .ok_or_else(|| Error::SigstoreVerification("No signature".into()))?;
-    
-    // Decode payload (it's base64 in the envelope)
-    let payload = base64::engine::general_purpose::STANDARD
-        .decode(payload_b64)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode payload: {}", e)))?;
-    
-    // Compute PAE (Pre-Authentication Encoding)
-    let pae = compute_pae(payload_type, &payload);
-    
-    // Decode signature - could be DER-encoded or raw
-    let signature_bytes = base64::engine::general_purpose::STANDARD
-        .decode(signature_b64)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode signature: {}", e)))?;
-    
-    // Try DER format first (starts with 0x30), then raw format
-    let signature = if signature_bytes.first() == Some(&0x30) {
-        Signature::from_der(&signature_bytes)
-            .map_err(|e| Error::SigstoreVerification(format!("Invalid DER signature: {}", e)))?
-    } else {
-        // Raw r||s format (64 bytes for P-256)
-        Signature::from_slice(&signature_bytes)
-            .map_err(|e| Error::SigstoreVerification(format!("Invalid raw signature: {}", e)))?
-    };
-    
-    // Verify!
-    verifying_key.verify(&pae, &signature)
-        .map_err(|e| Error::SigstoreVerification(format!("DSSE signature verification failed: {}", e)))?;
-    
-    Ok(())
 }
 
 /// Extract certificate info from the bundle
@@ -382,19 +236,7 @@ fn extract_measurement_from_bundle(bundle: &serde_json::Value, expected_digest: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    #[test]
-    fn test_pae_encoding() {
-        // Test vector from DSSE spec
-        let payload_type = "http://example.com/HelloWorld";
-        let payload = b"hello world";
-        let pae = compute_pae(payload_type, payload);
-        
-        // Expected: "DSSEv1 29 http://example.com/HelloWorld 11 hello world"
-        let expected = b"DSSEv1 29 http://example.com/HelloWorld 11 hello world";
-        assert_eq!(pae, expected);
-    }
-    
+
     #[tokio::test]
     async fn test_verify_repo_full() {
         let measurement = verify_repo("tinfoilsh/confidential-llama3-3-70b").await;
