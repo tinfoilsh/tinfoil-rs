@@ -30,15 +30,10 @@ fn parse_signature_components(sig_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
 }
 
 /// Verify report signature against VCEK public key.
-///
-/// Note: Uses deprecated GenericArray from p384 crate's dependency.
-/// This is safe and will be fixed when upstream crates update.
-#[allow(deprecated)]
 pub(super) fn verify_report_signature(report: &[u8], vcek: &[u8]) -> Result<()> {
     use x509_cert::Certificate;
     use der::Decode;
     use p384::ecdsa::{Signature, VerifyingKey, signature::Verifier};
-    use p384::elliptic_curve::generic_array::GenericArray;
 
     // Parse VCEK certificate
     let vcek_cert = Certificate::from_der(vcek)
@@ -58,11 +53,12 @@ pub(super) fn verify_report_signature(report: &[u8], vcek: &[u8]) -> Result<()> 
     let sig_bytes = &report[SIGNATURE_OFFSET..SIGNATURE_OFFSET + SIGNATURE_SIZE];
     let (r_be, s_be) = parse_signature_components(sig_bytes)?;
 
-    // Construct signature from scalars
-    let signature = Signature::from_scalars(
-        GenericArray::clone_from_slice(&r_be),
-        GenericArray::clone_from_slice(&s_be),
-    ).map_err(|e| Error::AttestationVerification(format!("Invalid signature format: {}", e)))?;
+    // Construct signature from concatenated r||s bytes (each 48 bytes for P-384)
+    let mut concat_sig = Vec::with_capacity(96);
+    concat_sig.extend_from_slice(&r_be);
+    concat_sig.extend_from_slice(&s_be);
+    let signature = Signature::from_slice(&concat_sig)
+        .map_err(|e| Error::AttestationVerification(format!("Invalid signature format: {}", e)))?;
 
     // Parse verifying key from VCEK public key
     // The public key is an uncompressed EC point (04 || x || y)
