@@ -502,3 +502,515 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
 
     Ok(mask_chip_key)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a minimal valid report for testing.
+    /// Sets version to 2, policy bit 17, and all other bytes to zero.
+    fn create_test_report(version: u32) -> Vec<u8> {
+        let mut report = vec![0u8; REPORT_SIZE];
+        // Set version (little-endian u32 at offset 0)
+        report[0..4].copy_from_slice(&version.to_le_bytes());
+        // Set policy bit 17 (required per AMD spec)
+        let policy: u64 = POLICY_RESERVED_BIT_17;
+        report[POLICY_OFFSET..POLICY_OFFSET + 8].copy_from_slice(&policy.to_le_bytes());
+        // Set signature algorithm to ECDSA P-384 SHA-384 (required)
+        report[SIGNATURE_ALGO_OFFSET..SIGNATURE_ALGO_OFFSET + 4]
+            .copy_from_slice(&SIGNATURE_ALGO_ECDSA_P384_SHA384.to_le_bytes());
+        report
+    }
+
+    /// Returns a minimal ValidationOptions for testing.
+    /// All optional validations are disabled (None/false).
+    fn minimal_options() -> ValidationOptions {
+        ValidationOptions {
+            guest_policy: None,
+            minimum_guest_svn: None,
+            minimum_build: None,
+            minimum_version: None,
+            minimum_tcb: None,
+            minimum_launch_tcb: None,
+            permit_provisional_firmware: false,
+            platform_info: None,
+            vmpl: None,
+            report_data: None,
+            host_data: None,
+            image_id: None,
+            family_id: None,
+            report_id: None,
+            report_id_ma: None,
+            measurement: None,
+            chip_id: None,
+        }
+    }
+
+    // =========================================================================
+    // Signature algorithm validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_wrong_signature_algorithm_zero() {
+        let mut report = create_test_report(2);
+        // Set signature algorithm to 0 (invalid)
+        report[SIGNATURE_ALGO_OFFSET..SIGNATURE_ALGO_OFFSET + 4].copy_from_slice(&0u32.to_le_bytes());
+        let result = validate_report_fields_with_options(&report, &minimal_options());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unsupported signature algorithm"));
+    }
+
+    #[test]
+    fn test_wrong_signature_algorithm_two() {
+        let mut report = create_test_report(2);
+        // Set signature algorithm to 2 (hypothetical future algorithm)
+        report[SIGNATURE_ALGO_OFFSET..SIGNATURE_ALGO_OFFSET + 4].copy_from_slice(&2u32.to_le_bytes());
+        let result = validate_report_fields_with_options(&report, &minimal_options());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unsupported signature algorithm"));
+    }
+
+    // =========================================================================
+    // Policy validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_policy_missing_bit_17() {
+        let mut report = create_test_report(2);
+        // Clear policy bit 17 (required to be set)
+        report[POLICY_OFFSET..POLICY_OFFSET + 8].copy_from_slice(&0u64.to_le_bytes());
+        let result = validate_report_fields_with_options(&report, &minimal_options());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Policy bit 17 must be 1"));
+    }
+
+    #[test]
+    fn test_policy_high_bits_set() {
+        let mut report = create_test_report(2);
+        // Set bit 26 (should be zero)
+        let policy: u64 = POLICY_RESERVED_BIT_17 | (1u64 << 26);
+        report[POLICY_OFFSET..POLICY_OFFSET + 8].copy_from_slice(&policy.to_le_bytes());
+        let result = validate_report_fields_with_options(&report, &minimal_options());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Policy bits 63-26 must be zero"));
+    }
+
+    #[test]
+    fn test_policy_debug_mode_not_allowed() {
+        let report = create_test_report(2);
+        // Set debug bit in policy (bit 19)
+        let mut policy = u64::from_le_bytes(report[POLICY_OFFSET..POLICY_OFFSET + 8].try_into().unwrap());
+        policy |= 1u64 << 19; // DEBUG bit
+
+        let mut report = report;
+        report[POLICY_OFFSET..POLICY_OFFSET + 8].copy_from_slice(&policy.to_le_bytes());
+
+        // Create options that disallow debug mode
+        let mut options = minimal_options();
+        options.guest_policy = Some(SnpPolicy {
+            debug: false,
+            ..Default::default()
+        });
+
+        let result = validate_report_fields_with_options(&report, &options);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Debug mode not allowed"));
+    }
+
+    #[test]
+    fn test_policy_unauthorized_smt() {
+        let report = create_test_report(2);
+        // Set SMT bit in policy (bit 16)
+        let mut policy = u64::from_le_bytes(report[POLICY_OFFSET..POLICY_OFFSET + 8].try_into().unwrap());
+        policy |= 1u64 << 16; // SMT bit
+
+        let mut report = report;
+        report[POLICY_OFFSET..POLICY_OFFSET + 8].copy_from_slice(&policy.to_le_bytes());
+
+        // Create options that disallow SMT
+        let mut options = minimal_options();
+        options.guest_policy = Some(SnpPolicy {
+            smt: false,
+            ..Default::default()
+        });
+
+        let result = validate_report_fields_with_options(&report, &options);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unauthorized SMT capability"));
+    }
+
+    // =========================================================================
+    // TCB validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_tcb_below_minimum() {
+        let report = create_test_report(2);
+        // Set minimum TCB requirement that won't be met by all-zeros
+        let mut options = minimal_options();
+        options.minimum_tcb = Some(TcbParts {
+            bl_spl: 1,
+            tee_spl: 0,
+            snp_spl: 0,
+            ucode_spl: 0,
+        });
+
+        let result = validate_report_fields_with_options(&report, &options);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("TCB") && err.contains("below minimum"));
+    }
+
+    // =========================================================================
+    // Guest SVN validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_guest_svn_below_minimum() {
+        let report = create_test_report(2);
+        // Report has guest_svn = 0, require minimum of 1
+        let mut options = minimal_options();
+        options.minimum_guest_svn = Some(1);
+
+        let result = validate_report_fields_with_options(&report, &options);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Guest SVN 0 is below minimum 1"));
+    }
+
+    // =========================================================================
+    // Firmware version validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_firmware_build_below_minimum() {
+        let report = create_test_report(2);
+        // Report has build = 0, require minimum of 1
+        let mut options = minimal_options();
+        options.minimum_build = Some(1);
+
+        let result = validate_report_fields_with_options(&report, &options);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("firmware build 0 is below minimum 1"));
+    }
+
+    #[test]
+    fn test_firmware_version_below_minimum() {
+        let report = create_test_report(2);
+        // Report has version = 0.0, require minimum of 1.0
+        let mut options = minimal_options();
+        options.minimum_version = Some(0x0100); // version 1.0
+
+        let result = validate_report_fields_with_options(&report, &options);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("firmware version 0.0 is below minimum 1.0"));
+    }
+
+    // =========================================================================
+    // Platform info validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_platform_info_unauthorized_smt() {
+        let mut report = create_test_report(2);
+        // Set SMT enabled in platform info (bit 0)
+        let platform_info: u64 = 1; // SMT enabled
+        report[PLATFORM_INFO_OFFSET..PLATFORM_INFO_OFFSET + 8].copy_from_slice(&platform_info.to_le_bytes());
+
+        // Create options that disallow SMT
+        let mut options = minimal_options();
+        options.platform_info = Some(SnpPlatformInfo {
+            smt_enabled: false,
+            ..Default::default()
+        });
+
+        let result = validate_report_fields_with_options(&report, &options);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unauthorized platform feature SMT enabled"));
+    }
+
+    #[test]
+    fn test_platform_info_required_tsme_missing() {
+        let report = create_test_report(2);
+        // Platform info is all zeros (no TSME)
+
+        // Create options that require TSME
+        let mut options = minimal_options();
+        options.platform_info = Some(SnpPlatformInfo {
+            tsme_enabled: true,
+            ..Default::default()
+        });
+
+        let result = validate_report_fields_with_options(&report, &options);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("TSME required but not enabled"));
+    }
+
+    // =========================================================================
+    // VMPL validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_vmpl_out_of_range() {
+        let mut report = create_test_report(2);
+        // Set VMPL to 4 (out of valid range 0-3)
+        report[VMPL_OFFSET..VMPL_OFFSET + 4].copy_from_slice(&4u32.to_le_bytes());
+
+        let result = validate_report_fields_with_options(&report, &minimal_options());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("VMPL 4 is not in valid range 0-3"));
+    }
+
+    #[test]
+    fn test_vmpl_mismatch() {
+        let mut report = create_test_report(2);
+        // Set VMPL to 1
+        report[VMPL_OFFSET..VMPL_OFFSET + 4].copy_from_slice(&1u32.to_le_bytes());
+
+        // Require VMPL 0
+        let mut options = minimal_options();
+        options.vmpl = Some(0);
+
+        let result = validate_report_fields_with_options(&report, &options);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("VMPL mismatch: expected 0, got 1"));
+    }
+
+    // =========================================================================
+    // Provisional firmware validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_provisional_firmware_tcb_mismatch() {
+        let mut report = create_test_report(2);
+        // Set committed_tcb different from current_tcb
+        // TCB format: bits 0-7=bl_spl, 8-15=tee_spl, 16-47=reserved(MBZ), 48-55=snp_spl, 56-63=ucode_spl
+        let committed_tcb: u64 = 0x480E_0000_0000_0007; // valid TCB with ucode=0x48, snp=0x0E, bl=0x07
+        let current_tcb: u64 = 0x480E_0000_0000_0001; // same but different bl_spl
+        report[COMMITTED_TCB_OFFSET..COMMITTED_TCB_OFFSET + 8].copy_from_slice(&committed_tcb.to_le_bytes());
+        report[CURRENT_TCB_OFFSET..CURRENT_TCB_OFFSET + 8].copy_from_slice(&current_tcb.to_le_bytes());
+
+        let result = validate_report_fields_with_options(&report, &minimal_options());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Provisional firmware not allowed"));
+    }
+
+    #[test]
+    fn test_provisional_firmware_build_mismatch() {
+        let mut report = create_test_report(2);
+        // Set committed_build different from current_build
+        report[COMMITTED_BUILD_OFFSET] = 1;
+        report[CURRENT_BUILD_OFFSET] = 2;
+
+        let result = validate_report_fields_with_options(&report, &minimal_options());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("committed_build (1) != current_build (2)"));
+    }
+
+    #[test]
+    fn test_permit_provisional_firmware_not_supported() {
+        let report = create_test_report(2);
+        let mut options = minimal_options();
+        options.permit_provisional_firmware = true;
+
+        let result = validate_report_fields_with_options(&report, &options);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("permit_provisional_firmware=true is not supported"));
+    }
+
+    // =========================================================================
+    // Field mismatch validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_report_data_mismatch() {
+        let report = create_test_report(2);
+        // Report data is all zeros
+
+        // Expect different report_data
+        let mut options = minimal_options();
+        options.report_data = Some([1u8; 64]);
+
+        let result = validate_report_fields_with_options(&report, &options);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("report_data mismatch"));
+    }
+
+    #[test]
+    fn test_measurement_mismatch() {
+        let report = create_test_report(2);
+        // Measurement is all zeros
+
+        // Expect different measurement
+        let mut options = minimal_options();
+        options.measurement = Some([0xABu8; 48]);
+
+        let result = validate_report_fields_with_options(&report, &options);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("measurement mismatch"));
+    }
+
+    #[test]
+    fn test_host_data_mismatch() {
+        let report = create_test_report(2);
+        // Host data is all zeros
+
+        // Expect different host_data
+        let mut options = minimal_options();
+        options.host_data = Some([0xCDu8; 32]);
+
+        let result = validate_report_fields_with_options(&report, &options);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("host_data mismatch"));
+    }
+
+    #[test]
+    fn test_chip_id_mismatch() {
+        let report = create_test_report(2);
+        // Chip ID is all zeros
+
+        // Expect different chip_id
+        let mut options = minimal_options();
+        options.chip_id = Some([0xEFu8; 64]);
+
+        let result = validate_report_fields_with_options(&report, &options);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("chip_id mismatch"));
+    }
+
+    // =========================================================================
+    // validate_policy unit tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_policy_abi_version_too_high() {
+        let report_policy = SnpPolicy {
+            abi_major: 1,
+            abi_minor: 0,
+            ..Default::default()
+        };
+        let required_policy = SnpPolicy {
+            abi_major: 2,
+            abi_minor: 0,
+            ..Default::default()
+        };
+
+        let result = validate_policy(&report_policy, &required_policy);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Required ABI version (2.0) is greater than report's ABI version (1.0)"));
+    }
+
+    #[test]
+    fn test_validate_policy_unauthorized_migrate_ma() {
+        let report_policy = SnpPolicy {
+            migrate_ma: true,
+            ..Default::default()
+        };
+        let required_policy = SnpPolicy {
+            migrate_ma: false,
+            ..Default::default()
+        };
+
+        let result = validate_policy(&report_policy, &required_policy);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unauthorized migration agent capability"));
+    }
+
+    #[test]
+    fn test_validate_policy_required_single_socket_missing() {
+        let report_policy = SnpPolicy {
+            single_socket: false,
+            ..Default::default()
+        };
+        let required_policy = SnpPolicy {
+            single_socket: true,
+            ..Default::default()
+        };
+
+        let result = validate_policy(&report_policy, &required_policy);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Single socket restriction required but not present"));
+    }
+
+    // =========================================================================
+    // validate_platform_info unit tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_platform_info_required_ecc_missing() {
+        let report_info = SnpPlatformInfo {
+            ecc_enabled: false,
+            ..Default::default()
+        };
+        let required_info = SnpPlatformInfo {
+            ecc_enabled: true,
+            ..Default::default()
+        };
+
+        let result = validate_platform_info(&report_info, &required_info);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ECC required but not enabled"));
+    }
+
+    #[test]
+    fn test_validate_platform_info_required_rapl_disabled_missing() {
+        let report_info = SnpPlatformInfo {
+            rapl_disabled: false,
+            ..Default::default()
+        };
+        let required_info = SnpPlatformInfo {
+            rapl_disabled: true,
+            ..Default::default()
+        };
+
+        let result = validate_platform_info(&report_info, &required_info);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("RAPL disabled required but RAPL is enabled"));
+    }
+
+    // =========================================================================
+    // validate_vmpl unit tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_vmpl_valid_range() {
+        let mut report = create_test_report(2);
+        // Test all valid VMPL values
+        for vmpl in 0u32..=3 {
+            report[VMPL_OFFSET..VMPL_OFFSET + 4].copy_from_slice(&vmpl.to_le_bytes());
+            assert!(validate_vmpl(&report, None).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_validate_vmpl_exact_match() {
+        let mut report = create_test_report(2);
+        report[VMPL_OFFSET..VMPL_OFFSET + 4].copy_from_slice(&2u32.to_le_bytes());
+        assert!(validate_vmpl(&report, Some(2)).is_ok());
+    }
+
+    // =========================================================================
+    // validate_committed_tcb unit tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_committed_tcb_minor_mismatch() {
+        let mut report = create_test_report(2);
+        report[COMMITTED_MINOR_OFFSET] = 1;
+        report[CURRENT_MINOR_OFFSET] = 2;
+
+        let result = validate_committed_tcb(&report);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("committed_minor (1) != current_minor (2)"));
+    }
+
+    #[test]
+    fn test_validate_committed_tcb_major_mismatch() {
+        let mut report = create_test_report(2);
+        report[COMMITTED_MAJOR_OFFSET] = 1;
+        report[CURRENT_MAJOR_OFFSET] = 2;
+
+        let result = validate_committed_tcb(&report);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("committed_major (1) != current_major (2)"));
+    }
+}
