@@ -1117,7 +1117,9 @@ fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -> Result<()
     // Verify curve is P-384 (secp384r1)
     if let Some(params) = &vcek_spki.algorithm.parameters {
         use der::{Decode, Encode};
-        let curve_oid = der::oid::ObjectIdentifier::from_der(params.to_der().unwrap().as_slice())
+        let params_der = params.to_der()
+            .map_err(|_| Error::AttestationVerification("Failed to encode VCEK curve parameters".into()))?;
+        let curve_oid = der::oid::ObjectIdentifier::from_der(params_der.as_slice())
             .map_err(|_| Error::AttestationVerification("Failed to parse VCEK curve OID".into()))?;
         if !oid_matches(&curve_oid, OID_SECP384R1) {
             return Err(Error::AttestationVerification(format!(
