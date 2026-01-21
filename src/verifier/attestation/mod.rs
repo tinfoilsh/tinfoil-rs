@@ -23,8 +23,9 @@
 //! Verifies TLS connection terminates inside the verified enclave:
 //! - Compare server TLS cert SPKI hash with attested fingerprint
 
-pub mod types;
+pub mod constants;
 pub mod sev;
+pub mod types;
 
 // Re-export public types
 pub use types::{
