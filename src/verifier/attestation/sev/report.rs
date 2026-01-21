@@ -152,3 +152,200 @@ pub(super) fn validate_signer_info(report: &[u8]) -> Result<bool> {
 
     Ok(mask_chip_key)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a minimal valid report for testing.
+    /// Sets version to 2 and all other bytes to zero.
+    fn create_test_report(version: u32) -> Vec<u8> {
+        let mut report = vec![0u8; REPORT_SIZE];
+        // Set version (little-endian u32 at offset 0)
+        report[0..4].copy_from_slice(&version.to_le_bytes());
+        report
+    }
+
+    // =========================================================================
+    // validate_report_structure tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_report_structure_valid_version_2() {
+        let report = create_test_report(2);
+        assert!(validate_report_structure(&report).is_ok());
+    }
+
+    #[test]
+    fn test_validate_report_structure_valid_version_3() {
+        let report = create_test_report(3);
+        assert!(validate_report_structure(&report).is_ok());
+    }
+
+    #[test]
+    fn test_validate_report_structure_valid_version_5() {
+        let report = create_test_report(5);
+        assert!(validate_report_structure(&report).is_ok());
+    }
+
+    #[test]
+    fn test_validate_report_structure_invalid_version_0() {
+        let report = create_test_report(0);
+        let result = validate_report_structure(&report);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unsupported report version"));
+    }
+
+    #[test]
+    fn test_validate_report_structure_invalid_version_1() {
+        let report = create_test_report(1);
+        let result = validate_report_structure(&report);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unsupported report version"));
+    }
+
+    #[test]
+    fn test_validate_report_structure_invalid_version_4() {
+        let report = create_test_report(4);
+        let result = validate_report_structure(&report);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unsupported report version"));
+    }
+
+    #[test]
+    fn test_validate_report_structure_wrong_size() {
+        let report = vec![0u8; 100]; // Wrong size
+        let result = validate_report_structure(&report);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid report size"));
+    }
+
+    // =========================================================================
+    // validate_mbz_bytes tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_mbz_bytes_all_zeros() {
+        let data = vec![0u8; 100];
+        assert!(validate_mbz_bytes(&data, 10, 50, "test_field").is_ok());
+    }
+
+    #[test]
+    fn test_validate_mbz_bytes_non_zero() {
+        let mut data = vec![0u8; 100];
+        data[25] = 1; // Set a non-zero byte in the range
+        let result = validate_mbz_bytes(&data, 10, 50, "test_field");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("MBZ field test_field"));
+    }
+
+    #[test]
+    fn test_validate_mbz_bytes_non_zero_outside_range() {
+        let mut data = vec![0u8; 100];
+        data[5] = 1; // Non-zero outside the checked range
+        data[60] = 1; // Non-zero outside the checked range
+        // Should pass because the range [10, 50) is all zeros
+        assert!(validate_mbz_bytes(&data, 10, 50, "test_field").is_ok());
+    }
+
+    // =========================================================================
+    // validate_signer_info tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_signer_info_vcek_no_mask() {
+        let mut report = create_test_report(2);
+        // signer_info = 0x00 (VCEK, no mask, no author key)
+        report[SIGNER_INFO_OFFSET..SIGNER_INFO_OFFSET + 4].copy_from_slice(&0u32.to_le_bytes());
+        let result = validate_signer_info(&report);
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // maskChipKey should be false
+    }
+
+    #[test]
+    fn test_validate_signer_info_vcek_with_mask() {
+        let mut report = create_test_report(2);
+        // signer_info = 0x02 (VCEK, maskChipKey=1, authorKeyEn=0)
+        report[SIGNER_INFO_OFFSET..SIGNER_INFO_OFFSET + 4].copy_from_slice(&2u32.to_le_bytes());
+        let result = validate_signer_info(&report);
+        assert!(result.is_ok());
+        assert!(result.unwrap()); // maskChipKey should be true
+    }
+
+    #[test]
+    fn test_validate_signer_info_vcek_with_author_key() {
+        let mut report = create_test_report(2);
+        // signer_info = 0x01 (VCEK, maskChipKey=0, authorKeyEn=1)
+        report[SIGNER_INFO_OFFSET..SIGNER_INFO_OFFSET + 4].copy_from_slice(&1u32.to_le_bytes());
+        let result = validate_signer_info(&report);
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // maskChipKey should be false
+    }
+
+    #[test]
+    fn test_validate_signer_info_non_vcek_signing_key() {
+        let mut report = create_test_report(2);
+        // signer_info = 0x04 (signing_key = 1, not VCEK)
+        report[SIGNER_INFO_OFFSET..SIGNER_INFO_OFFSET + 4].copy_from_slice(&4u32.to_le_bytes());
+        let result = validate_signer_info(&report);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Only VCEK-signed reports"));
+    }
+
+    #[test]
+    fn test_validate_signer_info_reserved_bits_set() {
+        let mut report = create_test_report(2);
+        // signer_info = 0x20 (bit 5 set, should fail)
+        report[SIGNER_INFO_OFFSET..SIGNER_INFO_OFFSET + 4].copy_from_slice(&0x20u32.to_le_bytes());
+        let result = validate_signer_info(&report);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("bits 31-5 must be zero"));
+    }
+
+    // =========================================================================
+    // validate_mbz_fields tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_mbz_fields_valid_v2() {
+        let report = create_test_report(2);
+        // All zeros is valid for MBZ fields
+        assert!(validate_mbz_fields(&report).is_ok());
+    }
+
+    #[test]
+    fn test_validate_mbz_fields_valid_v3() {
+        let report = create_test_report(3);
+        assert!(validate_mbz_fields(&report).is_ok());
+    }
+
+    #[test]
+    fn test_validate_mbz_fields_non_zero_reserved_after_signer_info() {
+        let mut report = create_test_report(2);
+        report[0x4C] = 1; // Non-zero in reserved_after_signer_info
+        let result = validate_mbz_fields(&report);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("reserved_after_signer_info"));
+    }
+
+    #[test]
+    fn test_validate_mbz_fields_non_zero_reserved_before_signature() {
+        let mut report = create_test_report(2);
+        report[0x200] = 1; // Non-zero in reserved_before_signature
+        let result = validate_mbz_fields(&report);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("reserved_before_signature"));
+    }
+
+    #[test]
+    fn test_validate_mbz_fields_tcb_reserved_bits_set() {
+        let mut report = create_test_report(2);
+        // Set reserved bits 47-16 in current_tcb
+        // TCB format: bits 0-7: bl_spl, 8-15: tee_spl, 16-47: reserved (MBZ), 48-55: snp_spl, 56-63: ucode_spl
+        let tcb_with_reserved_bits: u64 = 0x0000_0001_0000_0000; // bit 32 set (in reserved range)
+        report[CURRENT_TCB_OFFSET..CURRENT_TCB_OFFSET + 8].copy_from_slice(&tcb_with_reserved_bits.to_le_bytes());
+        let result = validate_mbz_fields(&report);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("current_tcb"));
+    }
+}
