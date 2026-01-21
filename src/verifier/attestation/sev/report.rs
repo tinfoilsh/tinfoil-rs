@@ -14,7 +14,7 @@ use crate::verifier::attestation::constants::*;
 use crate::verifier::util::decode_b64;
 
 /// Decode and decompress a base64+gzip encoded attestation report.
-pub fn decode_report(body: &str) -> Result<Vec<u8>> {
+pub(super) fn decode_report(body: &str) -> Result<Vec<u8>> {
     let compressed = decode_b64(body)
         .map_err(|e| Error::AttestationVerification(format!("Base64 decode failed: {}", e)))?;
 
@@ -27,7 +27,7 @@ pub fn decode_report(body: &str) -> Result<Vec<u8>> {
 }
 
 /// Validate basic report structure (size and version).
-pub fn validate_report_structure(report: &[u8]) -> Result<()> {
+pub(super) fn validate_report_structure(report: &[u8]) -> Result<()> {
     if report.len() != REPORT_SIZE {
         return Err(Error::AttestationVerification(format!(
             "Invalid report size: expected {}, got {}",
@@ -46,7 +46,7 @@ pub fn validate_report_structure(report: &[u8]) -> Result<()> {
 }
 
 /// Validate that a byte range is all zeros (Must Be Zero).
-pub fn validate_mbz_bytes(report: &[u8], start: usize, end: usize, field_name: &str) -> Result<()> {
+pub(super) fn validate_mbz_bytes(report: &[u8], start: usize, end: usize, field_name: &str) -> Result<()> {
     if report[start..end].iter().any(|&b| b != 0) {
         return Err(Error::AttestationVerification(format!(
             "MBZ field {} at [0x{:x}:0x{:x}] contains non-zero bytes",
@@ -57,7 +57,7 @@ pub fn validate_mbz_bytes(report: &[u8], start: usize, end: usize, field_name: &
 }
 
 /// Validate that reserved bits 47-16 in a TCB field are zero.
-pub fn validate_tcb_mbz(tcb: u64, field_name: &str) -> Result<()> {
+fn validate_tcb_mbz(tcb: u64, field_name: &str) -> Result<()> {
     // Bits 47-16 (32 bits) must be zero
     let reserved_bits = (tcb >> 16) & 0xFFFF_FFFF;
     if reserved_bits != 0 {
@@ -70,7 +70,7 @@ pub fn validate_tcb_mbz(tcb: u64, field_name: &str) -> Result<()> {
 }
 
 /// Validate all MBZ (Must Be Zero) fields in the report per AMD SEV-SNP spec.
-pub fn validate_mbz_fields(report: &[u8]) -> Result<()> {
+pub(super) fn validate_mbz_fields(report: &[u8]) -> Result<()> {
     let version = u32::from_le_bytes([report[0], report[1], report[2], report[3]]);
 
     // Reserved after signer_info: 0x4C-0x50 (4 bytes)
@@ -125,7 +125,7 @@ pub fn validate_mbz_fields(report: &[u8]) -> Result<()> {
 /// - Bits 2-4: Signing key (must be 0 for VCEK)
 /// - Bit 1: maskChipKey flag
 /// - Bit 0: authorKeyEn flag
-pub fn validate_signer_info(report: &[u8]) -> Result<bool> {
+pub(super) fn validate_signer_info(report: &[u8]) -> Result<bool> {
     let signer_info = u32::from_le_bytes(
         report[SIGNER_INFO_OFFSET..SIGNER_INFO_OFFSET + 4].try_into().unwrap()
     );

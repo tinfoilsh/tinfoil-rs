@@ -13,7 +13,7 @@ use crate::verifier::attestation::constants::*;
 /// - R: 72 bytes (48 bytes value in little-endian + 24 bytes padding)
 /// - S: 72 bytes (48 bytes value in little-endian + 24 bytes padding)
 /// - Reserved: 368 bytes
-pub fn parse_signature_components(sig_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+fn parse_signature_components(sig_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     if sig_bytes.len() < SIG_COMPONENT_SIZE * 2 {
         return Err(Error::AttestationVerification("Signature too short".into()));
     }
@@ -34,7 +34,7 @@ pub fn parse_signature_components(sig_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)
 /// Note: Uses deprecated GenericArray from p384 crate's dependency.
 /// This is safe and will be fixed when upstream crates update.
 #[allow(deprecated)]
-pub fn verify_report_signature(report: &[u8], vcek: &[u8]) -> Result<()> {
+pub(super) fn verify_report_signature(report: &[u8], vcek: &[u8]) -> Result<()> {
     use x509_cert::Certificate;
     use der::Decode;
     use p384::ecdsa::{Signature, VerifyingKey, signature::Verifier};

@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::verifier::attestation::constants::*;
 
 /// Fetch VCEK certificate from AMD KDS via Tinfoil's proxy.
-pub async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
+pub(super) async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
     // Parse TCB components
     let tcb_val = u64::from_le_bytes(tcb.try_into().unwrap());
     let bl_spl = (tcb_val & 0xFF) as u8;
@@ -46,7 +46,7 @@ pub async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Get AMD certificate chain (ASK + ARK) from embedded assets.
-pub async fn fetch_cert_chain() -> Result<Vec<u8>> {
+pub(super) async fn fetch_cert_chain() -> Result<Vec<u8>> {
     Ok(crate::verifier::embedded::GENOA_CERT_CHAIN.to_vec())
 }
 
@@ -175,7 +175,7 @@ fn get_vcek_extension(vcek_der: &[u8], target_oid: &[u64]) -> Result<Option<Vec<
 ///
 /// If maskChipKey is set in the report, chip_id must be all zeros.
 /// Otherwise, HWID from VCEK must match chip_id from report.
-pub fn validate_vcek_hwid(vcek_der: &[u8], chip_id: &[u8], mask_chip_key: bool) -> Result<()> {
+pub(super) fn validate_vcek_hwid(vcek_der: &[u8], chip_id: &[u8], mask_chip_key: bool) -> Result<()> {
     if mask_chip_key {
         // If maskChipKey is set, chip_id must be all zeros
         if chip_id.iter().any(|&b| b != 0) {
@@ -209,7 +209,7 @@ pub fn validate_vcek_hwid(vcek_der: &[u8], chip_id: &[u8], mask_chip_key: bool) 
 }
 
 /// Validate VCEK certificate extensions against report TCB values.
-pub fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> Result<()> {
+pub(super) fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> Result<()> {
     let tcb_val = u64::from_le_bytes(reported_tcb.try_into().unwrap());
     let bl_spl = (tcb_val & 0xFF) as u8;
     let tee_spl = ((tcb_val >> 8) & 0xFF) as u8;
@@ -284,7 +284,7 @@ pub fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> Result<
 /// 2. Verifies ARK is self-signed (RSA-PSS SHA-384)
 /// 3. Verifies ASK signature against ARK public key
 /// 4. Verifies VCEK signature against ASK public key
-pub fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -> Result<()> {
+pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -> Result<()> {
     use x509_cert::Certificate;
     use der::Decode;
 
