@@ -412,6 +412,18 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
         let platform_info_raw = u64::from_le_bytes(
             report[PLATFORM_INFO_OFFSET..PLATFORM_INFO_OFFSET + 8].try_into().unwrap()
         );
+
+        // Validate platform_info reserved bits must be zero
+        // Valid bits per AMD spec: 0 (SMT), 1 (TSME), 2 (ECC), 3 (RAPL_DIS),
+        //                         4 (CIPHERTEXT_HIDING), 5 (ALIAS_CHECK), 7 (TIO)
+        // Reserved: bit 6, bits 8-63
+        const PLATFORM_INFO_VALID_MASK: u64 = 0b10111111; // bits 0-5 and 7
+        if platform_info_raw & !PLATFORM_INFO_VALID_MASK != 0 {
+            return Err(Error::AttestationVerification(
+                format!("Platform info has non-zero reserved bits: 0x{:x}", platform_info_raw)
+            ));
+        }
+
         let report_platform_info = SnpPlatformInfo::from_u64(platform_info_raw);
         validate_platform_info(&report_platform_info, required_platform_info)?;
     }
