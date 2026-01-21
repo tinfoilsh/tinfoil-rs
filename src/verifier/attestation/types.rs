@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Predicate types for different attestation formats
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PredicateType {
     #[serde(rename = "https://tinfoil.sh/predicate/sev-snp-guest/v2")]
     SevGuestV2,
@@ -174,6 +175,7 @@ impl Measurement {
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum MeasurementError {
     #[error("Attestation format mismatch")]
     FormatMismatch,
