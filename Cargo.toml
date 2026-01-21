@@ -65,6 +65,9 @@ hex = "0.4"
 # Regex for certificate identity matching
 regex = "1"
 
+# Date/time parsing
+time = { version = "0.3", features = ["parsing"] }
+
 # NOTE: sigstore-rs 0.13.0 uses Rust 2024 edition with let-chains (stabilized in 1.88.0)
 # which don't compile on Rust 1.87. We implement verification manually in src/sigstore.rs.
 # sigstore = { version = "0.13", default-features = false, features = ["verify", "cert", "rekor", "rustls-tls"] }
