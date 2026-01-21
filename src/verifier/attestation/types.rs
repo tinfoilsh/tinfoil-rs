@@ -539,4 +539,147 @@ mod tests {
         assert_eq!(source_fp, enclave_fp);
         assert_eq!(source_fp, snp_measurement); // Raw register, not hash
     }
+
+    // =========================================================================
+    // MeasurementError variant tests
+    // =========================================================================
+
+    #[test]
+    fn test_measurement_error_format_mismatch() {
+        let m1 = Measurement {
+            type_: PredicateType::SevGuestV2,
+            registers: vec!["snp".into()],
+        };
+        let m2 = Measurement {
+            type_: PredicateType::TdxGuestV2,
+            registers: vec!["mrtd".into(), "rtmr0".into(), "rtmr1".into(), "rtmr2".into(), RTMR3_ZERO.into()],
+        };
+        let err = m1.equals(&m2).unwrap_err();
+        assert!(matches!(err, MeasurementError::FormatMismatch));
+    }
+
+    #[test]
+    fn test_measurement_error_format_mismatch_unknown() {
+        let m1 = Measurement {
+            type_: PredicateType::SnpTdxMultiPlatformV1,
+            registers: vec!["snp".into(), "rtmr1".into(), "rtmr2".into()],
+        };
+        let m2 = Measurement {
+            type_: PredicateType::Unknown,
+            registers: vec!["unknown".into()],
+        };
+        let err = m1.equals(&m2).unwrap_err();
+        assert!(matches!(err, MeasurementError::FormatMismatch));
+    }
+
+    #[test]
+    fn test_measurement_error_too_few_registers_multiplatform() {
+        let m1 = Measurement {
+            type_: PredicateType::SnpTdxMultiPlatformV1,
+            registers: vec!["snp".into(), "rtmr1".into()], // Only 2, need 3
+        };
+        let m2 = Measurement {
+            type_: PredicateType::SevGuestV2,
+            registers: vec!["snp".into()],
+        };
+        let err = m1.equals(&m2).unwrap_err();
+        assert!(matches!(err, MeasurementError::TooFewRegisters));
+    }
+
+    #[test]
+    fn test_measurement_error_too_few_registers_tdx() {
+        let m1 = Measurement {
+            type_: PredicateType::SnpTdxMultiPlatformV1,
+            registers: vec!["snp".into(), "rtmr1".into(), "rtmr2".into()],
+        };
+        let m2 = Measurement {
+            type_: PredicateType::TdxGuestV2,
+            registers: vec!["mrtd".into(), "rtmr0".into(), "rtmr1".into(), "rtmr2".into()], // Only 4, need 5
+        };
+        let err = m1.equals(&m2).unwrap_err();
+        assert!(matches!(err, MeasurementError::TooFewRegisters));
+    }
+
+    #[test]
+    fn test_measurement_error_too_few_registers_sevsnp() {
+        let m1 = Measurement {
+            type_: PredicateType::SnpTdxMultiPlatformV1,
+            registers: vec!["snp".into(), "rtmr1".into(), "rtmr2".into()],
+        };
+        let m2 = Measurement {
+            type_: PredicateType::SevGuestV2,
+            registers: vec![], // Empty
+        };
+        let err = m1.equals(&m2).unwrap_err();
+        assert!(matches!(err, MeasurementError::TooFewRegisters));
+    }
+
+    #[test]
+    fn test_measurement_error_snp_mismatch() {
+        let m1 = Measurement {
+            type_: PredicateType::SnpTdxMultiPlatformV1,
+            registers: vec!["expected_snp".into(), "rtmr1".into(), "rtmr2".into()],
+        };
+        let m2 = Measurement {
+            type_: PredicateType::SevGuestV2,
+            registers: vec!["actual_snp".into()],
+        };
+        let err = m1.equals(&m2).unwrap_err();
+        assert!(matches!(err, MeasurementError::SnpMismatch));
+    }
+
+    #[test]
+    fn test_measurement_error_rtmr1_mismatch() {
+        let m1 = Measurement {
+            type_: PredicateType::SnpTdxMultiPlatformV1,
+            registers: vec!["snp".into(), "expected_rtmr1".into(), "rtmr2".into()],
+        };
+        let m2 = Measurement {
+            type_: PredicateType::TdxGuestV2,
+            registers: vec![
+                "mrtd".into(),
+                "rtmr0".into(),
+                "actual_rtmr1".into(), // Mismatch with expected_rtmr1
+                "rtmr2".into(),
+                RTMR3_ZERO.into(),
+            ],
+        };
+        let err = m1.equals(&m2).unwrap_err();
+        assert!(matches!(err, MeasurementError::Rtmr1Mismatch));
+    }
+
+    #[test]
+    fn test_measurement_error_rtmr2_mismatch() {
+        let m1 = Measurement {
+            type_: PredicateType::SnpTdxMultiPlatformV1,
+            registers: vec!["snp".into(), "rtmr1".into(), "expected_rtmr2".into()],
+        };
+        let m2 = Measurement {
+            type_: PredicateType::TdxGuestV2,
+            registers: vec![
+                "mrtd".into(),
+                "rtmr0".into(),
+                "rtmr1".into(),
+                "actual_rtmr2".into(), // Mismatch with expected_rtmr2
+                RTMR3_ZERO.into(),
+            ],
+        };
+        let err = m1.equals(&m2).unwrap_err();
+        assert!(matches!(err, MeasurementError::Rtmr2Mismatch));
+    }
+
+    #[test]
+    fn test_measurement_error_register_mismatch_direct() {
+        // Direct comparison of same type with different registers
+        let m1 = Measurement {
+            type_: PredicateType::SevGuestV2,
+            registers: vec!["snp1".into()],
+        };
+        let m2 = Measurement {
+            type_: PredicateType::SevGuestV2,
+            registers: vec!["snp2".into()],
+        };
+        let err = m1.equals(&m2).unwrap_err();
+        assert!(matches!(err, MeasurementError::RegisterMismatch));
+    }
 }
