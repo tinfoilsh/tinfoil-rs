@@ -11,6 +11,7 @@
 
 // Submodules adapted from sigstore-rs (Apache 2.0 License)
 pub mod certificate;
+pub mod fulcio;
 pub mod keyring;
 pub mod transparency;
 pub mod trust;
@@ -46,112 +47,6 @@ fn verify_sct(cert_der: &[u8], issuer_spki_der: &[u8]) -> Result<()> {
     // Verify SCT using the sigstore-rs adapted verification
     transparency::verify_sct(&embedded_sct, &ct_keyring)
         .map_err(|e| Error::SigstoreVerification(format!("SCT verification failed: {}", e)))
-}
-
-/// Find the issuer certificate's SPKI for a given certificate
-fn find_issuer_spki(cert: &x509_cert::Certificate) -> Result<Vec<u8>> {
-    use der::{Decode, Encode};
-
-    let fulcio_cas = trust::load_fulcio_cas()?;
-
-    // Try each Fulcio CA to find the matching issuer
-    for ca in &fulcio_cas {
-        if ca.cert_chain_der.is_empty() {
-            continue;
-        }
-
-        let issuer_cert = match x509_cert::Certificate::from_der(&ca.cert_chain_der[0]) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        // Check if issuer DN matches
-        if cert.tbs_certificate.issuer == issuer_cert.tbs_certificate.subject {
-            // Return the issuer's SPKI in DER format
-            return issuer_cert.tbs_certificate
-                .subject_public_key_info
-                .to_der()
-                .map_err(|e| Error::SigstoreVerification(format!("Failed to encode issuer SPKI: {}", e)));
-        }
-    }
-
-    Err(Error::SigstoreVerification(
-        "Could not find issuer certificate for SCT verification".into()
-    ))
-}
-
-/// Verify that the signing certificate was issued by a trusted Fulcio CA.
-///
-/// This validates:
-/// 1. The certificate's issuer matches a Fulcio CA's subject
-/// 2. The certificate's signature was created by the Fulcio CA
-/// 3. The CA was valid at the time the certificate was issued
-fn verify_fulcio_chain(cert_der: &[u8], cert_not_before: u64) -> Result<()> {
-    use x509_cert::Certificate;
-    use der::{Decode, Encode};
-    use p384::ecdsa::{Signature, VerifyingKey, signature::Verifier};
-
-    let signing_cert = Certificate::from_der(cert_der)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse signing certificate: {}", e)))?;
-
-    let fulcio_cas = trust::load_fulcio_cas()?;
-
-    // Try each Fulcio CA
-    for ca in &fulcio_cas {
-        // Check if CA was valid when the signing cert was issued
-        if cert_not_before < ca.valid_from {
-            continue;
-        }
-        if let Some(end) = ca.valid_until {
-            if cert_not_before > end {
-                continue;
-            }
-        }
-
-        // The first certificate in the chain is the intermediate that signs leaf certs
-        if ca.cert_chain_der.is_empty() {
-            continue;
-        }
-
-        let issuer_cert = Certificate::from_der(&ca.cert_chain_der[0])
-            .map_err(|e| Error::SigstoreVerification(format!("Failed to parse Fulcio CA cert: {}", e)))?;
-
-        // Verify issuer DN matches
-        if signing_cert.tbs_certificate.issuer != issuer_cert.tbs_certificate.subject {
-            continue;
-        }
-
-        // Extract the issuer's public key and verify the signature
-        let issuer_pubkey_bytes = issuer_cert.tbs_certificate
-            .subject_public_key_info
-            .subject_public_key
-            .raw_bytes();
-
-        // Fulcio uses P-384 for the intermediate CA
-        let verifying_key = match VerifyingKey::from_sec1_bytes(issuer_pubkey_bytes) {
-            Ok(k) => k,
-            Err(_) => continue, // Try next CA if key doesn't parse
-        };
-
-        // Get the TBS (to-be-signed) certificate bytes and signature
-        let tbs_bytes = signing_cert.tbs_certificate.to_der()
-            .map_err(|e| Error::SigstoreVerification(format!("Failed to encode TBS: {}", e)))?;
-
-        let sig_bytes = signing_cert.signature.raw_bytes();
-        let signature = match Signature::from_der(sig_bytes) {
-            Ok(s) => s,
-            Err(_) => continue, // Try next CA
-        };
-
-        // Verify the signature
-        if verifying_key.verify(&tbs_bytes, &signature).is_ok() {
-            return Ok(());
-        }
-    }
-
-    Err(Error::SigstoreVerification(
-        "Certificate not issued by any trusted Fulcio CA".into()
-    ))
 }
 
 /// Verify that the certificate in the bundle matches the certificate in the Rekor entry.
@@ -693,7 +588,7 @@ pub async fn verify_repo(repo: &str) -> Result<Measurement> {
     verify_rekor_entry(&bundle, cert_not_before, cert_not_after)?;
 
     // 7. Verify certificate was issued by trusted Fulcio CA
-    verify_fulcio_chain(&cert_der, cert_not_before)?;
+    fulcio::verify_fulcio_chain(&cert_der, cert_not_before)?;
 
     // 8. Extract measurement from verified bundle and verify digest matches
     extract_measurement_from_bundle(&bundle, &digest)
@@ -782,7 +677,7 @@ fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
     certificate::validate_certificate_extensions(&cert)?;
 
     // Find the issuer certificate's SPKI for SCT verification
-    let issuer_spki_der = find_issuer_spki(&cert)?;
+    let issuer_spki_der = fulcio::find_issuer_spki(&cert)?;
 
     // Verify Signed Certificate Timestamps (SCTs) with full cryptographic verification
     verify_sct(&cert_der, &issuer_spki_der)?;
