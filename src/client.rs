@@ -80,7 +80,7 @@ impl SecureClient {
             Ok(r) => r,
             Err(_) => {
                 // Fall back to default router, but still verify it
-                let mut client = Self::new(crate::discovery::DEFAULT_ROUTER, api_key);
+                let mut client = Self::new(crate::constants::DEFAULT_ROUTER, api_key);
                 client.verify().await?;
                 return Ok(client);
             }
@@ -94,7 +94,7 @@ impl SecureClient {
         }
 
         // Fall back to default router, but still verify it
-        let mut client = Self::new(crate::discovery::DEFAULT_ROUTER, api_key);
+        let mut client = Self::new(crate::constants::DEFAULT_ROUTER, api_key);
         client.verify().await?;
         Ok(client)
     }
