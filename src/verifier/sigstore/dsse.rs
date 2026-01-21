@@ -3,12 +3,12 @@
 //! This module handles DSSE envelope signature verification, including
 //! certificate validation and SCT (Signed Certificate Timestamp) verification.
 
-use base64::Engine;
 use der::Decode;
 use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use x509_cert::Certificate;
 
 use crate::error::{Error, Result};
+use crate::verifier::util::decode_b64;
 use super::{certificate, fulcio, transparency, trust};
 
 /// Compute DSSE Pre-Authentication Encoding (PAE)
@@ -53,8 +53,7 @@ pub fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
         .and_then(|rb| rb.as_str())
         .ok_or_else(|| Error::SigstoreVerification("No certificate in bundle".into()))?;
 
-    let cert_der = base64::engine::general_purpose::STANDARD
-        .decode(cert_b64)
+    let cert_der = decode_b64(cert_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode certificate: {}", e)))?;
 
     // Parse certificate and extract public key
@@ -99,16 +98,14 @@ pub fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
         .ok_or_else(|| Error::SigstoreVerification("No signature".into()))?;
 
     // Decode payload (it's base64 in the envelope)
-    let payload = base64::engine::general_purpose::STANDARD
-        .decode(payload_b64)
+    let payload = decode_b64(payload_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode payload: {}", e)))?;
 
     // Compute PAE (Pre-Authentication Encoding)
     let pae = compute_pae(payload_type, &payload);
 
     // Decode signature - could be DER-encoded or raw
-    let signature_bytes = base64::engine::general_purpose::STANDARD
-        .decode(signature_b64)
+    let signature_bytes = decode_b64(signature_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode signature: {}", e)))?;
 
     // Try DER format first (starts with 0x30), then raw format

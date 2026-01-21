@@ -3,10 +3,10 @@
 //! This module verifies that signatures and certificates were logged in
 //! Rekor, Sigstore's transparency log, providing an immutable audit trail.
 
-use base64::Engine;
 use sha2::{Sha256, Digest};
 
 use crate::error::{Error, Result};
+use crate::verifier::util::decode_b64;
 use super::trust;
 
 /// Verify Rekor transparency log entry with full cryptographic verification.
@@ -86,8 +86,7 @@ pub fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert
         .and_then(|r| r.as_str())
         .ok_or_else(|| Error::SigstoreVerification("Missing rootHash in inclusion proof".into()))?;
 
-    let root_hash = base64::engine::general_purpose::STANDARD
-        .decode(root_hash_b64)
+    let root_hash = decode_b64(root_hash_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode rootHash: {}", e)))?;
 
     // Get log index and tree size
@@ -110,7 +109,7 @@ pub fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert
         .ok_or_else(|| Error::SigstoreVerification("Missing hashes in inclusion proof".into()))?
         .iter()
         .filter_map(|h| h.as_str())
-        .map(|s| base64::engine::general_purpose::STANDARD.decode(s))
+        .map(decode_b64)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode proof hash: {}", e)))?;
 
@@ -120,8 +119,7 @@ pub fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert
         .and_then(|b| b.as_str())
         .ok_or_else(|| Error::SigstoreVerification("Missing canonicalizedBody in tlog entry".into()))?;
 
-    let body_bytes = base64::engine::general_purpose::STANDARD
-        .decode(canonicalized_body_b64)
+    let body_bytes = decode_b64(canonicalized_body_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode canonicalizedBody: {}", e)))?;
 
     // Verify certificate binding: ensure the certificate in the bundle matches the one in the Rekor entry
@@ -173,8 +171,7 @@ fn verify_certificate_binding(bundle: &serde_json::Value, canonicalized_body: &[
                 ))?;
 
             // Decode base64 to get PEM string
-            let verifier_pem_bytes = base64::engine::general_purpose::STANDARD
-                .decode(verifier_b64)
+            let verifier_pem_bytes = decode_b64(verifier_b64)
                 .map_err(|e| Error::SigstoreVerification(format!("Failed to decode verifier: {}", e)))?;
 
             let verifier_pem = String::from_utf8(verifier_pem_bytes)
@@ -215,8 +212,7 @@ fn verify_certificate_binding(bundle: &serde_json::Value, canonicalized_body: &[
         ))?;
 
     // Decode the bundle certificate from base64
-    let bundle_cert_der = base64::engine::general_purpose::STANDARD
-        .decode(bundle_cert_b64)
+    let bundle_cert_der = decode_b64(bundle_cert_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode bundle certificate: {}", e)))?;
 
     // Compare the DER bytes
@@ -260,8 +256,7 @@ fn verify_signature_binding(bundle: &serde_json::Value, canonicalized_body: &[u8
                     "Missing signature in DSSE Rekor entry (spec.signatures[0].signature)".into()
                 ))?;
 
-            base64::engine::general_purpose::STANDARD
-                .decode(sig_b64)
+            decode_b64(sig_b64)
                 .map_err(|e| Error::SigstoreVerification(format!("Failed to decode Rekor signature: {}", e)))?
         }
         "hashedrekord" => {
@@ -275,8 +270,7 @@ fn verify_signature_binding(bundle: &serde_json::Value, canonicalized_body: &[u8
                     "Missing signature in hashedrekord Rekor entry (spec.signature.content)".into()
                 ))?;
 
-            base64::engine::general_purpose::STANDARD
-                .decode(sig_b64)
+            decode_b64(sig_b64)
                 .map_err(|e| Error::SigstoreVerification(format!("Failed to decode Rekor signature: {}", e)))?
         }
         _ => {
@@ -298,8 +292,7 @@ fn verify_signature_binding(bundle: &serde_json::Value, canonicalized_body: &[u8
             "Missing signature in bundle (dsseEnvelope.signatures[0].sig)".into()
         ))?;
 
-    let bundle_sig_bytes = base64::engine::general_purpose::STANDARD
-        .decode(bundle_sig_b64)
+    let bundle_sig_bytes = decode_b64(bundle_sig_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode bundle signature: {}", e)))?;
 
     // Compare the signatures
@@ -335,8 +328,7 @@ fn parse_pem_certificate(pem: &str) -> Result<Vec<u8>> {
         .collect();
 
     // Decode the base64 to get DER bytes
-    base64::engine::general_purpose::STANDARD
-        .decode(&b64_content)
+    decode_b64(&b64_content)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode PEM certificate: {}", e)))
 }
 
@@ -363,8 +355,7 @@ fn verify_checkpoint_signature(checkpoint: &str, key_der: &[u8], key_type: &str)
     }
 
     let signature_b64 = sig_parts[1].trim();
-    let signature_bytes = base64::engine::general_purpose::STANDARD
-        .decode(signature_b64)
+    let signature_bytes = decode_b64(signature_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode checkpoint signature: {}", e)))?;
 
     // The message to verify is the note body with a trailing newline

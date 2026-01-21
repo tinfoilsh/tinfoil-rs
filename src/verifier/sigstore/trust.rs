@@ -4,10 +4,10 @@
 //! which contains Fulcio CA certificates, Rekor transparency log keys, and
 //! Certificate Transparency log keys.
 
-use base64::Engine;
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
+use crate::verifier::util::decode_b64;
 use super::keyring::Keyring;
 
 /// Embedded Sigstore trusted root (Fulcio certs, Rekor keys, CTFE keys)
@@ -97,8 +97,7 @@ pub fn load_rekor_keys() -> Result<Vec<(String, Vec<u8>, String)>> {
 
     let mut keys = Vec::new();
     for tlog in root.tlogs {
-        let key_der = base64::engine::general_purpose::STANDARD
-            .decode(&tlog.public_key.raw_bytes)
+        let key_der = decode_b64(&tlog.public_key.raw_bytes)
             .map_err(|e| Error::SigstoreVerification(format!("Failed to decode Rekor key: {}", e)))?;
         keys.push((tlog.log_id.key_id, key_der, tlog.public_key.key_details));
     }
@@ -119,8 +118,7 @@ pub fn load_ctlog_keyring() -> Result<Keyring> {
         if ctlog.public_key.key_details != "PKIX_ECDSA_P256_SHA_256" {
             continue;
         }
-        let public_key_der = base64::engine::general_purpose::STANDARD
-            .decode(&ctlog.public_key.raw_bytes)
+        let public_key_der = decode_b64(&ctlog.public_key.raw_bytes)
             .map_err(|e| Error::SigstoreVerification(format!("Failed to decode CT log key: {}", e)))?;
         key_ders.push(public_key_der);
     }
@@ -138,8 +136,7 @@ pub fn load_fulcio_cas() -> Result<Vec<FulcioCa>> {
     for ca in root.certificate_authorities {
         let mut cert_chain_der = Vec::new();
         for cert in &ca.cert_chain.certificates {
-            let der = base64::engine::general_purpose::STANDARD
-                .decode(&cert.raw_bytes)
+            let der = decode_b64(&cert.raw_bytes)
                 .map_err(|e| Error::SigstoreVerification(format!("Failed to decode Fulcio cert: {}", e)))?;
             cert_chain_der.push(der);
         }
