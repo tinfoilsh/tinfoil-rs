@@ -6,17 +6,16 @@
 //! - MBZ (Must Be Zero) field validation
 //! - Signer info field validation
 
-use base64::Engine;
 use flate2::read::GzDecoder;
 use std::io::Read;
 
 use crate::error::{Error, Result};
 use crate::verifier::attestation::constants::*;
+use crate::verifier::util::decode_b64;
 
 /// Decode and decompress a base64+gzip encoded attestation report.
 pub fn decode_report(body: &str) -> Result<Vec<u8>> {
-    let compressed = base64::engine::general_purpose::STANDARD
-        .decode(body)
+    let compressed = decode_b64(body)
         .map_err(|e| Error::AttestationVerification(format!("Base64 decode failed: {}", e)))?;
 
     let mut decoder = GzDecoder::new(&compressed[..]);

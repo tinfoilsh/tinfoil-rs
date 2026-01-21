@@ -21,7 +21,7 @@ pub mod trust;
 use super::attestation::types::{Measurement, PredicateType};
 use super::github;
 use crate::error::{Error, Result};
-use base64::Engine;
+use crate::verifier::util::decode_b64;
 use serde::Deserialize;
 
 /// In-toto statement from the decoded payload
@@ -97,8 +97,7 @@ fn extract_cert_with_validity(bundle: &serde_json::Value) -> Result<(Vec<u8>, u6
         .and_then(|rb| rb.as_str())
         .ok_or_else(|| Error::SigstoreVerification("No certificate in bundle".into()))?;
 
-    let cert_der = base64::engine::general_purpose::STANDARD
-        .decode(cert_b64)
+    let cert_der = decode_b64(cert_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode certificate: {}", e)))?;
 
     let cert = Certificate::from_der(&cert_der)
@@ -123,8 +122,7 @@ fn extract_certificate_info_from_bundle(bundle: &serde_json::Value) -> Result<Ce
         .and_then(|rb| rb.as_str())
         .ok_or_else(|| Error::SigstoreVerification("No certificate in bundle".into()))?;
 
-    let cert_der = base64::engine::general_purpose::STANDARD
-        .decode(cert_b64)
+    let cert_der = decode_b64(cert_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode certificate: {}", e)))?;
 
     let cert = Certificate::from_der(&cert_der)
@@ -171,8 +169,7 @@ fn extract_measurement_from_bundle(bundle: &serde_json::Value, expected_digest: 
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::SigstoreVerification("No payload in DSSE envelope".into()))?;
 
-    let payload_bytes = base64::engine::general_purpose::STANDARD
-        .decode(payload_b64)
+    let payload_bytes = decode_b64(payload_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode payload: {}", e)))?;
 
     let statement: InTotoStatement = serde_json::from_slice(&payload_bytes)

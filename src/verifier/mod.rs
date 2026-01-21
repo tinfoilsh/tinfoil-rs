@@ -5,6 +5,7 @@ pub mod embedded;
 pub mod github;
 pub mod sigstore;
 pub mod tls;
+pub(crate) mod util;
 
 // Re-export commonly used types
 pub use attestation::{
