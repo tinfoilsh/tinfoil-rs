@@ -77,8 +77,8 @@ pub fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert
         .and_then(|e| e.as_str())
         .ok_or_else(|| Error::SigstoreVerification("Missing checkpoint in inclusion proof".into()))?;
 
-    // Verify checkpoint signature
-    verify_checkpoint_signature(checkpoint, key_der, key_type)?;
+    // Verify checkpoint signature and get the root hash from the signed body
+    let checkpoint_root_hash = verify_checkpoint_signature(checkpoint, key_der, key_type)?;
 
     // Get root hash from inclusion proof
     let root_hash_b64 = inclusion_proof
@@ -88,6 +88,18 @@ pub fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert
 
     let root_hash = decode_b64(root_hash_b64)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode rootHash: {}", e)))?;
+
+    // CRITICAL: Verify root hash from signed checkpoint matches inclusion proof.
+    // This prevents substitution attacks where an attacker provides a valid signed
+    // checkpoint but modifies the inclusion proof's root hash.
+    // See: sigstore-python PR #634, checkpoint.py verify_checkpoint()
+    if checkpoint_root_hash != root_hash {
+        return Err(Error::SigstoreVerification(format!(
+            "Inclusion proof contains invalid root hash: signed checkpoint has {}, inclusion proof has {}",
+            hex::encode(&checkpoint_root_hash),
+            hex::encode(&root_hash)
+        )));
+    }
 
     // Get log index and tree size
     let log_index = inclusion_proof
@@ -332,8 +344,22 @@ fn parse_pem_certificate(pem: &str) -> Result<Vec<u8>> {
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode PEM certificate: {}", e)))
 }
 
-/// Verify checkpoint signature using the appropriate key type.
-fn verify_checkpoint_signature(checkpoint: &str, key_der: &[u8], key_type: &str) -> Result<()> {
+/// Verify checkpoint signature and return the root hash from the signed body.
+///
+/// The checkpoint note format is:
+/// ```text
+/// <origin>
+/// <tree_size>
+/// <root_hash_base64>
+/// [<extension_lines>]
+///
+/// — <origin> <signature_base64>
+/// ```
+///
+/// Returns the root hash extracted from the signed checkpoint body.
+/// This must be compared against the inclusion proof's root hash to prevent
+/// substitution attacks (see sigstore-python PR #634).
+fn verify_checkpoint_signature(checkpoint: &str, key_der: &[u8], key_type: &str) -> Result<Vec<u8>> {
     // Parse checkpoint note format:
     // <origin>\n<tree_size>\n<root_hash_base64>\n[<extension_lines>]\n\n— <origin> <signature_base64>\n
     let parts: Vec<&str> = checkpoint.split("\n\n").collect();
@@ -343,6 +369,18 @@ fn verify_checkpoint_signature(checkpoint: &str, key_der: &[u8], key_type: &str)
 
     let note_body = parts[0];
     let signature_line = parts[1].trim();
+
+    // Parse the note body to extract root hash (line 3, 0-indexed line 2)
+    let lines: Vec<&str> = note_body.lines().collect();
+    if lines.len() < 3 {
+        return Err(Error::SigstoreVerification(
+            "Checkpoint note body must have at least 3 lines (origin, tree_size, root_hash)".into()
+        ));
+    }
+    let checkpoint_root_hash = decode_b64(lines[2])
+        .map_err(|e| Error::SigstoreVerification(
+            format!("Failed to decode checkpoint root hash: {}", e)
+        ))?;
 
     // Signature line format: "— <origin> <signature_base64>"
     if !signature_line.starts_with("— ") {
@@ -363,15 +401,19 @@ fn verify_checkpoint_signature(checkpoint: &str, key_der: &[u8], key_type: &str)
 
     match key_type {
         "PKIX_ECDSA_P256_SHA_256" => {
-            verify_ecdsa_p256_signature(message.as_bytes(), &signature_bytes, key_der)
+            verify_ecdsa_p256_signature(message.as_bytes(), &signature_bytes, key_der)?;
         }
         "PKIX_ED25519" => {
-            verify_ed25519_signature(message.as_bytes(), &signature_bytes, key_der)
+            verify_ed25519_signature(message.as_bytes(), &signature_bytes, key_der)?;
         }
-        _ => Err(Error::SigstoreVerification(format!(
-            "Unsupported Rekor key type: {}", key_type
-        ))),
+        _ => {
+            return Err(Error::SigstoreVerification(format!(
+                "Unsupported Rekor key type: {}", key_type
+            )));
+        }
     }
+
+    Ok(checkpoint_root_hash)
 }
 
 /// Verify ECDSA P-256 signature (for original Rekor log).
