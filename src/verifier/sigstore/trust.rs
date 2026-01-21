@@ -155,67 +155,13 @@ pub fn load_fulcio_cas() -> Result<Vec<FulcioCa>> {
 
 /// Parse RFC3339 timestamp to Unix timestamp.
 pub fn parse_rfc3339_to_unix(s: &str) -> Result<u64> {
-    // Parse ISO 8601 / RFC 3339 format manually
-    // Format: "2022-04-13T20:06:15Z" or "2022-12-31T23:59:59.999Z"
-    let s = s.trim_end_matches('Z');
-    let (date_part, time_part) = s.split_once('T')
-        .ok_or_else(|| Error::SigstoreVerification(format!("Invalid timestamp format: {}", s)))?;
+    use time::format_description::well_known::Rfc3339;
+    use time::OffsetDateTime;
 
-    let date_parts: Vec<&str> = date_part.split('-').collect();
-    if date_parts.len() != 3 {
-        return Err(Error::SigstoreVerification(format!("Invalid date format: {}", date_part)));
-    }
+    let dt = OffsetDateTime::parse(s, &Rfc3339)
+        .map_err(|e| Error::SigstoreVerification(format!("Invalid RFC3339 timestamp '{}': {}", s, e)))?;
 
-    let year: i32 = date_parts[0].parse().map_err(|_| Error::SigstoreVerification("Invalid year".into()))?;
-    let month: u32 = date_parts[1].parse().map_err(|_| Error::SigstoreVerification("Invalid month".into()))?;
-    let day: u32 = date_parts[2].parse().map_err(|_| Error::SigstoreVerification("Invalid day".into()))?;
-
-    // Handle time with optional fractional seconds
-    let time_base = time_part.split('.').next().unwrap_or(time_part);
-    let time_parts: Vec<&str> = time_base.split(':').collect();
-    if time_parts.len() != 3 {
-        return Err(Error::SigstoreVerification(format!("Invalid time format: {}", time_part)));
-    }
-
-    let hour: u32 = time_parts[0].parse().map_err(|_| Error::SigstoreVerification("Invalid hour".into()))?;
-    let minute: u32 = time_parts[1].parse().map_err(|_| Error::SigstoreVerification("Invalid minute".into()))?;
-    let second: u32 = time_parts[2].parse().map_err(|_| Error::SigstoreVerification("Invalid second".into()))?;
-
-    // Calculate days since Unix epoch (1970-01-01)
-    let days = days_since_epoch(year, month, day);
-    let secs = (days as u64) * 86400 + (hour as u64) * 3600 + (minute as u64) * 60 + (second as u64);
-
-    Ok(secs)
-}
-
-/// Calculate days since Unix epoch for a given date.
-fn days_since_epoch(year: i32, month: u32, day: u32) -> i64 {
-    // Days in each month (non-leap year)
-    const DAYS_IN_MONTH: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
-    fn is_leap_year(y: i32) -> bool {
-        (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
-    }
-
-    let mut days: i64 = 0;
-
-    // Add days for years since 1970
-    for y in 1970..year {
-        days += if is_leap_year(y) { 366 } else { 365 };
-    }
-
-    // Add days for months in current year
-    for m in 1..month {
-        days += DAYS_IN_MONTH[(m - 1) as usize] as i64;
-        if m == 2 && is_leap_year(year) {
-            days += 1;
-        }
-    }
-
-    // Add days in current month
-    days += (day - 1) as i64;
-
-    days
+    Ok(dt.unix_timestamp() as u64)
 }
 
 #[cfg(test)]
