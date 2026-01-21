@@ -277,6 +277,39 @@ pub(super) fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> 
     Ok(())
 }
 
+/// Validate that a certificate is currently valid (not expired, not before valid date).
+fn validate_certificate_validity(cert: &x509_cert::Certificate, cert_name: &str) -> Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| Error::AttestationVerification("System time before Unix epoch".into()))?
+        .as_secs();
+
+    // Extract notBefore and notAfter from certificate validity
+    let validity = &cert.tbs_certificate.validity;
+
+    // Convert x509_cert Time to Unix timestamp
+    let not_before = validity.not_before.to_unix_duration().as_secs();
+    let not_after = validity.not_after.to_unix_duration().as_secs();
+
+    if now < not_before {
+        return Err(Error::AttestationVerification(format!(
+            "{} certificate is not yet valid (current time {} < notBefore {})",
+            cert_name, now, not_before
+        )));
+    }
+
+    if now > not_after {
+        return Err(Error::AttestationVerification(format!(
+            "{} certificate has expired (current time {} > notAfter {})",
+            cert_name, now, not_after
+        )));
+    }
+
+    Ok(())
+}
+
 /// Verify the certificate chain with full cryptographic verification.
 ///
 /// This function:
@@ -284,6 +317,7 @@ pub(super) fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> 
 /// 2. Verifies ARK is self-signed (RSA-PSS SHA-384)
 /// 3. Verifies ASK signature against ARK public key
 /// 4. Verifies VCEK signature against ASK public key
+/// 5. Validates all certificates are within their validity period
 pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -> Result<()> {
     use x509_cert::Certificate;
     use der::Decode;
@@ -360,6 +394,11 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
             "ASK certificate version is not v3".into()
         ));
     }
+
+    // Validate all certificates are within their validity period
+    validate_certificate_validity(&vcek_cert, "VCEK")?;
+    validate_certificate_validity(&ask_cert, "ASK")?;
+    validate_certificate_validity(&ark_cert, "ARK")?;
 
     // === STEP 1: Verify ARK public key matches pinned fingerprint ===
     // This is the root of trust - if this matches, we know we have AMD's genuine ARK
