@@ -25,15 +25,13 @@ async fn test_client_verification() {
 }
 
 /// Test embedding API (requires valid API key)
+///
+/// Run with: TINFOIL_API_KEY=<key> cargo test test_embedding_api -- --ignored
 #[tokio::test]
+#[ignore = "requires TINFOIL_API_KEY environment variable"]
 async fn test_embedding_api() {
-    let api_key = match std::env::var("TINFOIL_API_KEY") {
-        Ok(key) => key,
-        Err(_) => {
-            eprintln!("Skipping test: TINFOIL_API_KEY not set");
-            return;
-        }
-    };
+    let api_key = std::env::var("TINFOIL_API_KEY")
+        .expect("TINFOIL_API_KEY must be set to run this test");
 
     let mut client = SecureClient::new("inference.tinfoil.sh", &api_key);
 
@@ -47,15 +45,13 @@ async fn test_embedding_api() {
 }
 
 /// Test chat API (requires valid API key)
+///
+/// Run with: TINFOIL_API_KEY=<key> cargo test test_chat_api -- --ignored
 #[tokio::test]
+#[ignore = "requires TINFOIL_API_KEY environment variable"]
 async fn test_chat_api() {
-    let api_key = match std::env::var("TINFOIL_API_KEY") {
-        Ok(key) => key,
-        Err(_) => {
-            eprintln!("Skipping test: TINFOIL_API_KEY not set");
-            return;
-        }
-    };
+    let api_key = std::env::var("TINFOIL_API_KEY")
+        .expect("TINFOIL_API_KEY must be set to run this test");
 
     let mut client = SecureClient::new("inference.tinfoil.sh", &api_key);
 
