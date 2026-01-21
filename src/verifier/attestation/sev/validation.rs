@@ -21,7 +21,7 @@ use super::report::{validate_mbz_bytes, validate_mbz_fields, validate_signer_inf
 /// Provisional firmware has committed_tcb != current_tcb, meaning the firmware
 /// has not yet been committed to the hardware. This is a security risk as the
 /// firmware could be rolled back.
-pub fn validate_committed_tcb(report: &[u8]) -> Result<()> {
+fn validate_committed_tcb(report: &[u8]) -> Result<()> {
     let committed_tcb = u64::from_le_bytes(
         report[COMMITTED_TCB_OFFSET..COMMITTED_TCB_OFFSET + 8].try_into().unwrap()
     );
@@ -73,7 +73,7 @@ pub fn validate_committed_tcb(report: &[u8]) -> Result<()> {
 /// 1. ABI version compatibility (required version must not exceed report version)
 /// 2. Unauthorized capabilities (report has them but required doesn't allow)
 /// 3. Required restrictions (report lacks what required mandates)
-pub fn validate_policy(report_policy: &SnpPolicy, required: &SnpPolicy) -> Result<()> {
+fn validate_policy(report_policy: &SnpPolicy, required: &SnpPolicy) -> Result<()> {
     // ABI version check - required version must not be greater than report version
     let required_version = ((required.abi_major as u16) << 8) | (required.abi_minor as u16);
     let report_version = ((report_policy.abi_major as u16) << 8) | (report_policy.abi_minor as u16);
@@ -141,7 +141,7 @@ pub fn validate_policy(report_policy: &SnpPolicy, required: &SnpPolicy) -> Resul
 ///
 /// This checks both unauthorized capabilities (report has them but required doesn't allow)
 /// and required features (report lacks what required mandates).
-pub fn validate_platform_info(report_info: &SnpPlatformInfo, required: &SnpPlatformInfo) -> Result<()> {
+fn validate_platform_info(report_info: &SnpPlatformInfo, required: &SnpPlatformInfo) -> Result<()> {
     // Unauthorized features (report has it enabled, but required doesn't allow it)
     if report_info.smt_enabled && !required.smt_enabled {
         return Err(Error::AttestationVerification(
@@ -196,7 +196,7 @@ pub fn validate_platform_info(report_info: &SnpPlatformInfo, required: &SnpPlatf
 /// - VMPL 3: Least privileged (typically guest application)
 ///
 /// For production workloads, we typically expect VMPL 0.
-pub fn validate_vmpl(report: &[u8], expected_vmpl: Option<u8>) -> Result<()> {
+fn validate_vmpl(report: &[u8], expected_vmpl: Option<u8>) -> Result<()> {
     let vmpl = u32::from_le_bytes(
         report[VMPL_OFFSET..VMPL_OFFSET + 4].try_into().unwrap()
     );
@@ -227,7 +227,7 @@ pub fn validate_vmpl(report: &[u8], expected_vmpl: Option<u8>) -> Result<()> {
 /// 2. VCEK TCB validation (ensures VCEK cert extensions match report TCB)
 ///
 /// Returns maskChipKey flag for HWID validation.
-pub fn validate_report_with_chain(report: &[u8], vcek: &[u8], options: &ValidationOptions) -> Result<bool> {
+pub(super) fn validate_report_with_chain(report: &[u8], vcek: &[u8], options: &ValidationOptions) -> Result<bool> {
     // Validate report fields using options
     let mask_chip_key = validate_report_fields_with_options(report, options)?;
 
@@ -240,7 +240,7 @@ pub fn validate_report_with_chain(report: &[u8], vcek: &[u8], options: &Validati
 
 /// Validate report fields using configurable ValidationOptions.
 /// Returns maskChipKey flag for HWID validation.
-pub fn validate_report_fields_with_options(report: &[u8], options: &ValidationOptions) -> Result<bool> {
+fn validate_report_fields_with_options(report: &[u8], options: &ValidationOptions) -> Result<bool> {
     // Validate all MBZ (Must Be Zero) fields first (always required)
     validate_mbz_fields(report)?;
 
