@@ -17,96 +17,10 @@ use sha2::{Sha256, Sha384, Digest};
 use std::io::Read;
 
 use crate::error::{Error, Result};
+use super::constants::*;
 use super::types::{
     Measurement, PredicateType, SnpPlatformInfo, SnpPolicy, TcbParts, ValidationOptions, Verification,
 };
-
-// SEV-SNP report offsets (v3 report structure)
-const REPORT_DATA_OFFSET: usize = 80;
-const REPORT_DATA_SIZE: usize = 64;
-const MEASUREMENT_OFFSET: usize = 144;
-const MEASUREMENT_SIZE: usize = 48;
-const SIGNATURE_OFFSET: usize = 672;
-const SIGNATURE_SIZE: usize = 512;
-const REPORT_SIZE: usize = 1184;
-
-// Chip ID and TCB for VCEK lookup
-const CHIP_ID_OFFSET: usize = 416;
-const CHIP_ID_SIZE: usize = 64;
-const REPORTED_TCB_OFFSET: usize = 384;
-
-// Additional report field offsets for validation
-const GUEST_SVN_OFFSET: usize = 0x04;
-const POLICY_OFFSET: usize = 8;
-const FAMILY_ID_OFFSET: usize = 0x10;
-const FAMILY_ID_SIZE: usize = 16;
-const IMAGE_ID_OFFSET: usize = 0x20;
-const IMAGE_ID_SIZE: usize = 16;
-const HOST_DATA_OFFSET: usize = 0xC0;
-const HOST_DATA_SIZE: usize = 32;
-const REPORT_ID_OFFSET: usize = 0x140;
-const REPORT_ID_SIZE: usize = 32;
-const REPORT_ID_MA_OFFSET: usize = 0x160;
-const REPORT_ID_MA_SIZE: usize = 32;
-const CURRENT_BUILD_OFFSET: usize = 488;  // 0x1E8
-const CURRENT_MINOR_OFFSET: usize = 489;  // 0x1E9
-const CURRENT_MAJOR_OFFSET: usize = 490;  // 0x1EA
-
-// Guest policy bit masks (64-bit policy field)
-const POLICY_RESERVED_BIT_17: u64 = 1 << 17;
-
-// TCB field offsets for MBZ validation
-const CURRENT_TCB_OFFSET: usize = 0x38;
-const COMMITTED_TCB_OFFSET: usize = 0x1E0;
-const LAUNCH_TCB_OFFSET: usize = 0x1F0;
-
-// Committed version field offsets (for provisional firmware check)
-const COMMITTED_BUILD_OFFSET: usize = 0x1EC;
-const COMMITTED_MINOR_OFFSET: usize = 0x1ED;
-const COMMITTED_MAJOR_OFFSET: usize = 0x1EE;
-
-// Platform info field offset
-const PLATFORM_INFO_OFFSET: usize = 0x40;
-
-// VMPL (Virtual Machine Privilege Level) field offset
-const VMPL_OFFSET: usize = 0x30;
-
-// Signer info field offset
-const SIGNER_INFO_OFFSET: usize = 0x48;
-
-// Signature algorithm field offset (must be 1 for ECDSA P-384 SHA-384)
-const SIGNATURE_ALGO_OFFSET: usize = 0x34;
-const SIGNATURE_ALGO_ECDSA_P384_SHA384: u32 = 1;
-
-// ECDSA P-384 signature size (R + S components, each 72 bytes = 48 bytes value + 24 bytes padding)
-const ECDSA_P384_SIGNATURE_SIZE: usize = 144;
-
-// AMD VCEK certificate OID extensions (arc: 1.3.6.1.4.1.3704.1)
-const OID_BL_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 1];
-const OID_TEE_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 2];
-const OID_SNP_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 3];
-const OID_UCODE_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 8];
-const OID_HWID: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 4];
-const OID_PRODUCT_NAME: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 2];
-const OID_CSP_ID: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 5];
-
-// Signature component sizes (AMD SEV-SNP ECDSA P-384)
-// Each component (R, S) is stored in 72 bytes (48 bytes value + 24 bytes padding)
-// Values are in little-endian format
-const SIG_COMPONENT_SIZE: usize = 72;
-const SIG_VALUE_SIZE: usize = 48;  // P-384 scalar size
-
-/// AMD ARK (AMD Root Key) for Genoa processors
-/// This is the SPKI (SubjectPublicKeyInfo) SHA-256 fingerprint of the ARK public key.
-/// Pinning this value ensures we only trust certificates signed by AMD's genuine root key.
-/// 
-/// To regenerate this value:
-/// ```bash
-/// curl -s 'https://kds.amd.com/vcek/v1/Genoa/cert_chain' | \
-///   openssl x509 -pubkey -noout | \
-///   openssl pkey -pubin -outform DER | sha256sum
-/// ```
-const AMD_ARK_GENOA_SPKI_FINGERPRINT: &str = "429a69c9422aa258ee4d8db5fcda9c6470ef15f8cd5a9cebd6cbc7d90b863831";
 
 /// Validate that a byte range is all zeros (Must Be Zero)
 fn validate_mbz_bytes(report: &[u8], start: usize, end: usize, field_name: &str) -> Result<()> {
