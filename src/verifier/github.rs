@@ -2,10 +2,8 @@
 
 use serde::Deserialize;
 
+use crate::constants::{ATTESTATION_PROXY, GITHUB_PROXY};
 use crate::error::{Error, Result};
-
-const GITHUB_PROXY: &str = "https://api-github-proxy.tinfoil.sh";
-const ATTESTATION_PROXY: &str = "https://gh-attestation-proxy.tinfoil.sh";
 
 #[derive(Deserialize)]
 struct ReleaseResponse {

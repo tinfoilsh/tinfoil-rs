@@ -60,6 +60,7 @@
 
 pub mod api;
 pub mod client;
+pub mod constants;
 pub mod discovery;
 pub mod error;
 pub mod verifier;
