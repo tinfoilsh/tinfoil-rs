@@ -7,7 +7,7 @@ use tinfoil::{ChatMessage, SecureClient};
 /// Test client verification flow
 #[tokio::test]
 async fn test_client_verification() {
-    let mut client = SecureClient::new("inference.tinfoil.sh", "test-key");
+    let mut client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", "test-key");
 
     assert!(!client.is_verified(), "Client should not be verified initially");
 
@@ -33,7 +33,7 @@ async fn test_embedding_api() {
     let api_key = std::env::var("TINFOIL_API_KEY")
         .expect("TINFOIL_API_KEY must be set to run this test");
 
-    let mut client = SecureClient::new("inference.tinfoil.sh", &api_key);
+    let mut client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", &api_key);
 
     let embedding = client
         .embed("Hello, secure world!")
@@ -53,7 +53,7 @@ async fn test_chat_api() {
     let api_key = std::env::var("TINFOIL_API_KEY")
         .expect("TINFOIL_API_KEY must be set to run this test");
 
-    let mut client = SecureClient::new("inference.tinfoil.sh", &api_key);
+    let mut client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", &api_key);
 
     let response = client
         .chat(vec![ChatMessage::user(

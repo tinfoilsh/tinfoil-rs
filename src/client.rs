@@ -6,6 +6,7 @@
 use crate::api::{ChatMessage, ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse, Tool};
 use crate::error::{Error, Result};
 use crate::verifier::attestation::{self, types::{GroundTruth, Measurement}};
+use crate::verifier::sigstore;
 use crate::verifier::tls;
 
 /// Default models
@@ -26,11 +27,14 @@ pub struct SecureClient {
     /// Enclave hostname
     host: String,
     
+    /// GitHub repository for code provenance verification
+    repo: String,
+    
     /// API key for authentication
     api_key: String,
     
-    /// Expected measurement (optional, for additional validation)
-    expected_measurement: Option<Measurement>,
+    /// Pinned code measurement (skips Sigstore verification when provided)
+    pinned_measurement: Option<Measurement>,
     
     /// Verified ground truth
     ground_truth: Option<GroundTruth>,
@@ -41,18 +45,25 @@ pub struct SecureClient {
 }
 
 impl SecureClient {
-    /// Create a new client for the given enclave host
-    pub fn new(host: impl Into<String>, api_key: impl Into<String>) -> Self {
+    /// Create a new client for the given enclave host and repository.
+    ///
+    /// The `repo` parameter specifies the GitHub repository used for
+    /// Sigstore code provenance verification (e.g., "tinfoilsh/confidential-model-router").
+    pub fn new(host: impl Into<String>, repo: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
             host: host.into(),
+            repo: repo.into(),
             api_key: api_key.into(),
-            expected_measurement: None,
+            pinned_measurement: None,
             ground_truth: None,
             pinned_client: None,
         }
     }
     
-    /// Create a client with a pinned expected measurement
+    /// Create a client with a pinned code measurement.
+    ///
+    /// When a pinned measurement is provided, Sigstore verification is skipped
+    /// and the pinned value is compared directly against the enclave's measurement.
     pub fn with_measurement(
         host: impl Into<String>,
         api_key: impl Into<String>,
@@ -60,8 +71,9 @@ impl SecureClient {
     ) -> Self {
         Self {
             host: host.into(),
+            repo: String::new(),
             api_key: api_key.into(),
-            expected_measurement: Some(measurement),
+            pinned_measurement: Some(measurement),
             ground_truth: None,
             pinned_client: None,
         }
@@ -76,25 +88,27 @@ impl SecureClient {
     pub async fn new_default_client(api_key: impl Into<String>) -> Result<Self> {
         let api_key = api_key.into();
 
+        let repo = crate::constants::DEFAULT_REPO;
+
         let routers = match crate::discovery::fetch_routers().await {
             Ok(r) => r,
             Err(_) => {
                 // Fall back to default router, but still verify it
-                let mut client = Self::new(crate::constants::DEFAULT_ROUTER, api_key);
+                let mut client = Self::new(crate::constants::DEFAULT_ROUTER, repo, api_key);
                 client.verify().await?;
                 return Ok(client);
             }
         };
 
         for router in routers {
-            let mut client = Self::new(&router, api_key.clone());
+            let mut client = Self::new(&router, repo, api_key.clone());
             if client.verify().await.is_ok() {
                 return Ok(client);
             }
         }
 
         // Fall back to default router, but still verify it
-        let mut client = Self::new(crate::constants::DEFAULT_ROUTER, api_key);
+        let mut client = Self::new(crate::constants::DEFAULT_ROUTER, repo, api_key);
         client.verify().await?;
         Ok(client)
     }
@@ -120,45 +134,41 @@ impl SecureClient {
         serde_json::to_string(gt).map_err(Error::Json)
     }
 
-    /// Verify the enclave attestation and set up TLS pinning
+    /// Verify the enclave attestation and set up TLS pinning.
     /// 
-    /// This performs full verification:
-    /// 1. Fetch attestation document
-    /// 2. Verify hardware signature (AMD/Intel)
-    /// 3. Compare measurements if expected value provided
-    /// 4. Verify TLS certificate matches attestation
-    /// 5. Create pinned HTTP client for all future requests
+    /// This performs full three-step verification:
+    /// 1. Sigstore verification: verify code provenance via GitHub + Sigstore
+    /// 2. Hardware attestation: verify AMD SEV-SNP report and certificate chain
+    /// 3. Measurement comparison: ensure enclave runs the expected code
+    /// 4. TLS binding: pin all future connections to the attested certificate
     pub async fn verify(&mut self) -> Result<&GroundTruth> {
-        // 1. Fetch attestation from enclave
-        let doc = attestation::fetch(&self.host).await?;
+        // 1. Obtain code measurement (Sigstore verification or pinned value)
+        let code_measurement = if let Some(pinned) = &self.pinned_measurement {
+            pinned.clone()
+        } else {
+            sigstore::verify_repo(&self.repo).await?
+        };
         
-        // 2. Verify hardware attestation with full cert chain
+        // 2. Fetch and verify hardware attestation
+        let doc = attestation::fetch(&self.host).await?;
         let verification = attestation::verify_full(&doc).await?;
         
-        // 3. Compare measurements if we have an expected value
-        if let Some(expected) = &self.expected_measurement {
-            expected.equals(&verification.measurement)
-                .map_err(|_| Error::MeasurementMismatch {
-                    expected: expected.fingerprint(),
-                    actual: verification.measurement.fingerprint(),
-                })?;
-        }
+        // 3. Compare code measurement against enclave measurement
+        code_measurement.equals(&verification.measurement)
+            .map_err(|_| Error::MeasurementMismatch {
+                expected: code_measurement.fingerprint(),
+                actual: verification.measurement.fingerprint(),
+            })?;
         
         // 4. Verify TLS certificate matches attestation (one-time check)
         self.verify_tls_binding(&verification.tls_public_key_fp).await?;
         
         // 5. Create pinned HTTP client for all future requests
-        // This client will validate the cert fingerprint on EVERY connection
         let pinned = tls::create_pinned_client(&verification.tls_public_key_fp)?;
         self.pinned_client = Some(pinned);
         
-        // 6. Store ground truth with fingerprints
-        let code_measurement = self.expected_measurement
-            .clone()
-            .unwrap_or_else(|| verification.measurement.clone());
+        // 6. Store ground truth
         let enclave_measurement = verification.measurement;
-
-        // Compute fingerprints for the target type (enclave's type)
         let target_type = &enclave_measurement.type_;
         let code_fingerprint = code_measurement.fingerprint_for_target(target_type);
         let enclave_fingerprint = enclave_measurement.fingerprint();
@@ -328,14 +338,14 @@ mod tests {
     
     #[test]
     fn test_client_creation() {
-        let client = SecureClient::new("inference.tinfoil.sh", "test-key");
+        let client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", "test-key");
         assert_eq!(client.host(), "inference.tinfoil.sh");
         assert!(!client.is_verified());
     }
     
     #[test]
     fn test_not_verified_error() {
-        let client = SecureClient::new("inference.tinfoil.sh", "test-key");
+        let client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", "test-key");
         assert!(client.get_client().is_err());
     }
 }

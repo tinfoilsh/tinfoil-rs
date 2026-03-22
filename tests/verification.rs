@@ -94,8 +94,8 @@ async fn test_full_verification() {
 /// Test verification against multiple enclaves
 #[tokio::test]
 async fn test_verify_multiple_enclaves() {
-    for (enclave, _repo) in TEST_ENCLAVES {
-        let mut client = SecureClient::new(*enclave, "test-key");
+    for (enclave, repo) in TEST_ENCLAVES {
+        let mut client = SecureClient::new(*enclave, *repo, "test-key");
         let result = client.verify().await;
         assert!(
             result.is_ok(),

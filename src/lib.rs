@@ -33,26 +33,23 @@
 //! ## Example
 //!
 //! ```rust,ignore
-//! use tinfoil::{SecureClient, attestation, sigstore};
+//! use tinfoil::SecureClient;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Step 1: Hardware attestation
-//!     let doc = attestation::fetch("inference.tinfoil.sh").await?;
-//!     let enclave = attestation::verify_full(&doc).await?;
-//!     
-//!     // Step 2: Sigstore verification (full cryptographic verification)
-//!     let source = sigstore::verify_repo("tinfoilsh/confidential-model").await?;
-//!     
-//!     // Step 3: Compare measurements
-//!     enclave.measurement.equals(&source)?;
-//!     
-//!     // Create TLS-pinned client using verified fingerprint
-//!     let client = SecureClient::with_fingerprint(
+//!     // Create client with enclave host and GitHub repo for code provenance
+//!     let mut client = SecureClient::new(
 //!         "inference.tinfoil.sh",
+//!         "tinfoilsh/confidential-model-router",
 //!         "api-key",
-//!         &enclave.tls_public_key_fp
-//!     ).await?;
+//!     );
+//!     
+//!     // verify() performs all three steps automatically:
+//!     // 1. Sigstore verification (code provenance from GitHub Actions)
+//!     // 2. Hardware attestation (AMD SEV-SNP certificate chain)
+//!     // 3. Measurement comparison (code matches enclave)
+//!     // Then pins TLS to the attested certificate for all future requests.
+//!     client.verify().await?;
 //!     
 //!     Ok(())
 //! }
