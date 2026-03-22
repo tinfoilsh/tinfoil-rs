@@ -219,43 +219,33 @@ fn extract_measurement_from_bundle(bundle: &serde_json::Value, expected_digest: 
         )));
     }
 
-    let measurement_type = match statement.predicate_type.as_str() {
-        "https://tinfoil.sh/predicate/sev-snp-guest/v2" => PredicateType::SevGuestV2,
-        "https://tinfoil.sh/predicate/tdx-guest/v2" => PredicateType::TdxGuestV2,
-        "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1" => PredicateType::SnpTdxMultiPlatformV1,
-        other => return Err(Error::SigstoreVerification(format!("Unknown predicate type: {}", other))),
-    };
-    
-    let registers = match measurement_type {
-        PredicateType::SevGuestV2 => {
-            let snp_measurement = statement.predicate.get("snp_measurement")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| Error::SigstoreVerification("Missing snp_measurement".into()))?;
-            vec![snp_measurement.to_string()]
-        }
-        PredicateType::SnpTdxMultiPlatformV1 => {
-            let snp_measurement = statement.predicate.get("snp_measurement")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| Error::SigstoreVerification("Missing snp_measurement".into()))?;
-            
-            let tdx = statement.predicate.get("tdx_measurement")
-                .ok_or_else(|| Error::SigstoreVerification("Missing tdx_measurement".into()))?;
-            
-            let rtmr1 = tdx.get("rtmr1")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| Error::SigstoreVerification("Missing rtmr1".into()))?;
-            
-            let rtmr2 = tdx.get("rtmr2")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| Error::SigstoreVerification("Missing rtmr2".into()))?;
-            
-            vec![snp_measurement.to_string(), rtmr1.to_string(), rtmr2.to_string()]
-        }
-        _ => return Err(Error::SigstoreVerification(format!("Unsupported predicate type: {:?}", measurement_type))),
-    };
+    // Only accept multiplatform predicate (matches Python/Go behavior)
+    if statement.predicate_type != "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1" {
+        return Err(Error::SigstoreVerification(format!(
+            "Unsupported predicate type: {}",
+            statement.predicate_type
+        )));
+    }
+
+    let snp_measurement = statement.predicate.get("snp_measurement")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::SigstoreVerification("Missing snp_measurement".into()))?;
+
+    let tdx = statement.predicate.get("tdx_measurement")
+        .ok_or_else(|| Error::SigstoreVerification("Missing tdx_measurement".into()))?;
+
+    let rtmr1 = tdx.get("rtmr1")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::SigstoreVerification("Missing rtmr1".into()))?;
+
+    let rtmr2 = tdx.get("rtmr2")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::SigstoreVerification("Missing rtmr2".into()))?;
+
+    let registers = vec![snp_measurement.to_string(), rtmr1.to_string(), rtmr2.to_string()];
     
     Ok(Measurement {
-        type_: measurement_type,
+        type_: PredicateType::SnpTdxMultiPlatformV1,
         registers,
     })
 }
