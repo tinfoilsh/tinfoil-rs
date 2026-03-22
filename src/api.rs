@@ -17,7 +17,7 @@ pub enum Role {
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
 }
@@ -30,7 +30,7 @@ impl ChatMessage {
             tool_call_id: None,
         }
     }
-    
+
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: Role::User,
@@ -38,7 +38,7 @@ impl ChatMessage {
             tool_call_id: None,
         }
     }
-    
+
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
@@ -46,7 +46,7 @@ impl ChatMessage {
             tool_call_id: None,
         }
     }
-    
+
     pub fn tool(content: impl Into<String>, tool_call_id: impl Into<String>) -> Self {
         Self {
             role: Role::Tool,
@@ -65,7 +65,11 @@ pub struct Tool {
 }
 
 impl Tool {
-    pub fn function(name: impl Into<String>, description: impl Into<String>, parameters: serde_json::Value) -> Self {
+    pub fn function(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
         Self {
             type_: "function".to_string(),
             function: FunctionDef {
@@ -88,10 +92,10 @@ pub struct FunctionDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
-    
+
     #[serde(rename = "type")]
     pub type_: String,
-    
+
     pub function: FunctionCall,
 }
 
@@ -106,16 +110,16 @@ pub struct FunctionCall {
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<String>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
 }
@@ -131,7 +135,7 @@ impl ChatRequest {
             max_tokens: None,
         }
     }
-    
+
     pub fn with_tools(mut self, tools: Vec<Tool>) -> Self {
         self.tools = Some(tools);
         self.tool_choice = Some("auto".to_string());
@@ -178,7 +182,7 @@ pub struct EmbeddingRequest {
 impl EmbeddingRequest {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
-            model: "nomic-embed-text".to_string(),
+            model: crate::constants::DEFAULT_EMBED_MODEL.to_string(),
             input: text.into(),
         }
     }

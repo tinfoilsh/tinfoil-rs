@@ -9,9 +9,7 @@ use crate::verifier::attestation::{self, types::{GroundTruth, Measurement}};
 use crate::verifier::sigstore;
 use crate::verifier::tls;
 
-/// Default models
-pub const DEFAULT_CHAT_MODEL: &str = "qwen3-coder-480b";
-pub const DEFAULT_EMBED_MODEL: &str = "nomic-embed-text";
+use crate::constants::{DEFAULT_CHAT_MODEL, DEFAULT_EMBED_MODEL};
 
 /// Secure client for Tinfoil inference with hardware attestation
 /// 
