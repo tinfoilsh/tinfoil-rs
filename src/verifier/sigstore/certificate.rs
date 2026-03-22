@@ -43,6 +43,8 @@ mod fulcio_oids {
     pub const OIDC_ISSUER_V1: &str = "1.3.6.1.4.1.57264.1.1";
     /// OIDC Issuer V2 (1.3.6.1.4.1.57264.1.8)
     pub const OIDC_ISSUER_V2: &str = "1.3.6.1.4.1.57264.1.8";
+    /// GitHub Workflow Repository V1 (1.3.6.1.4.1.57264.1.5)
+    pub const GITHUB_WORKFLOW_REPOSITORY: &str = "1.3.6.1.4.1.57264.1.5";
     /// Build Signer URI (1.3.6.1.4.1.57264.1.9)
     pub const BUILD_SIGNER_URI: &str = "1.3.6.1.4.1.57264.1.9";
     /// Source Repository URI (1.3.6.1.4.1.57264.1.12)
@@ -165,8 +167,17 @@ pub fn extract_certificate_info(cert: &Certificate) -> Result<CertificateInfo> {
                 fulcio_oids::BUILD_SIGNER_URI => {
                     subject_workflow = value;
                 }
-                fulcio_oids::SOURCE_REPOSITORY_URI => {
+                fulcio_oids::GITHUB_WORKFLOW_REPOSITORY => {
                     repository = value;
+                }
+                fulcio_oids::SOURCE_REPOSITORY_URI if repository.is_empty() => {
+                    // V2 fallback: extract repo name from URI
+                    // SOURCE_REPOSITORY_URI is "https://github.com/owner/repo"
+                    // GITHUB_WORKFLOW_REPOSITORY (V1) is "owner/repo"
+                    repository = value
+                        .strip_prefix("https://github.com/")
+                        .unwrap_or(&value)
+                        .to_string();
                 }
                 _ => {}
             }

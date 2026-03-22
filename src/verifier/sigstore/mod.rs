@@ -142,7 +142,15 @@ fn verify_certificate_identity(cert_info: &CertificateInfo, expected_repo: &str)
         )));
     }
 
-    // Verify repository matches using regex pattern for workflow URI
+    // Verify repository matches the certificate's repository extension (matches Python/JS)
+    if cert_info.repository != expected_repo {
+        return Err(Error::SigstoreVerification(format!(
+            "Certificate repository does not match. Expected: {}, Got: {}",
+            expected_repo, cert_info.repository
+        )));
+    }
+
+    // Verify workflow URI matches expected pattern for this repo
     let pattern = format!(
         r"^https://github\.com/{}/.github/workflows/.*@refs/tags/",
         regex::escape(expected_repo)
