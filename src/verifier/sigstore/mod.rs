@@ -134,8 +134,8 @@ fn extract_certificate_info_from_bundle(bundle: &serde_json::Value) -> Result<Ce
 
 /// Verify that the certificate is from GitHub Actions for the expected repo
 fn verify_certificate_identity(cert_info: &CertificateInfo, expected_repo: &str) -> Result<()> {
-    // Verify OIDC issuer is GitHub Actions
-    if !cert_info.issuer.contains("token.actions.githubusercontent.com") {
+    // Verify OIDC issuer is GitHub Actions (exact match, not substring)
+    if cert_info.issuer != "https://token.actions.githubusercontent.com" {
         return Err(Error::SigstoreVerification(format!(
             "Certificate not from GitHub Actions. Issuer: {}",
             cert_info.issuer
