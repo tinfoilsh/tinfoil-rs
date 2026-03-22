@@ -26,7 +26,9 @@ impl PredicateType {
         match self {
             PredicateType::SevGuestV2 => "https://tinfoil.sh/predicate/sev-snp-guest/v2",
             PredicateType::TdxGuestV2 => "https://tinfoil.sh/predicate/tdx-guest/v2",
-            PredicateType::SnpTdxMultiPlatformV1 => "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1",
+            PredicateType::SnpTdxMultiPlatformV1 => {
+                "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1"
+            }
             PredicateType::Unknown => "unknown",
         }
     }
@@ -57,19 +59,19 @@ impl Measurement {
         if other.type_ == PredicateType::SnpTdxMultiPlatformV1 {
             return other.compare_multiplatform(self);
         }
-        
+
         // Direct comparison
         if self.type_ != other.type_ {
             return Err(MeasurementError::FormatMismatch);
         }
-        
+
         if self.registers != other.registers {
             return Err(MeasurementError::RegisterMismatch);
         }
-        
+
         Ok(())
     }
-    
+
     fn compare_multiplatform(&self, other: &Measurement) -> Result<(), MeasurementError> {
         if self.registers.len() < 3 {
             return Err(MeasurementError::TooFewRegisters);
@@ -85,9 +87,11 @@ impl Measurement {
             PredicateType::SevGuestV2 => {
                 // Multi-platform register[0] is SNP measurement
                 let expected_snp = &self.registers[0];
-                let actual_snp = other.registers.get(0)
+                let actual_snp = other
+                    .registers
+                    .get(0)
                     .ok_or(MeasurementError::TooFewRegisters)?;
-                
+
                 if expected_snp != actual_snp {
                     return Err(MeasurementError::SnpMismatch);
                 }
@@ -96,21 +100,21 @@ impl Measurement {
                 if other.registers.len() < 5 {
                     return Err(MeasurementError::TooFewRegisters);
                 }
-                
+
                 // Multi-platform registers[1,2] are RTMR1, RTMR2
                 // TDX registers are [MRTD, RTMR0, RTMR1, RTMR2, RTMR3]
                 let expected_rtmr1 = &self.registers[1];
                 let expected_rtmr2 = &self.registers[2];
                 let actual_rtmr1 = &other.registers[2];
                 let actual_rtmr2 = &other.registers[3];
-                
+
                 if expected_rtmr1 != actual_rtmr1 {
                     return Err(MeasurementError::Rtmr1Mismatch);
                 }
                 if expected_rtmr2 != actual_rtmr2 {
                     return Err(MeasurementError::Rtmr2Mismatch);
                 }
-                
+
                 // RTMR3 should be zeros
                 let rtmr3_zero = "0".repeat(96);
                 if other.registers[4] != rtmr3_zero {
@@ -119,10 +123,10 @@ impl Measurement {
             }
             _ => return Err(MeasurementError::FormatMismatch),
         }
-        
+
         Ok(())
     }
-    
+
     /// Compute fingerprint of measurement for its own type.
     ///
     /// Algorithm matches Python's tinfoil implementation:
@@ -141,7 +145,7 @@ impl Measurement {
     /// - If single register, returns the raw register value (no hashing)
     /// - Otherwise, hashes: type_url + registers.join("")
     pub fn fingerprint_for_target(&self, target_type: &PredicateType) -> String {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
 
         let registers: Vec<&str> = match (&self.type_, target_type) {
             // Multi-platform source targeting SEV-SNP: use first register (SNP measurement)
@@ -153,13 +157,9 @@ impl Measurement {
                 vec![self.registers.first().map(|s| s.as_str()).unwrap_or("")]
             }
             // TDX measurement: all 5 registers
-            (PredicateType::TdxGuestV2, _) => {
-                self.registers.iter().map(|s| s.as_str()).collect()
-            }
+            (PredicateType::TdxGuestV2, _) => self.registers.iter().map(|s| s.as_str()).collect(),
             // Default: use all registers
-            _ => {
-                self.registers.iter().map(|s| s.as_str()).collect()
-            }
+            _ => self.registers.iter().map(|s| s.as_str()).collect(),
         };
 
         // Match Python: if single register, return raw value (no hashing)
@@ -179,22 +179,22 @@ impl Measurement {
 pub enum MeasurementError {
     #[error("Attestation format mismatch")]
     FormatMismatch,
-    
+
     #[error("Register values don't match")]
     RegisterMismatch,
-    
+
     #[error("Too few registers in measurement")]
     TooFewRegisters,
-    
+
     #[error("SNP measurement mismatch")]
     SnpMismatch,
-    
+
     #[error("RTMR1 mismatch")]
     Rtmr1Mismatch,
-    
+
     #[error("RTMR2 mismatch")]
     Rtmr2Mismatch,
-    
+
     #[error("RTMR3 mismatch (expected zeros)")]
     Rtmr3Mismatch,
 }
@@ -204,10 +204,10 @@ pub enum MeasurementError {
 pub struct Verification {
     /// Enclave measurement registers
     pub measurement: Measurement,
-    
+
     /// TLS public key fingerprint (hex-encoded SHA256)
     pub tls_public_key_fp: String,
-    
+
     /// HPKE public key for encrypted communication (hex-encoded)
     pub hpke_public_key: Option<String>,
 }
@@ -364,6 +364,7 @@ impl Default for ValidationOptions {
             permit_provisional_firmware: false,
             platform_info: Some(SnpPlatformInfo {
                 smt_enabled: true,
+                tsme_enabled: true,
                 ..Default::default()
             }),
             vmpl: Some(0),
@@ -554,7 +555,13 @@ mod tests {
         };
         let m2 = Measurement {
             type_: PredicateType::TdxGuestV2,
-            registers: vec!["mrtd".into(), "rtmr0".into(), "rtmr1".into(), "rtmr2".into(), RTMR3_ZERO.into()],
+            registers: vec![
+                "mrtd".into(),
+                "rtmr0".into(),
+                "rtmr1".into(),
+                "rtmr2".into(),
+                RTMR3_ZERO.into(),
+            ],
         };
         let err = m1.equals(&m2).unwrap_err();
         assert!(matches!(err, MeasurementError::FormatMismatch));
@@ -596,7 +603,12 @@ mod tests {
         };
         let m2 = Measurement {
             type_: PredicateType::TdxGuestV2,
-            registers: vec!["mrtd".into(), "rtmr0".into(), "rtmr1".into(), "rtmr2".into()], // Only 4, need 5
+            registers: vec![
+                "mrtd".into(),
+                "rtmr0".into(),
+                "rtmr1".into(),
+                "rtmr2".into(),
+            ], // Only 4, need 5
         };
         let err = m1.equals(&m2).unwrap_err();
         assert!(matches!(err, MeasurementError::TooFewRegisters));
