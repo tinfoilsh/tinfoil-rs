@@ -9,7 +9,7 @@ use crate::verifier::attestation::{self, types::{GroundTruth, Measurement}};
 use crate::verifier::sigstore;
 use crate::verifier::tls;
 
-use crate::constants::{DEFAULT_CHAT_MODEL, DEFAULT_EMBED_MODEL};
+use crate::constants::DEFAULT_CHAT_MODEL;
 
 /// Secure client for Tinfoil inference with hardware attestation
 /// 
