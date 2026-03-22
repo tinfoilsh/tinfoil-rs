@@ -3,11 +3,11 @@
 //! This module verifies that signatures and certificates were logged in
 //! Rekor, Sigstore's transparency log, providing an immutable audit trail.
 
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
+use super::trust;
 use crate::error::{Error, Result};
 use crate::verifier::util::decode_b64;
-use super::trust;
 
 /// Verify Rekor transparency log entry with full cryptographic verification.
 ///
@@ -18,7 +18,11 @@ use super::trust;
 /// 4. The inclusion proof is valid (Merkle path from leaf to root)
 /// 5. The certificate in the bundle matches the one in the Rekor entry
 /// 6. The signature in the bundle matches the one in the Rekor entry
-pub fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert_not_after: u64) -> Result<()> {
+pub fn verify_rekor_entry(
+    bundle: &serde_json::Value,
+    cert_not_before: u64,
+    cert_not_after: u64,
+) -> Result<()> {
     // Get tlog entries from verification material
     let tlog_entries = bundle
         .get("verificationMaterial")
@@ -27,7 +31,9 @@ pub fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert
         .ok_or_else(|| Error::SigstoreVerification("No tlogEntries in bundle".into()))?;
 
     if tlog_entries.is_empty() {
-        return Err(Error::SigstoreVerification("Bundle has no Rekor tlog entries - transparency log verification required".into()));
+        return Err(Error::SigstoreVerification(
+            "Bundle has no Rekor tlog entries - transparency log verification required".into(),
+        ));
     }
 
     let entry = &tlog_entries[0];
@@ -37,7 +43,9 @@ pub fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert
         .get("integratedTime")
         .and_then(|t| t.as_str())
         .and_then(|s| s.parse::<u64>().ok())
-        .ok_or_else(|| Error::SigstoreVerification("Missing integratedTime in tlog entry".into()))?;
+        .ok_or_else(|| {
+            Error::SigstoreVerification("Missing integratedTime in tlog entry".into())
+        })?;
 
     if integrated_time < cert_not_before || integrated_time > cert_not_after {
         return Err(Error::SigstoreVerification(format!(
@@ -47,8 +55,9 @@ pub fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert
     }
 
     // Get inclusion proof (required for v0.2+ bundles)
-    let inclusion_proof = entry.get("inclusionProof")
-        .ok_or_else(|| Error::SigstoreVerification("Missing inclusion proof in tlog entry".into()))?;
+    let inclusion_proof = entry.get("inclusionProof").ok_or_else(|| {
+        Error::SigstoreVerification("Missing inclusion proof in tlog entry".into())
+    })?;
 
     // Load Rekor public keys from trusted root
     let rekor_keys = trust::load_rekor_keys()?;
@@ -64,18 +73,25 @@ pub fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert
     let (_, key_der, key_type) = rekor_keys
         .iter()
         .find(|(id, _, _)| id == log_id)
-        .ok_or_else(|| Error::SigstoreVerification(format!(
-            "Unknown Rekor log ID: {}. Trusted log IDs: {:?}",
-            log_id,
-            rekor_keys.iter().map(|(id, _, _)| id.as_str()).collect::<Vec<_>>()
-        )))?;
+        .ok_or_else(|| {
+            Error::SigstoreVerification(format!(
+                "Unknown Rekor log ID: {}. Trusted log IDs: {:?}",
+                log_id,
+                rekor_keys
+                    .iter()
+                    .map(|(id, _, _)| id.as_str())
+                    .collect::<Vec<_>>()
+            ))
+        })?;
 
     // Get checkpoint (signed tree head)
     let checkpoint = inclusion_proof
         .get("checkpoint")
         .and_then(|c| c.get("envelope"))
         .and_then(|e| e.as_str())
-        .ok_or_else(|| Error::SigstoreVerification("Missing checkpoint in inclusion proof".into()))?;
+        .ok_or_else(|| {
+            Error::SigstoreVerification("Missing checkpoint in inclusion proof".into())
+        })?;
 
     // Verify checkpoint signature and get the root hash from the signed body
     let checkpoint_root_hash = verify_checkpoint_signature(checkpoint, key_der, key_type)?;
@@ -129,10 +145,13 @@ pub fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert
     let canonicalized_body_b64 = entry
         .get("canonicalizedBody")
         .and_then(|b| b.as_str())
-        .ok_or_else(|| Error::SigstoreVerification("Missing canonicalizedBody in tlog entry".into()))?;
+        .ok_or_else(|| {
+            Error::SigstoreVerification("Missing canonicalizedBody in tlog entry".into())
+        })?;
 
-    let body_bytes = decode_b64(canonicalized_body_b64)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode canonicalizedBody: {}", e)))?;
+    let body_bytes = decode_b64(canonicalized_body_b64).map_err(|e| {
+        Error::SigstoreVerification(format!("Failed to decode canonicalizedBody: {}", e))
+    })?;
 
     // Verify certificate binding: ensure the certificate in the bundle matches the one in the Rekor entry
     verify_certificate_binding(bundle, &body_bytes)?;
@@ -160,11 +179,13 @@ pub fn verify_rekor_entry(bundle: &serde_json::Value, cert_not_before: u64, cert
 /// Rekor entry, bypassing the transparency log protection.
 fn verify_certificate_binding(bundle: &serde_json::Value, canonicalized_body: &[u8]) -> Result<()> {
     // Parse the canonicalizedBody as JSON
-    let entry: serde_json::Value = serde_json::from_slice(canonicalized_body)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse canonicalizedBody: {}", e)))?;
+    let entry: serde_json::Value = serde_json::from_slice(canonicalized_body).map_err(|e| {
+        Error::SigstoreVerification(format!("Failed to parse canonicalizedBody: {}", e))
+    })?;
 
     // Determine the entry kind and extract certificate accordingly
-    let kind = entry.get("kind")
+    let kind = entry
+        .get("kind")
         .and_then(|k| k.as_str())
         .unwrap_or("unknown");
 
@@ -178,16 +199,21 @@ fn verify_certificate_binding(bundle: &serde_json::Value, canonicalized_body: &[
                 .and_then(|arr| arr.first())
                 .and_then(|sig| sig.get("verifier"))
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| Error::SigstoreVerification(
-                    "Missing certificate in DSSE Rekor entry (spec.signatures[0].verifier)".into()
-                ))?;
+                .ok_or_else(|| {
+                    Error::SigstoreVerification(
+                        "Missing certificate in DSSE Rekor entry (spec.signatures[0].verifier)"
+                            .into(),
+                    )
+                })?;
 
             // Decode base64 to get PEM string
-            let verifier_pem_bytes = decode_b64(verifier_b64)
-                .map_err(|e| Error::SigstoreVerification(format!("Failed to decode verifier: {}", e)))?;
+            let verifier_pem_bytes = decode_b64(verifier_b64).map_err(|e| {
+                Error::SigstoreVerification(format!("Failed to decode verifier: {}", e))
+            })?;
 
-            let verifier_pem = String::from_utf8(verifier_pem_bytes)
-                .map_err(|e| Error::SigstoreVerification(format!("Invalid UTF-8 in verifier: {}", e)))?;
+            let verifier_pem = String::from_utf8(verifier_pem_bytes).map_err(|e| {
+                Error::SigstoreVerification(format!("Invalid UTF-8 in verifier: {}", e))
+            })?;
 
             // Parse PEM to get DER
             parse_pem_certificate(&verifier_pem)?
@@ -208,7 +234,8 @@ fn verify_certificate_binding(bundle: &serde_json::Value, canonicalized_body: &[
         }
         _ => {
             return Err(Error::SigstoreVerification(format!(
-                "Unknown Rekor entry kind: {}. Expected 'dsse' or 'hashedrekord'", kind
+                "Unknown Rekor entry kind: {}. Expected 'dsse' or 'hashedrekord'",
+                kind
             )));
         }
     };
@@ -219,19 +246,23 @@ fn verify_certificate_binding(bundle: &serde_json::Value, canonicalized_body: &[
         .and_then(|vm| vm.get("certificate"))
         .and_then(|c| c.get("rawBytes"))
         .and_then(|rb| rb.as_str())
-        .ok_or_else(|| Error::SigstoreVerification(
-            "Missing certificate in bundle (verificationMaterial.certificate.rawBytes)".into()
-        ))?;
+        .ok_or_else(|| {
+            Error::SigstoreVerification(
+                "Missing certificate in bundle (verificationMaterial.certificate.rawBytes)".into(),
+            )
+        })?;
 
     // Decode the bundle certificate from base64
-    let bundle_cert_der = decode_b64(bundle_cert_b64)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode bundle certificate: {}", e)))?;
+    let bundle_cert_der = decode_b64(bundle_cert_b64).map_err(|e| {
+        Error::SigstoreVerification(format!("Failed to decode bundle certificate: {}", e))
+    })?;
 
     // Compare the DER bytes
     if rekor_cert_der != bundle_cert_der {
         return Err(Error::SigstoreVerification(
             "Certificate mismatch: bundle certificate does not match Rekor entry certificate. \
-             This could indicate a substitution attack.".into()
+             This could indicate a substitution attack."
+                .into(),
         ));
     }
 
@@ -246,11 +277,13 @@ fn verify_certificate_binding(bundle: &serde_json::Value, canonicalized_body: &[
 /// Rekor entry.
 fn verify_signature_binding(bundle: &serde_json::Value, canonicalized_body: &[u8]) -> Result<()> {
     // Parse the canonicalizedBody as JSON
-    let entry: serde_json::Value = serde_json::from_slice(canonicalized_body)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse canonicalizedBody: {}", e)))?;
+    let entry: serde_json::Value = serde_json::from_slice(canonicalized_body).map_err(|e| {
+        Error::SigstoreVerification(format!("Failed to parse canonicalizedBody: {}", e))
+    })?;
 
     // Determine the entry kind and extract signature accordingly
-    let kind = entry.get("kind")
+    let kind = entry
+        .get("kind")
         .and_then(|k| k.as_str())
         .unwrap_or("unknown");
 
@@ -264,12 +297,16 @@ fn verify_signature_binding(bundle: &serde_json::Value, canonicalized_body: &[u8
                 .and_then(|arr| arr.first())
                 .and_then(|sig| sig.get("signature"))
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| Error::SigstoreVerification(
-                    "Missing signature in DSSE Rekor entry (spec.signatures[0].signature)".into()
-                ))?;
+                .ok_or_else(|| {
+                    Error::SigstoreVerification(
+                        "Missing signature in DSSE Rekor entry (spec.signatures[0].signature)"
+                            .into(),
+                    )
+                })?;
 
-            decode_b64(sig_b64)
-                .map_err(|e| Error::SigstoreVerification(format!("Failed to decode Rekor signature: {}", e)))?
+            decode_b64(sig_b64).map_err(|e| {
+                Error::SigstoreVerification(format!("Failed to decode Rekor signature: {}", e))
+            })?
         }
         "hashedrekord" => {
             // hashedrekord format: spec.signature.content contains base64-encoded signature
@@ -278,16 +315,21 @@ fn verify_signature_binding(bundle: &serde_json::Value, canonicalized_body: &[u8
                 .and_then(|s| s.get("signature"))
                 .and_then(|s| s.get("content"))
                 .and_then(|c| c.as_str())
-                .ok_or_else(|| Error::SigstoreVerification(
-                    "Missing signature in hashedrekord Rekor entry (spec.signature.content)".into()
-                ))?;
+                .ok_or_else(|| {
+                    Error::SigstoreVerification(
+                        "Missing signature in hashedrekord Rekor entry (spec.signature.content)"
+                            .into(),
+                    )
+                })?;
 
-            decode_b64(sig_b64)
-                .map_err(|e| Error::SigstoreVerification(format!("Failed to decode Rekor signature: {}", e)))?
+            decode_b64(sig_b64).map_err(|e| {
+                Error::SigstoreVerification(format!("Failed to decode Rekor signature: {}", e))
+            })?
         }
         _ => {
             return Err(Error::SigstoreVerification(format!(
-                "Unknown Rekor entry kind: {}. Expected 'dsse' or 'hashedrekord'", kind
+                "Unknown Rekor entry kind: {}. Expected 'dsse' or 'hashedrekord'",
+                kind
             )));
         }
     };
@@ -300,18 +342,22 @@ fn verify_signature_binding(bundle: &serde_json::Value, canonicalized_body: &[u8
         .and_then(|arr| arr.first())
         .and_then(|sig| sig.get("sig"))
         .and_then(|s| s.as_str())
-        .ok_or_else(|| Error::SigstoreVerification(
-            "Missing signature in bundle (dsseEnvelope.signatures[0].sig)".into()
-        ))?;
+        .ok_or_else(|| {
+            Error::SigstoreVerification(
+                "Missing signature in bundle (dsseEnvelope.signatures[0].sig)".into(),
+            )
+        })?;
 
-    let bundle_sig_bytes = decode_b64(bundle_sig_b64)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode bundle signature: {}", e)))?;
+    let bundle_sig_bytes = decode_b64(bundle_sig_b64).map_err(|e| {
+        Error::SigstoreVerification(format!("Failed to decode bundle signature: {}", e))
+    })?;
 
     // Compare the signatures
     if rekor_signature_bytes != bundle_sig_bytes {
         return Err(Error::SigstoreVerification(
             "Signature mismatch: bundle signature does not match Rekor entry signature. \
-             This could indicate a substitution attack.".into()
+             This could indicate a substitution attack."
+                .into(),
         ));
     }
 
@@ -324,13 +370,17 @@ fn parse_pem_certificate(pem: &str) -> Result<Vec<u8>> {
     let begin_marker = "-----BEGIN CERTIFICATE-----";
     let end_marker = "-----END CERTIFICATE-----";
 
-    let start = pem.find(begin_marker)
-        .ok_or_else(|| Error::SigstoreVerification("Invalid PEM: missing BEGIN CERTIFICATE".into()))?;
-    let end = pem.find(end_marker)
-        .ok_or_else(|| Error::SigstoreVerification("Invalid PEM: missing END CERTIFICATE".into()))?;
+    let start = pem.find(begin_marker).ok_or_else(|| {
+        Error::SigstoreVerification("Invalid PEM: missing BEGIN CERTIFICATE".into())
+    })?;
+    let end = pem.find(end_marker).ok_or_else(|| {
+        Error::SigstoreVerification("Invalid PEM: missing END CERTIFICATE".into())
+    })?;
 
     if start >= end {
-        return Err(Error::SigstoreVerification("Invalid PEM: markers in wrong order".into()));
+        return Err(Error::SigstoreVerification(
+            "Invalid PEM: markers in wrong order".into(),
+        ));
     }
 
     // Extract the base64 content (skip the BEGIN marker)
@@ -340,8 +390,9 @@ fn parse_pem_certificate(pem: &str) -> Result<Vec<u8>> {
         .collect();
 
     // Decode the base64 to get DER bytes
-    decode_b64(&b64_content)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode PEM certificate: {}", e)))
+    decode_b64(&b64_content).map_err(|e| {
+        Error::SigstoreVerification(format!("Failed to decode PEM certificate: {}", e))
+    })
 }
 
 /// Verify checkpoint signature and return the root hash from the signed body.
@@ -359,12 +410,18 @@ fn parse_pem_certificate(pem: &str) -> Result<Vec<u8>> {
 /// Returns the root hash extracted from the signed checkpoint body.
 /// This must be compared against the inclusion proof's root hash to prevent
 /// substitution attacks (see sigstore-python PR #634).
-fn verify_checkpoint_signature(checkpoint: &str, key_der: &[u8], key_type: &str) -> Result<Vec<u8>> {
+fn verify_checkpoint_signature(
+    checkpoint: &str,
+    key_der: &[u8],
+    key_type: &str,
+) -> Result<Vec<u8>> {
     // Parse checkpoint note format:
     // <origin>\n<tree_size>\n<root_hash_base64>\n[<extension_lines>]\n\n— <origin> <signature_base64>\n
     let parts: Vec<&str> = checkpoint.split("\n\n").collect();
     if parts.len() < 2 {
-        return Err(Error::SigstoreVerification("Invalid checkpoint format: missing signature section".into()));
+        return Err(Error::SigstoreVerification(
+            "Invalid checkpoint format: missing signature section".into(),
+        ));
     }
 
     let note_body = parts[0];
@@ -374,27 +431,31 @@ fn verify_checkpoint_signature(checkpoint: &str, key_der: &[u8], key_type: &str)
     let lines: Vec<&str> = note_body.lines().collect();
     if lines.len() < 3 {
         return Err(Error::SigstoreVerification(
-            "Checkpoint note body must have at least 3 lines (origin, tree_size, root_hash)".into()
+            "Checkpoint note body must have at least 3 lines (origin, tree_size, root_hash)".into(),
         ));
     }
-    let checkpoint_root_hash = decode_b64(lines[2])
-        .map_err(|e| Error::SigstoreVerification(
-            format!("Failed to decode checkpoint root hash: {}", e)
-        ))?;
+    let checkpoint_root_hash = decode_b64(lines[2]).map_err(|e| {
+        Error::SigstoreVerification(format!("Failed to decode checkpoint root hash: {}", e))
+    })?;
 
     // Signature line format: "— <origin> <signature_base64>"
     if !signature_line.starts_with("— ") {
-        return Err(Error::SigstoreVerification("Invalid checkpoint signature line format".into()));
+        return Err(Error::SigstoreVerification(
+            "Invalid checkpoint signature line format".into(),
+        ));
     }
 
     let sig_parts: Vec<&str> = signature_line[4..].splitn(2, ' ').collect();
     if sig_parts.len() < 2 {
-        return Err(Error::SigstoreVerification("Invalid checkpoint signature format".into()));
+        return Err(Error::SigstoreVerification(
+            "Invalid checkpoint signature format".into(),
+        ));
     }
 
     let signature_b64 = sig_parts[1].trim();
-    let signature_bytes = decode_b64(signature_b64)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode checkpoint signature: {}", e)))?;
+    let signature_bytes = decode_b64(signature_b64).map_err(|e| {
+        Error::SigstoreVerification(format!("Failed to decode checkpoint signature: {}", e))
+    })?;
 
     // The message to verify is the note body with a trailing newline
     let message = format!("{}\n", note_body);
@@ -408,7 +469,8 @@ fn verify_checkpoint_signature(checkpoint: &str, key_der: &[u8], key_type: &str)
         }
         _ => {
             return Err(Error::SigstoreVerification(format!(
-                "Unsupported Rekor key type: {}", key_type
+                "Unsupported Rekor key type: {}",
+                key_type
             )));
         }
     }
@@ -418,55 +480,67 @@ fn verify_checkpoint_signature(checkpoint: &str, key_der: &[u8], key_type: &str)
 
 /// Verify ECDSA P-256 signature (for original Rekor log).
 fn verify_ecdsa_p256_signature(message: &[u8], signature: &[u8], key_der: &[u8]) -> Result<()> {
-    use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+    use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
     use p256::pkcs8::DecodePublicKey;
 
     // Checkpoint signatures include a 4-byte key hint prefix
     if signature.len() < 4 {
-        return Err(Error::SigstoreVerification("Checkpoint signature too short".into()));
+        return Err(Error::SigstoreVerification(
+            "Checkpoint signature too short".into(),
+        ));
     }
     let sig_bytes = &signature[4..];
 
     // Parse the public key from SPKI DER
-    let verifying_key = VerifyingKey::from_public_key_der(key_der)
-        .map_err(|e| Error::SigstoreVerification(format!("Invalid Rekor ECDSA public key: {}", e)))?;
+    let verifying_key = VerifyingKey::from_public_key_der(key_der).map_err(|e| {
+        Error::SigstoreVerification(format!("Invalid Rekor ECDSA public key: {}", e))
+    })?;
 
     // Parse the signature (DER-encoded)
-    let sig = Signature::from_der(sig_bytes)
-        .map_err(|e| Error::SigstoreVerification(format!("Invalid ECDSA signature format: {}", e)))?;
+    let sig = Signature::from_der(sig_bytes).map_err(|e| {
+        Error::SigstoreVerification(format!("Invalid ECDSA signature format: {}", e))
+    })?;
 
     // Verify
-    verifying_key.verify(message, &sig)
-        .map_err(|_| Error::SigstoreVerification("Checkpoint ECDSA signature verification failed".into()))?;
+    verifying_key.verify(message, &sig).map_err(|_| {
+        Error::SigstoreVerification("Checkpoint ECDSA signature verification failed".into())
+    })?;
 
     Ok(())
 }
 
 /// Verify Ed25519 signature (for Rekor log2025-1).
 fn verify_ed25519_signature(message: &[u8], signature: &[u8], key_der: &[u8]) -> Result<()> {
-    use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
     // Checkpoint signatures include a 4-byte key hint prefix
     if signature.len() < 4 + 64 {
-        return Err(Error::SigstoreVerification("Ed25519 checkpoint signature too short".into()));
+        return Err(Error::SigstoreVerification(
+            "Ed25519 checkpoint signature too short".into(),
+        ));
     }
     let sig_bytes = &signature[4..4 + 64];
 
     // Ed25519 public key in SPKI format: skip the SPKI header to get raw 32-byte key
     // SPKI for Ed25519: 30 2a 30 05 06 03 2b 65 70 03 21 00 <32 bytes>
     if key_der.len() < 44 {
-        return Err(Error::SigstoreVerification("Invalid Ed25519 SPKI key length".into()));
+        return Err(Error::SigstoreVerification(
+            "Invalid Ed25519 SPKI key length".into(),
+        ));
     }
     let raw_key = &key_der[key_der.len() - 32..];
 
-    let verifying_key = VerifyingKey::try_from(raw_key)
-        .map_err(|e| Error::SigstoreVerification(format!("Invalid Rekor Ed25519 public key: {}", e)))?;
+    let verifying_key = VerifyingKey::try_from(raw_key).map_err(|e| {
+        Error::SigstoreVerification(format!("Invalid Rekor Ed25519 public key: {}", e))
+    })?;
 
-    let sig = Signature::try_from(sig_bytes)
-        .map_err(|e| Error::SigstoreVerification(format!("Invalid Ed25519 signature format: {}", e)))?;
+    let sig = Signature::try_from(sig_bytes).map_err(|e| {
+        Error::SigstoreVerification(format!("Invalid Ed25519 signature format: {}", e))
+    })?;
 
-    verifying_key.verify(message, &sig)
-        .map_err(|_| Error::SigstoreVerification("Checkpoint Ed25519 signature verification failed".into()))?;
+    verifying_key.verify(message, &sig).map_err(|_| {
+        Error::SigstoreVerification("Checkpoint Ed25519 signature verification failed".into())
+    })?;
 
     Ok(())
 }
@@ -481,7 +555,20 @@ fn verify_merkle_inclusion(
 ) -> Result<()> {
     if index >= tree_size {
         return Err(Error::SigstoreVerification(format!(
-            "Log index {} >= tree size {}", index, tree_size
+            "Log index {} >= tree size {}",
+            index, tree_size
+        )));
+    }
+
+    // Validate proof length per RFC 6962 decomposition (matches sigstore-rs)
+    let inner = u64::BITS - (index ^ (tree_size - 1)).leading_zeros();
+    let border = (index >> inner).count_ones();
+    let expected_len = (inner + border) as usize;
+    if proof.len() != expected_len {
+        return Err(Error::SigstoreVerification(format!(
+            "Invalid inclusion proof length: got {}, expected {}",
+            proof.len(),
+            expected_len
         )));
     }
 
@@ -491,7 +578,9 @@ fn verify_merkle_inclusion(
 
     for sibling in proof {
         if sibling.len() != 32 {
-            return Err(Error::SigstoreVerification("Invalid proof hash length".into()));
+            return Err(Error::SigstoreVerification(
+                "Invalid proof hash length".into(),
+            ));
         }
 
         // RFC 6962 interior node hash: SHA256(0x01 || left || right)
@@ -516,7 +605,7 @@ fn verify_merkle_inclusion(
 
     if current_hash.as_slice() != expected_root {
         return Err(Error::SigstoreVerification(
-            "Merkle inclusion proof verification failed: computed root does not match".into()
+            "Merkle inclusion proof verification failed: computed root does not match".into(),
         ));
     }
 
