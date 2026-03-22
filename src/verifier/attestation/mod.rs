@@ -83,9 +83,9 @@ pub async fn verify_full_with_options(
         PredicateType::TdxGuestV2 => Err(Error::UnsupportedFormat(
             "Intel TDX attestation not yet implemented".into()
         )),
-        PredicateType::SnpTdxMultiPlatformV1 => {
-            sev::verify_full_with_options(&doc.body, options).await
-        }
+        PredicateType::SnpTdxMultiPlatformV1 => Err(Error::UnsupportedFormat(
+            "Multi-platform predicate type is not a valid hardware attestation format".into()
+        )),
         PredicateType::Unknown => Err(Error::AttestationVerification(
             "Unknown attestation format".into()
         )),
