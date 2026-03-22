@@ -22,8 +22,8 @@
 
 use const_oid::db::rfc5912::ID_KP_CODE_SIGNING;
 use x509_cert::{
-    Certificate,
     ext::pkix::{ExtendedKeyUsage, KeyUsage},
+    Certificate,
 };
 
 use crate::error::{Error, Result};
@@ -37,9 +37,12 @@ pub struct CertificateInfo {
 }
 
 /// Fulcio OIDC extension OIDs
+/// See: https://github.com/sigstore/fulcio/blob/main/docs/oid-info.md
 mod fulcio_oids {
-    /// OIDC Issuer (1.3.6.1.4.1.57264.1.1)
-    pub const OIDC_ISSUER: &str = "1.3.6.1.4.1.57264.1.1";
+    /// OIDC Issuer V1 (1.3.6.1.4.1.57264.1.1)
+    pub const OIDC_ISSUER_V1: &str = "1.3.6.1.4.1.57264.1.1";
+    /// OIDC Issuer V2 (1.3.6.1.4.1.57264.1.8)
+    pub const OIDC_ISSUER_V2: &str = "1.3.6.1.4.1.57264.1.8";
     /// Build Signer URI (1.3.6.1.4.1.57264.1.9)
     pub const BUILD_SIGNER_URI: &str = "1.3.6.1.4.1.57264.1.9";
     /// Source Repository URI (1.3.6.1.4.1.57264.1.12)
@@ -60,24 +63,35 @@ pub fn validate_certificate_extensions(cert: &Certificate) -> Result<()> {
     // Check KeyUsage extension for digitalSignature
     let key_usage = tbs
         .get::<KeyUsage>()
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse KeyUsage extension: {}", e)))?
-        .ok_or_else(|| Error::SigstoreVerification("Certificate missing KeyUsage extension".into()))?;
+        .map_err(|e| {
+            Error::SigstoreVerification(format!("Failed to parse KeyUsage extension: {}", e))
+        })?
+        .ok_or_else(|| {
+            Error::SigstoreVerification("Certificate missing KeyUsage extension".into())
+        })?;
 
     if !key_usage.1.digital_signature() {
         return Err(Error::SigstoreVerification(
-            "Certificate KeyUsage does not include digitalSignature".into()
+            "Certificate KeyUsage does not include digitalSignature".into(),
         ));
     }
 
     // Check ExtendedKeyUsage extension for codeSigning
     let ext_key_usage = tbs
         .get::<ExtendedKeyUsage>()
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse ExtendedKeyUsage extension: {}", e)))?
-        .ok_or_else(|| Error::SigstoreVerification("Certificate missing ExtendedKeyUsage extension".into()))?;
+        .map_err(|e| {
+            Error::SigstoreVerification(format!(
+                "Failed to parse ExtendedKeyUsage extension: {}",
+                e
+            ))
+        })?
+        .ok_or_else(|| {
+            Error::SigstoreVerification("Certificate missing ExtendedKeyUsage extension".into())
+        })?;
 
-    if !ext_key_usage.1.0.contains(&ID_KP_CODE_SIGNING) {
+    if !ext_key_usage.1 .0.contains(&ID_KP_CODE_SIGNING) {
         return Err(Error::SigstoreVerification(
-            "Certificate ExtendedKeyUsage does not include codeSigning".into()
+            "Certificate ExtendedKeyUsage does not include codeSigning".into(),
         ));
     }
 
@@ -140,7 +154,12 @@ pub fn extract_certificate_info(cert: &Certificate) -> Result<CertificateInfo> {
                 .unwrap_or_else(|| String::from_utf8_lossy(raw_bytes).to_string());
 
             match oid_str.as_str() {
-                fulcio_oids::OIDC_ISSUER => {
+                fulcio_oids::OIDC_ISSUER_V2 => {
+                    // V2 takes priority over V1
+                    issuer = value;
+                }
+                fulcio_oids::OIDC_ISSUER_V1 if issuer.is_empty() => {
+                    // V1 is used only if V2 was not found
                     issuer = value;
                 }
                 fulcio_oids::BUILD_SIGNER_URI => {
