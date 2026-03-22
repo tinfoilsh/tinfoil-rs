@@ -35,12 +35,13 @@ pub use types::{
 
 use crate::error::{Error, Result};
 use super::sigstore;
+use super::util::fetch_with_retry;
 
 /// Fetch attestation document from an enclave
 pub async fn fetch(host: &str) -> Result<AttestationDocument> {
     let url = format!("https://{}/.well-known/tinfoil-attestation", host);
     
-    let response = reqwest::get(&url)
+    let response = fetch_with_retry(&url)
         .await
         .map_err(|e| Error::AttestationFetch(format!("HTTP request failed: {}", e)))?;
     

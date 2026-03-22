@@ -13,6 +13,8 @@ use crate::verifier::attestation::constants::*;
 
 /// Fetch VCEK certificate from AMD KDS via Tinfoil's proxy.
 pub(super) async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
+    use crate::verifier::util::fetch_with_retry;
+
     // Parse TCB components
     let tcb_val = u64::from_le_bytes(tcb.try_into().unwrap());
     let bl_spl = (tcb_val & 0xFF) as u8;
@@ -28,7 +30,7 @@ pub(super) async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
         chip_id_hex, bl_spl, tee_spl, snp_spl, ucode_spl
     );
 
-    let response = reqwest::get(&url)
+    let response = fetch_with_retry(&url)
         .await
         .map_err(|e| Error::AttestationVerification(format!("Failed to fetch VCEK: {}", e)))?;
 

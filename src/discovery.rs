@@ -2,10 +2,11 @@
 
 use crate::constants::ROUTER_URL;
 use crate::error::{Error, Result};
+use crate::verifier::util::fetch_with_retry;
 
 /// Fetch the list of available SNP routers from the discovery endpoint.
 pub async fn fetch_routers() -> Result<Vec<String>> {
-    let response = reqwest::get(ROUTER_URL)
+    let response = fetch_with_retry(ROUTER_URL)
         .await
         .map_err(|e| Error::Network(format!("Failed to fetch routers: {}", e)))?;
 

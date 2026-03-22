@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use crate::constants::{ATTESTATION_PROXY, GITHUB_PROXY};
 use crate::error::{Error, Result};
+use super::util::fetch_with_retry;
 
 #[derive(Deserialize)]
 struct ReleaseResponse {
@@ -14,7 +15,7 @@ struct ReleaseResponse {
 pub async fn fetch_latest_tag(repo: &str) -> Result<String> {
     let url = format!("{}/repos/{}/releases/latest", GITHUB_PROXY, repo);
 
-    let response = reqwest::get(&url).await?;
+    let response = fetch_with_retry(&url).await?;
 
     if !response.status().is_success() {
         return Err(Error::GitHub(format!(
@@ -31,7 +32,7 @@ pub async fn fetch_latest_tag(repo: &str) -> Result<String> {
 pub async fn fetch_digest(repo: &str, tag: &str) -> Result<String> {
     let url = format!("{}/{}/releases/download/{}/tinfoil.hash", GITHUB_PROXY, repo, tag);
 
-    let response = reqwest::get(&url).await?;
+    let response = fetch_with_retry(&url).await?;
 
     if !response.status().is_success() {
         return Err(Error::GitHub(format!(
@@ -64,7 +65,7 @@ struct AttestationsResponse {
 pub async fn fetch_attestation_bundle(repo: &str, digest: &str) -> Result<Vec<u8>> {
     let url = format!("{}/repos/{}/attestations/sha256:{}", ATTESTATION_PROXY, repo, digest);
 
-    let response = reqwest::get(&url).await?;
+    let response = fetch_with_retry(&url).await?;
 
     if !response.status().is_success() {
         return Err(Error::GitHub(format!(
