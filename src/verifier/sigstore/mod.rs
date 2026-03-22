@@ -173,6 +173,18 @@ fn extract_measurement_from_bundle(bundle: &serde_json::Value, expected_digest: 
     let dsse_envelope = bundle.get("dsseEnvelope")
         .ok_or_else(|| Error::SigstoreVerification("No dsseEnvelope in bundle".into()))?;
 
+    // Validate payloadType is in-toto (matches Python/JS)
+    let payload_type = dsse_envelope.get("payloadType")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::SigstoreVerification("No payloadType in DSSE envelope".into()))?;
+
+    if payload_type != "application/vnd.in-toto+json" {
+        return Err(Error::SigstoreVerification(format!(
+            "Unsupported DSSE payload type: \"{}\". Expected \"application/vnd.in-toto+json\"",
+            payload_type
+        )));
+    }
+
     let payload_b64 = dsse_envelope.get("payload")
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::SigstoreVerification("No payload in DSSE envelope".into()))?;
@@ -182,6 +194,16 @@ fn extract_measurement_from_bundle(bundle: &serde_json::Value, expected_digest: 
 
     let statement: InTotoStatement = serde_json::from_slice(&payload_bytes)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to parse statement: {}", e)))?;
+
+    // Validate in-toto statement type
+    if statement._type_ != "https://in-toto.io/Statement/v0.1"
+        && statement._type_ != "https://in-toto.io/Statement/v1"
+    {
+        return Err(Error::SigstoreVerification(format!(
+            "Unsupported in-toto statement type: \"{}\"",
+            statement._type_
+        )));
+    }
 
     // Verify that the provided digest matches the digest in the DSSE payload subject
     let subject = statement.subject.first()
