@@ -318,6 +318,57 @@ impl SecureClient {
         }
         Ok(())
     }
+
+    /// Send a POST request with automatic re-verification on certificate errors.
+    ///
+    /// If the request fails with a connection error (e.g. TLS certificate rotation),
+    /// performs full re-attestation and retries the request once. If re-verification
+    /// fails, the original connection error is returned. This matches the Go SDK's
+    /// `reVerifyingTransport` behavior.
+    async fn send_with_reverify(
+        &mut self,
+        url: &str,
+        body: &(impl serde::Serialize + Sync),
+    ) -> Result<reqwest::Response> {
+        self.ensure_verified().await?;
+
+        // First attempt
+        let first_err = match self.try_send(url, body).await {
+            Ok(resp) => return Ok(resp),
+            Err(e) => e,
+        };
+
+        // Only retry on connection errors (TLS handshake failures from cert rotation)
+        let should_retry = matches!(&first_err, Error::Http(e) if e.is_connect());
+        if !should_retry {
+            return Err(first_err);
+        }
+
+        // Re-verify: full attestation cycle. If this fails, return the original error.
+        if self.verify().await.is_err() {
+            return Err(first_err);
+        }
+
+        // Retry once with the new pinned client
+        self.try_send(url, body).await
+    }
+
+    /// Send a single POST request using the current pinned client.
+    async fn try_send(
+        &self,
+        url: &str,
+        body: &(impl serde::Serialize + Sync),
+    ) -> Result<reqwest::Response> {
+        let client = self.get_client()?;
+        let response = client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(body)
+            .send()
+            .await?;
+        Ok(response)
+    }
     
     /// Make a chat completion request
     pub async fn chat(&mut self, messages: Vec<ChatMessage>) -> Result<ChatResponse> {
@@ -340,8 +391,6 @@ impl SecureClient {
         messages: Vec<ChatMessage>,
         tools: Option<Vec<Tool>>,
     ) -> Result<ChatResponse> {
-        self.ensure_verified().await?;
-        
         let mut request = ChatRequest::new(model, messages);
         if let Some(t) = tools {
             request = request.with_tools(t);
@@ -349,16 +398,7 @@ impl SecureClient {
         
         let url = format!("https://{}/v1/chat/completions", self.host);
         
-        // Use the PINNED client - this validates cert fingerprint on every connection
-        let client = self.get_client()?;
-        
-        let response = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
+        let response = self.send_with_reverify(&url, &request).await?;
         
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -372,21 +412,10 @@ impl SecureClient {
     
     /// Generate an embedding for the given text
     pub async fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
-        self.ensure_verified().await?;
-        
         let request = EmbeddingRequest::new(text);
         let url = format!("https://{}/v1/embeddings", self.host);
         
-        // Use the PINNED client - this validates cert fingerprint on every connection
-        let client = self.get_client()?;
-        
-        let response = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
+        let response = self.send_with_reverify(&url, &request).await?;
         
         if !response.status().is_success() {
             let status = response.status().as_u16();
