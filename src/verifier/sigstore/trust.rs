@@ -90,10 +90,19 @@ pub struct FulcioCa {
     pub valid_until: Option<u64>,
 }
 
+/// Represents a loaded Rekor transparency log key with its metadata.
+pub struct RekorKey {
+    pub key_id: String,
+    pub key_der: Vec<u8>,
+    pub key_type: String,
+    /// Validity start as Unix timestamp (None = no lower bound)
+    pub valid_from: Option<u64>,
+    /// Validity end as Unix timestamp (None = no upper bound)
+    pub valid_until: Option<u64>,
+}
+
 /// Load Rekor public keys from embedded trust root.
-///
-/// Returns a list of (key_id, key_der, key_type) tuples.
-pub fn load_rekor_keys() -> Result<Vec<(String, Vec<u8>, String)>> {
+pub fn load_rekor_keys() -> Result<Vec<RekorKey>> {
     let root: TrustedRoot = serde_json::from_str(TRUSTED_ROOT_JSON)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to parse trusted root: {}", e)))?;
 
@@ -102,7 +111,28 @@ pub fn load_rekor_keys() -> Result<Vec<(String, Vec<u8>, String)>> {
         let key_der = decode_b64(&tlog.public_key.raw_bytes).map_err(|e| {
             Error::SigstoreVerification(format!("Failed to decode Rekor key: {}", e))
         })?;
-        keys.push((tlog.log_id.key_id, key_der, tlog.public_key.key_details));
+
+        // Parse validity period from the trust root
+        let (valid_from, valid_until) = match &tlog.public_key.valid_for {
+            Some(vf) => {
+                let from = parse_rfc3339_to_unix(&vf.start)?;
+                let until = vf
+                    .end
+                    .as_ref()
+                    .map(|e| parse_rfc3339_to_unix(e))
+                    .transpose()?;
+                (Some(from), until)
+            }
+            None => (None, None),
+        };
+
+        keys.push(RekorKey {
+            key_id: tlog.log_id.key_id,
+            key_der,
+            key_type: tlog.public_key.key_details,
+            valid_from,
+            valid_until,
+        });
     }
     Ok(keys)
 }

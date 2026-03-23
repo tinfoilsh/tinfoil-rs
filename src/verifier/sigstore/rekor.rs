@@ -69,20 +69,39 @@ pub fn verify_rekor_entry(
         .and_then(|k| k.as_str())
         .ok_or_else(|| Error::SigstoreVerification("Missing logId in tlog entry".into()))?;
 
-    // Find matching Rekor key
-    let (_, key_der, key_type) = rekor_keys
+    // Find matching Rekor key that was valid at the integrated time
+    let rekor_key = rekor_keys
         .iter()
-        .find(|(id, _, _)| id == log_id)
+        .find(|k| {
+            if k.key_id != log_id {
+                return false;
+            }
+            // Check key was valid at integrated_time (matches sigstore-browser checkpoint.ts)
+            if let Some(from) = k.valid_from {
+                if integrated_time < from {
+                    return false;
+                }
+            }
+            if let Some(until) = k.valid_until {
+                if integrated_time > until {
+                    return false;
+                }
+            }
+            true
+        })
         .ok_or_else(|| {
             Error::SigstoreVerification(format!(
-                "Unknown Rekor log ID: {}. Trusted log IDs: {:?}",
+                "No Rekor key valid at time {} for log ID: {}. Trusted log IDs: {:?}",
+                integrated_time,
                 log_id,
                 rekor_keys
                     .iter()
-                    .map(|(id, _, _)| id.as_str())
+                    .map(|k| k.key_id.as_str())
                     .collect::<Vec<_>>()
             ))
         })?;
+    let key_der = &rekor_key.key_der;
+    let key_type = &rekor_key.key_type;
 
     // Get checkpoint (signed tree head)
     let checkpoint = inclusion_proof
