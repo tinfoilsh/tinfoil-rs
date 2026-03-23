@@ -4,12 +4,12 @@
 //! certificate validation and SCT (Signed Certificate Timestamp) verification.
 
 use der::Decode;
-use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use x509_cert::Certificate;
 
+use super::{certificate, fulcio, transparency, trust};
 use crate::error::{Error, Result};
 use crate::verifier::util::decode_b64;
-use super::{certificate, fulcio, transparency, trust};
 
 /// Compute DSSE Pre-Authentication Encoding (PAE)
 ///
@@ -69,7 +69,8 @@ pub fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
     // Verify Signed Certificate Timestamps (SCTs) with full cryptographic verification
     verify_sct(&cert_der, &issuer_spki_der)?;
 
-    let pubkey_bytes = cert.tbs_certificate
+    let pubkey_bytes = cert
+        .tbs_certificate
         .subject_public_key_info
         .subject_public_key
         .raw_bytes();
@@ -79,18 +80,22 @@ pub fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
         .map_err(|e| Error::SigstoreVerification(format!("Invalid public key: {}", e)))?;
 
     // Get DSSE envelope
-    let dsse = bundle.get("dsseEnvelope")
+    let dsse = bundle
+        .get("dsseEnvelope")
         .ok_or_else(|| Error::SigstoreVerification("No dsseEnvelope in bundle".into()))?;
 
-    let payload_type = dsse.get("payloadType")
+    let payload_type = dsse
+        .get("payloadType")
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::SigstoreVerification("No payloadType".into()))?;
 
-    let payload_b64 = dsse.get("payload")
+    let payload_b64 = dsse
+        .get("payload")
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::SigstoreVerification("No payload".into()))?;
 
-    let signature_b64 = dsse.get("signatures")
+    let signature_b64 = dsse
+        .get("signatures")
         .and_then(|s| s.as_array())
         .and_then(|arr| arr.first())
         .and_then(|sig| sig.get("sig"))
@@ -119,8 +124,9 @@ pub fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
     };
 
     // Verify!
-    verifying_key.verify(&pae, &signature)
-        .map_err(|e| Error::SigstoreVerification(format!("DSSE signature verification failed: {}", e)))?;
+    verifying_key.verify(&pae, &signature).map_err(|e| {
+        Error::SigstoreVerification(format!("DSSE signature verification failed: {}", e))
+    })?;
 
     Ok(())
 }
@@ -128,25 +134,43 @@ pub fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
 /// Verify Signed Certificate Timestamps (SCTs) embedded in the certificate.
 ///
 /// Uses the sigstore-rs adapted transparency module for RFC 6962 compliant verification:
-/// 1. Parses SCTs from the certificate using x509-cert types
-/// 2. Reconstructs the PreCert (issuer key hash + TBS without SCT extension)
+/// 1. Parses ALL SCTs from the certificate using x509-cert types
+/// 2. For each SCT, reconstructs the PreCert (issuer key hash + TBS without SCT extension)
 /// 3. Builds the digitally-signed struct with proper TLS encoding
 /// 4. Verifies the ECDSA signature against the CT log's public key
-/// 5. Requires at least one valid SCT from a known Sigstore CT log
+/// 5. Checks that the CT log key was valid at the SCT's timestamp
+/// 6. Requires at least one valid SCT from a known Sigstore CT log
+///
+/// All SCTs are tried (not just the first), so that if one SCT is from a
+/// retired/expired CT log, a valid SCT from a current log can still succeed.
 fn verify_sct(cert_der: &[u8], issuer_spki_der: &[u8]) -> Result<()> {
-    let cert = Certificate::from_der(cert_der)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse certificate for SCT: {}", e)))?;
+    let cert = Certificate::from_der(cert_der).map_err(|e| {
+        Error::SigstoreVerification(format!("Failed to parse certificate for SCT: {}", e))
+    })?;
 
-    // Create SCT wrapper using the transparency module
-    let embedded_sct = transparency::CertificateEmbeddedSCT::new_with_spki(&cert, issuer_spki_der)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to extract SCT: {}", e)))?;
+    // Parse ALL SCTs from the certificate
+    let all_scts = transparency::CertificateEmbeddedSCT::all_from_cert(&cert, issuer_spki_der)
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to extract SCTs: {}", e)))?;
 
-    // Load CT log keyring
+    // Load CT log keyring (with validity periods)
     let ct_keyring = trust::load_ctlog_keyring()?;
 
-    // Verify SCT using the sigstore-rs adapted verification
-    transparency::verify_sct(&embedded_sct, &ct_keyring)
-        .map_err(|e| Error::SigstoreVerification(format!("SCT verification failed: {}", e)))
+    // Try each SCT - succeed if at least one verifies against a valid CT log key
+    let mut last_err = None;
+    for sct in &all_scts {
+        match transparency::verify_sct(sct, &ct_keyring) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    Err(Error::SigstoreVerification(format!(
+        "No valid SCT found ({} SCTs checked). Last error: {}",
+        all_scts.len(),
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "none".into())
+    )))
 }
 
 #[cfg(test)]

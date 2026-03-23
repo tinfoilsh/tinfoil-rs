@@ -6,9 +6,9 @@
 
 use serde::Deserialize;
 
+use super::keyring::Keyring;
 use crate::error::{Error, Result};
 use crate::verifier::util::decode_b64;
-use super::keyring::Keyring;
 
 /// Embedded Sigstore trusted root (Fulcio certs, Rekor keys, CTFE keys)
 /// This avoids TUF network calls and provides offline verification capability.
@@ -70,6 +70,8 @@ struct Tlog {
 struct PublicKeyInfo {
     raw_bytes: String,
     key_details: String,
+    #[serde(default)]
+    valid_for: Option<ValidityPeriod>,
 }
 
 #[derive(Deserialize)]
@@ -97,8 +99,9 @@ pub fn load_rekor_keys() -> Result<Vec<(String, Vec<u8>, String)>> {
 
     let mut keys = Vec::new();
     for tlog in root.tlogs {
-        let key_der = decode_b64(&tlog.public_key.raw_bytes)
-            .map_err(|e| Error::SigstoreVerification(format!("Failed to decode Rekor key: {}", e)))?;
+        let key_der = decode_b64(&tlog.public_key.raw_bytes).map_err(|e| {
+            Error::SigstoreVerification(format!("Failed to decode Rekor key: {}", e))
+        })?;
         keys.push((tlog.log_id.key_id, key_der, tlog.public_key.key_details));
     }
     Ok(keys)
@@ -106,25 +109,47 @@ pub fn load_rekor_keys() -> Result<Vec<(String, Vec<u8>, String)>> {
 
 /// Load Certificate Transparency log keyring from embedded trust root.
 ///
-/// This creates a Keyring containing all CT log public keys, which can be used
-/// for SCT verification using the sigstore-rs adapted transparency module.
+/// This creates a Keyring containing all CT log public keys with their validity
+/// periods, which can be used for SCT verification using the sigstore-rs adapted
+/// transparency module. Keys are only accepted if the SCT timestamp falls within
+/// the key's validity window.
 pub fn load_ctlog_keyring() -> Result<Keyring> {
     let root: TrustedRoot = serde_json::from_str(TRUSTED_ROOT_JSON)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to parse trusted root: {}", e)))?;
 
-    let mut key_ders: Vec<Vec<u8>> = Vec::new();
+    let mut keys_with_validity: Vec<(Vec<u8>, Option<u64>, Option<u64>)> = Vec::new();
     for ctlog in root.ctlogs {
         // Only include P-256 keys (the keyring only supports EC P-256)
         if ctlog.public_key.key_details != "PKIX_ECDSA_P256_SHA_256" {
             continue;
         }
-        let public_key_der = decode_b64(&ctlog.public_key.raw_bytes)
-            .map_err(|e| Error::SigstoreVerification(format!("Failed to decode CT log key: {}", e)))?;
-        key_ders.push(public_key_der);
+        let public_key_der = decode_b64(&ctlog.public_key.raw_bytes).map_err(|e| {
+            Error::SigstoreVerification(format!("Failed to decode CT log key: {}", e))
+        })?;
+
+        // Parse validity period from the trust root
+        let (valid_from, valid_until) = match &ctlog.public_key.valid_for {
+            Some(vf) => {
+                let from = parse_rfc3339_to_unix(&vf.start)?;
+                let until = vf
+                    .end
+                    .as_ref()
+                    .map(|e| parse_rfc3339_to_unix(e))
+                    .transpose()?;
+                (Some(from), until)
+            }
+            None => (None, None),
+        };
+
+        keys_with_validity.push((public_key_der, valid_from, valid_until));
     }
 
-    Keyring::new(key_ders.iter().map(|k| k.as_slice()))
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to create CT log keyring: {}", e)))
+    Keyring::new_with_validity(
+        keys_with_validity
+            .iter()
+            .map(|(der, from, until)| (der.as_slice(), *from, *until)),
+    )
+    .map_err(|e| Error::SigstoreVerification(format!("Failed to create CT log keyring: {}", e)))
 }
 
 /// Load Fulcio Certificate Authorities from embedded trust root.
@@ -136,13 +161,19 @@ pub fn load_fulcio_cas() -> Result<Vec<FulcioCa>> {
     for ca in root.certificate_authorities {
         let mut cert_chain_der = Vec::new();
         for cert in &ca.cert_chain.certificates {
-            let der = decode_b64(&cert.raw_bytes)
-                .map_err(|e| Error::SigstoreVerification(format!("Failed to decode Fulcio cert: {}", e)))?;
+            let der = decode_b64(&cert.raw_bytes).map_err(|e| {
+                Error::SigstoreVerification(format!("Failed to decode Fulcio cert: {}", e))
+            })?;
             cert_chain_der.push(der);
         }
 
         let valid_from = parse_rfc3339_to_unix(&ca.valid_for.start)?;
-        let valid_until = ca.valid_for.end.as_ref().map(|e| parse_rfc3339_to_unix(e)).transpose()?;
+        let valid_until = ca
+            .valid_for
+            .end
+            .as_ref()
+            .map(|e| parse_rfc3339_to_unix(e))
+            .transpose()?;
 
         cas.push(FulcioCa {
             cert_chain_der,
@@ -158,8 +189,9 @@ pub fn parse_rfc3339_to_unix(s: &str) -> Result<u64> {
     use time::format_description::well_known::Rfc3339;
     use time::OffsetDateTime;
 
-    let dt = OffsetDateTime::parse(s, &Rfc3339)
-        .map_err(|e| Error::SigstoreVerification(format!("Invalid RFC3339 timestamp '{}': {}", s, e)))?;
+    let dt = OffsetDateTime::parse(s, &Rfc3339).map_err(|e| {
+        Error::SigstoreVerification(format!("Invalid RFC3339 timestamp '{}': {}", s, e))
+    })?;
 
     Ok(dt.unix_timestamp() as u64)
 }

@@ -37,6 +37,8 @@ pub enum KeyringError {
     AlgoUnsupported,
     #[error("requested key not in keyring")]
     KeyNotFound,
+    #[error("key not valid at requested time")]
+    KeyNotValidAtTime,
     #[error("verification failed")]
     VerificationFailed,
 }
@@ -49,6 +51,10 @@ struct Key {
     /// The key's RFC 6962-style "key ID".
     /// <https://datatracker.ietf.org/doc/html/rfc6962#section-3.2>
     fingerprint: [u8; 32],
+    /// Validity period start (Unix timestamp in seconds). None = no lower bound.
+    valid_from: Option<u64>,
+    /// Validity period end (Unix timestamp in seconds). None = no upper bound.
+    valid_until: Option<u64>,
 }
 
 /// OID for EC public key (1.2.840.10045.2.1)
@@ -62,11 +68,15 @@ impl Key {
         let spki = SubjectPublicKeyInfoOwned::from_der(spki_bytes)?;
 
         // Check algorithm parameters
-        let params = spki.algorithm.parameters.as_ref()
+        let params = spki
+            .algorithm
+            .parameters
+            .as_ref()
             .ok_or(KeyringError::AlgoUnsupported)?;
 
         let algo_oid = spki.algorithm.oid.to_string();
-        let params_oid = params.decode_as::<der::asn1::ObjectIdentifier>()
+        let params_oid = params
+            .decode_as::<der::asn1::ObjectIdentifier>()
             .map_err(|_| KeyringError::AlgoUnsupported)?
             .to_string();
 
@@ -86,7 +96,19 @@ impl Key {
             hasher.finalize().into()
         };
 
-        Ok(Key { inner, fingerprint })
+        Ok(Key {
+            inner,
+            fingerprint,
+            valid_from: None,
+            valid_until: None,
+        })
+    }
+
+    /// Sets the validity period for this key.
+    fn with_validity(mut self, valid_from: Option<u64>, valid_until: Option<u64>) -> Self {
+        self.valid_from = valid_from;
+        self.valid_until = valid_until;
+        self
     }
 }
 
@@ -97,7 +119,7 @@ impl Key {
 pub struct Keyring(HashMap<[u8; 32], Key>);
 
 impl Keyring {
-    /// Creates a `Keyring` from DER encoded SPKI-format public keys.
+    /// Creates a `Keyring` from DER encoded SPKI-format public keys (no validity periods).
     pub fn new<'a>(keys: impl IntoIterator<Item = &'a [u8]>) -> Result<Self> {
         Ok(Self(
             keys.into_iter()
@@ -107,12 +129,61 @@ impl Keyring {
         ))
     }
 
+    /// Creates a `Keyring` from DER encoded SPKI-format public keys with validity periods.
+    ///
+    /// Each item is (key_der, valid_from, valid_until) where timestamps are Unix seconds.
+    pub fn new_with_validity<'a>(
+        keys: impl IntoIterator<Item = (&'a [u8], Option<u64>, Option<u64>)>,
+    ) -> Result<Self> {
+        Ok(Self(
+            keys.into_iter()
+                .flat_map(|(der, from, until)| {
+                    Key::new(der).ok().map(|k| k.with_validity(from, until))
+                })
+                .map(|k| Ok((k.fingerprint, k)))
+                .collect::<Result<_>>()?,
+        ))
+    }
+
     /// Verifies `data` against a `signature` with a public key identified by `key_id`.
     pub fn verify(&self, key_id: &[u8; 32], signature: &[u8], data: &[u8]) -> Result<()> {
         let key = self.0.get(key_id).ok_or(KeyringError::KeyNotFound)?;
 
-        let sig = Signature::from_der(signature)
+        let sig = Signature::from_der(signature).map_err(|_| KeyringError::VerificationFailed)?;
+
+        key.inner
+            .verify(data, &sig)
             .map_err(|_| KeyringError::VerificationFailed)?;
+
+        Ok(())
+    }
+
+    /// Verifies `data` against a `signature`, checking that the key was valid at `timestamp`.
+    ///
+    /// `timestamp` is a Unix timestamp in seconds. The key's validity period (from the
+    /// trust root) is checked before signature verification.
+    pub fn verify_at(
+        &self,
+        key_id: &[u8; 32],
+        signature: &[u8],
+        data: &[u8],
+        timestamp_secs: u64,
+    ) -> Result<()> {
+        let key = self.0.get(key_id).ok_or(KeyringError::KeyNotFound)?;
+
+        // Check key validity period
+        if let Some(from) = key.valid_from {
+            if timestamp_secs < from {
+                return Err(KeyringError::KeyNotValidAtTime);
+            }
+        }
+        if let Some(until) = key.valid_until {
+            if timestamp_secs > until {
+                return Err(KeyringError::KeyNotValidAtTime);
+            }
+        }
+
+        let sig = Signature::from_der(signature).map_err(|_| KeyringError::VerificationFailed)?;
 
         key.inner
             .verify(data, &sig)

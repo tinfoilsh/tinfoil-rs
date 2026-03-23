@@ -160,6 +160,33 @@ impl<'a> CertificateEmbeddedSCT<'a> {
             issuer_id,
         })
     }
+
+    /// Creates CertificateEmbeddedSCTs for ALL SCTs in the certificate.
+    ///
+    /// Returns an error only if no SCTs are found. Each SCT can then be
+    /// independently verified against the CT log keyring.
+    pub fn all_from_cert(cert: &'a Certificate, spki: &[u8]) -> Result<Vec<Self>, SCTError> {
+        let scts = parse_scts_from_cert(cert)?;
+
+        if scts.is_empty() {
+            return Err(CertificateErrorKind::LeafSCTMissing.into());
+        }
+
+        let issuer_id: [u8; 32] = {
+            let mut hasher = Sha256::new();
+            hasher.update(spki);
+            hasher.finalize().into()
+        };
+
+        Ok(scts
+            .into_iter()
+            .map(|sct| Self {
+                cert,
+                sct,
+                issuer_id,
+            })
+            .collect())
+    }
 }
 
 impl From<&CertificateEmbeddedSCT<'_>> for DigitallySigned {
@@ -201,6 +228,9 @@ impl From<&CertificateEmbeddedSCT<'_>> for DigitallySigned {
 /// in Sigstore verify and sign flows. Certificates that fail SCT verification are misissued and
 /// MUST NOT be trusted.
 ///
+/// The CT log key's validity period is checked against the SCT timestamp to ensure the
+/// key was valid when the SCT was issued (per sigstore-browser reference implementation).
+///
 /// [RFC 6962]: https://datatracker.ietf.org/doc/html/rfc6962
 pub fn verify_sct<S>(sct: S, keyring: &Keyring) -> Result<(), SCTError>
 where
@@ -209,7 +239,9 @@ where
     let sct: DigitallySigned = sct.into();
     let serialized = sct.tls_serialize().map_err(SCTError::Serialization)?;
 
-    keyring.verify(&sct.log_id, &sct.signature, &serialized)?;
+    // SCT timestamp is in milliseconds since epoch (RFC 6962), convert to seconds
+    let timestamp_secs = sct.timestamp / 1000;
+    keyring.verify_at(&sct.log_id, &sct.signature, &serialized, timestamp_secs)?;
 
     Ok(())
 }
@@ -276,8 +308,7 @@ W9PQ/5h7VROVIWPaxUo3LhrL2sZanw4bzTDBDY0dRR19ZFzjtAph1RzpQqppAjEA
 plAvxwkAIR2jurboJZ4Zm9rNAx8KvA+A5yQFzNkGgKDLjTJrKmSKoIcWV3j7WfdL
 -----END CERTIFICATE-----"#;
 
-        let chain_pem = [
-            r#"-----BEGIN CERTIFICATE-----
+        let chain_pem = [r#"-----BEGIN CERTIFICATE-----
 MIICGjCCAaGgAwIBAgIUALnViVfnU0brJasmRkHrn/UnfaQwCgYIKoZIzj0EAwMw
 KjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhzaWdzdG9yZTAeFw0y
 MjA0MTMyMDA2MTVaFw0zMTEwMDUxMzU2NThaMDcxFTATBgNVBAoTDHNpZ3N0b3Jl
@@ -290,8 +321,7 @@ KFWixi4YZD8wHwYDVR0jBBgwFoAUWMAeX5FFpWapesyQoZMi0CrFxfowCgYIKoZI
 zj0EAwMDZwAwZAIwPCsQK4DYiZYDPIaDi5HFKnfxXx6ASSVmERfsynYBiX2X6SJR
 nZU84/9DZdnFvvxmAjBOt6QpBlc4J/0DxvkTCqpclvziL6BCCPnjdlIB3Pu3BxsP
 mygUY7Ii2zbdCdliiow=
------END CERTIFICATE-----"#,
-        ];
+-----END CERTIFICATE-----"#];
 
         let ctfe_pem = r#"-----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEiPSlFi0CmFTfEjCUqF9HuCEcYXNK
