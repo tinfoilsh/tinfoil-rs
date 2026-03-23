@@ -36,6 +36,16 @@ pub fn verify_rekor_entry(
         ));
     }
 
+    // Limit entry count to prevent DoS from oversized bundles
+    const MAX_TLOG_ENTRIES: usize = 32;
+    if tlog_entries.len() > MAX_TLOG_ENTRIES {
+        return Err(Error::SigstoreVerification(format!(
+            "Too many tlog entries: {} (max {})",
+            tlog_entries.len(),
+            MAX_TLOG_ENTRIES
+        )));
+    }
+
     let entry = &tlog_entries[0];
 
     // Verify integrated time is within cert validity.
