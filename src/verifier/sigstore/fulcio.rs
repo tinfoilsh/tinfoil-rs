@@ -4,11 +4,15 @@
 //! Fulcio Certificate Authority from the Sigstore public-good instance.
 
 use der::{Decode, Encode};
-use p384::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use x509_cert::Certificate;
 
-use crate::error::{Error, Result};
 use super::trust;
+use crate::error::{Error, Result};
+
+/// OID for P-256 curve (secp256r1): 1.2.840.10045.3.1.7
+const OID_SECP256R1: &str = "1.2.840.10045.3.1.7";
+/// OID for P-384 curve (secp384r1): 1.3.132.0.34
+const OID_SECP384R1: &str = "1.3.132.0.34";
 
 /// Find the issuer certificate's SPKI for a given certificate.
 ///
@@ -31,15 +35,18 @@ pub fn find_issuer_spki(cert: &Certificate) -> Result<Vec<u8>> {
         // Check if issuer DN matches
         if cert.tbs_certificate.issuer == issuer_cert.tbs_certificate.subject {
             // Return the issuer's SPKI in DER format
-            return issuer_cert.tbs_certificate
+            return issuer_cert
+                .tbs_certificate
                 .subject_public_key_info
                 .to_der()
-                .map_err(|e| Error::SigstoreVerification(format!("Failed to encode issuer SPKI: {}", e)));
+                .map_err(|e| {
+                    Error::SigstoreVerification(format!("Failed to encode issuer SPKI: {}", e))
+                });
         }
     }
 
     Err(Error::SigstoreVerification(
-        "Could not find issuer certificate for SCT verification".into()
+        "Could not find issuer certificate for SCT verification".into(),
     ))
 }
 
@@ -50,8 +57,9 @@ pub fn find_issuer_spki(cert: &Certificate) -> Result<Vec<u8>> {
 /// 2. The certificate's signature was created by the Fulcio CA
 /// 3. The CA was valid at the time the certificate was issued
 pub fn verify_fulcio_chain(cert_der: &[u8], cert_not_before: u64) -> Result<()> {
-    let signing_cert = Certificate::from_der(cert_der)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse signing certificate: {}", e)))?;
+    let signing_cert = Certificate::from_der(cert_der).map_err(|e| {
+        Error::SigstoreVerification(format!("Failed to parse signing certificate: {}", e))
+    })?;
 
     let fulcio_cas = trust::load_fulcio_cas()?;
 
@@ -72,45 +80,74 @@ pub fn verify_fulcio_chain(cert_der: &[u8], cert_not_before: u64) -> Result<()> 
             continue;
         }
 
-        let issuer_cert = Certificate::from_der(&ca.cert_chain_der[0])
-            .map_err(|e| Error::SigstoreVerification(format!("Failed to parse Fulcio CA cert: {}", e)))?;
+        let issuer_cert = Certificate::from_der(&ca.cert_chain_der[0]).map_err(|e| {
+            Error::SigstoreVerification(format!("Failed to parse Fulcio CA cert: {}", e))
+        })?;
 
         // Verify issuer DN matches
         if signing_cert.tbs_certificate.issuer != issuer_cert.tbs_certificate.subject {
             continue;
         }
 
-        // Extract the issuer's public key and verify the signature
-        let issuer_pubkey_bytes = issuer_cert.tbs_certificate
-            .subject_public_key_info
-            .subject_public_key
-            .raw_bytes();
-
-        // Fulcio uses P-384 for the intermediate CA
-        let verifying_key = match VerifyingKey::from_sec1_bytes(issuer_pubkey_bytes) {
-            Ok(k) => k,
-            Err(_) => continue, // Try next CA if key doesn't parse
-        };
-
         // Get the TBS (to-be-signed) certificate bytes and signature
-        let tbs_bytes = signing_cert.tbs_certificate.to_der()
+        let tbs_bytes = signing_cert
+            .tbs_certificate
+            .to_der()
             .map_err(|e| Error::SigstoreVerification(format!("Failed to encode TBS: {}", e)))?;
-
         let sig_bytes = signing_cert.signature.raw_bytes();
-        let signature = match Signature::from_der(sig_bytes) {
-            Ok(s) => s,
-            Err(_) => continue, // Try next CA
+
+        // Determine the issuer's key curve from SPKI algorithm parameters
+        let issuer_spki = &issuer_cert.tbs_certificate.subject_public_key_info;
+        let issuer_pubkey_bytes = issuer_spki.subject_public_key.raw_bytes();
+
+        let curve_oid = issuer_spki
+            .algorithm
+            .parameters
+            .as_ref()
+            .and_then(|p| p.decode_as::<der::asn1::ObjectIdentifier>().ok())
+            .map(|oid| oid.to_string());
+
+        // Dispatch to the correct verifier based on curve
+        let verified = match curve_oid.as_deref() {
+            Some(OID_SECP256R1) => verify_ecdsa_p256(&tbs_bytes, sig_bytes, issuer_pubkey_bytes),
+            Some(OID_SECP384R1) => verify_ecdsa_p384(&tbs_bytes, sig_bytes, issuer_pubkey_bytes),
+            _ => continue, // Unsupported curve, try next CA
         };
 
-        // Verify the signature
-        if verifying_key.verify(&tbs_bytes, &signature).is_ok() {
+        if verified {
             return Ok(());
         }
     }
 
     Err(Error::SigstoreVerification(
-        "Certificate not issued by any trusted Fulcio CA".into()
+        "Certificate not issued by any trusted Fulcio CA".into(),
     ))
+}
+
+/// Verify ECDSA P-256 signature over TBS certificate bytes.
+fn verify_ecdsa_p256(tbs_bytes: &[u8], sig_bytes: &[u8], pubkey_bytes: &[u8]) -> bool {
+    use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+    let Some(key) = VerifyingKey::from_sec1_bytes(pubkey_bytes).ok() else {
+        return false;
+    };
+    let Some(sig) = Signature::from_der(sig_bytes).ok() else {
+        return false;
+    };
+    key.verify(tbs_bytes, &sig).is_ok()
+}
+
+/// Verify ECDSA P-384 signature over TBS certificate bytes.
+fn verify_ecdsa_p384(tbs_bytes: &[u8], sig_bytes: &[u8], pubkey_bytes: &[u8]) -> bool {
+    use p384::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+    let Some(key) = VerifyingKey::from_sec1_bytes(pubkey_bytes).ok() else {
+        return false;
+    };
+    let Some(sig) = Signature::from_der(sig_bytes).ok() else {
+        return false;
+    };
+    key.verify(tbs_bytes, &sig).is_ok()
 }
 
 #[cfg(test)]
@@ -168,11 +205,15 @@ jaDTSFaq1NIwodHp7X9fOG48uRuJWS8GmifD969sC4Ut2FJFoklceBVUNCHR
 
         let result = find_issuer_spki(&cert);
 
-        assert!(result.is_err(), "Non-Fulcio certificate should not find issuer");
+        assert!(
+            result.is_err(),
+            "Non-Fulcio certificate should not find issuer"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Could not find issuer certificate"),
-            "Error should mention missing issuer, got: {}", err_msg
+            "Error should mention missing issuer, got: {}",
+            err_msg
         );
     }
 
@@ -185,11 +226,15 @@ jaDTSFaq1NIwodHp7X9fOG48uRuJWS8GmifD969sC4Ut2FJFoklceBVUNCHR
 
         let result = verify_fulcio_chain(&cert_der, cert_not_before);
 
-        assert!(result.is_err(), "Non-Fulcio certificate should fail verification");
+        assert!(
+            result.is_err(),
+            "Non-Fulcio certificate should fail verification"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("not issued by any trusted Fulcio CA"),
-            "Error should mention untrusted CA, got: {}", err_msg
+            "Error should mention untrusted CA, got: {}",
+            err_msg
         );
     }
 }
