@@ -41,6 +41,19 @@ pub struct AttestationDocument {
     pub body: String, // Base64-encoded, gzipped attestation
 }
 
+impl AttestationDocument {
+    /// Compute SHA-256 hash of the attestation document.
+    ///
+    /// Matches the Go and JS implementations: `sha256(format + body)` where
+    /// `format` is the predicate type URL and `body` is the base64-encoded payload.
+    pub fn hash(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let data = format!("{}{}", self.format.as_url(), self.body);
+        let hash = Sha256::digest(data.as_bytes());
+        hex::encode(hash)
+    }
+}
+
 /// Measurement registers from the enclave
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Measurement {

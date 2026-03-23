@@ -5,7 +5,7 @@
 
 use crate::api::{ChatMessage, ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse, Tool};
 use crate::error::{Error, Result};
-use crate::verifier::attestation::{self, types::{GroundTruth, Measurement}};
+use crate::verifier::attestation::{self, types::{AttestationDocument, GroundTruth, Measurement}};
 use crate::verifier::sigstore;
 use crate::verifier::tls;
 
@@ -159,7 +159,11 @@ impl SecureClient {
             })?;
         
         // 4. Verify TLS certificate matches attestation (one-time check)
-        self.verify_tls_binding(&verification.tls_public_key_fp).await?;
+        self.verify_tls_binding(
+            &verification.tls_public_key_fp,
+            verification.hpke_public_key.as_deref(),
+            &doc,
+        ).await?;
         
         // 5. Create pinned HTTP client for all future requests
         let pinned = tls::create_pinned_client(&verification.tls_public_key_fp)?;
@@ -183,12 +187,27 @@ impl SecureClient {
         Ok(self.ground_truth.as_ref().unwrap())
     }
     
-    /// Verify TLS certificate matches the attested public key (initial check)
-    async fn verify_tls_binding(&self, expected_fingerprint: &str) -> Result<()> {
+    /// Verify TLS certificate matches the attested public key and SAN bindings.
+    ///
+    /// This performs three checks on the server's TLS certificate:
+    /// 1. SPKI fingerprint matches the attested value (from report_data)
+    /// 2. HPKE public key in SANs matches the attested value (dcode `.hpke.` entries)
+    /// 3. Attestation document hash in SANs matches the actual document (dcode `.hatt.` entries)
+    ///
+    /// Checks 2 and 3 match the JS and Go (VerifyFromBundle) reference implementations.
+    async fn verify_tls_binding(
+        &self,
+        expected_fingerprint: &str,
+        expected_hpke_key: Option<&str>,
+        attestation_doc: &AttestationDocument,
+    ) -> Result<()> {
         use tokio::net::TcpStream;
         use tokio_rustls::TlsConnector;
         use rustls::pki_types::ServerName;
         use std::sync::Arc;
+        use der::Decode;
+        use x509_cert::Certificate;
+        use x509_cert::ext::pkix::SubjectAltName;
         
         // Connect to the server
         let addr = format!("{}:443", self.host);
@@ -222,12 +241,66 @@ impl SecureClient {
             return Err(Error::Tls("Empty certificate chain".into()));
         }
         
-        // Compute fingerprint of the server's certificate public key
+        // Check 1: SPKI fingerprint matches attested value
         let actual_fingerprint = tls::cert_pubkey_fingerprint(&certs[0])?;
-        
-        // Compare with expected
         if actual_fingerprint != expected_fingerprint {
             return Err(Error::CertificateMismatch);
+        }
+
+        // Parse the certificate for SAN inspection
+        let cert = Certificate::from_der(certs[0].as_ref())
+            .map_err(|e| Error::Tls(format!("Failed to parse certificate for SAN check: {}", e)))?;
+
+        // Extract DNS SANs from the certificate
+        let dns_sans: Vec<String> = match cert.tbs_certificate.get::<SubjectAltName>() {
+            Ok(Some((_, san))) => {
+                san.0.iter().filter_map(|name| {
+                    if let x509_cert::ext::pkix::name::GeneralName::DnsName(dns) = name {
+                        Some(dns.to_string())
+                    } else {
+                        None
+                    }
+                }).collect()
+            }
+            _ => Vec::new(),
+        };
+
+        let san_refs: Vec<&str> = dns_sans.iter().map(|s| s.as_str()).collect();
+
+        // Check 2: HPKE public key in SANs matches attested value
+        // Go hard-errors if .hpke. SANs are missing — we do the same.
+        if let Some(expected_hpke) = expected_hpke_key {
+            // Only verify if the HPKE key is non-zero (some attestations may not include it)
+            let is_all_zeros = expected_hpke.chars().all(|c| c == '0');
+            if !is_all_zeros {
+                let hpke_bytes = crate::verifier::dcode::decode_from_sans(&san_refs, "hpke")
+                    .ok_or_else(|| Error::Tls(
+                        "Certificate SANs do not contain HPKE key (.hpke. entries)".into()
+                    ))?;
+                let actual_hpke = hex::encode(&hpke_bytes);
+                if actual_hpke != expected_hpke {
+                    return Err(Error::Tls(format!(
+                        "HPKE key mismatch: certificate SAN has {}, attestation has {}",
+                        actual_hpke, expected_hpke
+                    )));
+                }
+            }
+        }
+
+        // Check 3: Attestation document hash in SANs matches actual document
+        // Go hard-errors if .hatt. SANs are missing — we do the same.
+        let hash_bytes = crate::verifier::dcode::decode_from_sans(&san_refs, "hatt")
+            .ok_or_else(|| Error::Tls(
+                "Certificate SANs do not contain attestation hash (.hatt. entries)".into()
+            ))?;
+        let actual_hash = String::from_utf8(hash_bytes)
+            .map_err(|_| Error::Tls("Invalid UTF-8 in attestation hash SAN".into()))?;
+        let expected_hash = attestation_doc.hash();
+        if actual_hash != expected_hash {
+            return Err(Error::Tls(format!(
+                "Attestation hash mismatch: certificate SAN has {}, computed {}",
+                actual_hash, expected_hash
+            )));
         }
         
         Ok(())

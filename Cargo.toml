@@ -49,6 +49,9 @@ flate2 = "1"
 # Base64 decoding
 base64 = "0.22"
 
+# Base32 decoding (for dcode SAN encoding)
+data-encoding = "2"
+
 # Error handling
 thiserror = "1"
 
