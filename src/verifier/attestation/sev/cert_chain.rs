@@ -26,8 +26,8 @@ pub(super) async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
 
     // AMD KDS URL format (via Tinfoil proxy)
     let url = format!(
-        "https://kds-proxy.tinfoil.sh/vcek/v1/Genoa/{}?blSPL={}&teeSPL={}&snpSPL={}&ucodeSPL={}",
-        chip_id_hex, bl_spl, tee_spl, snp_spl, ucode_spl
+        "{}/vcek/v1/Genoa/{}?blSPL={}&teeSPL={}&snpSPL={}&ucodeSPL={}",
+        crate::constants::KDS_PROXY, chip_id_hex, bl_spl, tee_spl, snp_spl, ucode_spl
     );
 
     let response = fetch_with_retry(&url)

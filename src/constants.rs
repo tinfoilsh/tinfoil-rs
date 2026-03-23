@@ -23,3 +23,6 @@ pub const DEFAULT_CHAT_MODEL: &str = "gpt-oss-120b";
 
 /// Default embedding model
 pub const DEFAULT_EMBED_MODEL: &str = "nomic-embed-text";
+
+/// AMD KDS proxy for VCEK certificate fetching
+pub const KDS_PROXY: &str = "https://kds-proxy.tinfoil.sh";
