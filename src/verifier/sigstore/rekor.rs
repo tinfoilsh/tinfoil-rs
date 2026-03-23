@@ -38,13 +38,17 @@ pub fn verify_rekor_entry(
 
     let entry = &tlog_entries[0];
 
-    // Verify integrated time is within cert validity
+    // Verify integrated time is within cert validity.
+    // Handle both JSON string (protobuf JSON int64 encoding) and JSON number formats.
     let integrated_time = entry
         .get("integratedTime")
-        .and_then(|t| t.as_str())
-        .and_then(|s| s.parse::<u64>().ok())
+        .and_then(|t| {
+            t.as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .or_else(|| t.as_u64())
+        })
         .ok_or_else(|| {
-            Error::SigstoreVerification("Missing integratedTime in tlog entry".into())
+            Error::SigstoreVerification("Missing or invalid integratedTime in tlog entry".into())
         })?;
 
     if integrated_time < cert_not_before || integrated_time > cert_not_after {

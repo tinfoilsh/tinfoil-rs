@@ -223,7 +223,14 @@ pub fn parse_rfc3339_to_unix(s: &str) -> Result<u64> {
         Error::SigstoreVerification(format!("Invalid RFC3339 timestamp '{}': {}", s, e))
     })?;
 
-    Ok(dt.unix_timestamp() as u64)
+    let ts = dt.unix_timestamp();
+    if ts < 0 {
+        return Err(Error::SigstoreVerification(format!(
+            "Timestamp before Unix epoch: '{}'",
+            s
+        )));
+    }
+    Ok(ts as u64)
 }
 
 #[cfg(test)]
