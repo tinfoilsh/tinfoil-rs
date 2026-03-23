@@ -42,7 +42,17 @@ pub async fn fetch_digest(repo: &str, tag: &str) -> Result<String> {
     }
 
     let digest = response.text().await?;
-    Ok(digest.trim().to_string())
+    let digest = digest.trim().to_string();
+
+    // Validate digest is a hex-encoded SHA-256 hash (64 lowercase hex chars)
+    if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(Error::GitHub(format!(
+            "Invalid digest format for {}@{}: expected 64 hex chars, got '{}'",
+            repo, tag, digest
+        )));
+    }
+
+    Ok(digest)
 }
 
 /// Fetch the latest release digest for a repository.
