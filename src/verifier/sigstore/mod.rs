@@ -214,7 +214,7 @@ fn extract_measurement_from_bundle(bundle: &serde_json::Value, expected_digest: 
     let payload_digest = subject.digest.get("sha256")
         .ok_or_else(|| Error::SigstoreVerification("No sha256 digest in subject".into()))?;
 
-    if payload_digest != expected_digest {
+    if payload_digest.to_lowercase() != expected_digest.to_lowercase() {
         return Err(Error::SigstoreVerification(format!(
             "Provided digest does not match verified DSSE payload digest. Expected: {}, Got: {}",
             expected_digest, payload_digest

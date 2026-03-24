@@ -131,9 +131,9 @@ pub fn extract_certificate_info(cert: &Certificate) -> Result<CertificateInfo> {
             let oid_str = ext.extn_id.to_string();
             let raw_bytes = ext.extn_value.as_bytes();
 
-            // Decode as ASN.1 string, fall back to raw UTF-8 if that fails
-            let value = decode_asn1_string(raw_bytes)
-                .unwrap_or_else(|| String::from_utf8_lossy(raw_bytes).to_string());
+            let Some(value) = decode_asn1_string(raw_bytes) else {
+                continue;
+            };
 
             match oid_str.as_str() {
                 fulcio_oids::OIDC_ISSUER_V2 => {
