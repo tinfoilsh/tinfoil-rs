@@ -116,6 +116,14 @@ pub(super) fn validate_mbz_fields(report: &[u8]) -> Result<()> {
     // Reserved before signature: 0x1F8-0x2A0 (168 bytes)
     validate_mbz_bytes(report, 0x1F8, 0x2A0, "reserved_before_signature")?;
 
+    // Signature padding: after R||S (each 72 bytes) to end of signature field
+    validate_mbz_bytes(
+        report,
+        SIGNATURE_OFFSET + ECDSA_P384_SIGNATURE_SIZE,
+        REPORT_SIZE,
+        "signature_padding",
+    )?;
+
     // Validate TCB fields have reserved bits 47-16 as zero
     let current_tcb = u64::from_le_bytes(
         report[CURRENT_TCB_OFFSET..CURRENT_TCB_OFFSET + 8]
