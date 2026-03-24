@@ -239,18 +239,27 @@ impl SecureClient {
             return Err(Error::Tls("Empty certificate chain".into()));
         }
         
+        // Check 0: TLS public key must be ECDSA
+        let peer_cert = Certificate::from_der(certs[0].as_ref())
+            .map_err(|e| Error::Tls(format!("Failed to parse peer certificate: {}", e)))?;
+        let peer_key_algo = &peer_cert.tbs_certificate.subject_public_key_info.algorithm.oid;
+        const OID_EC_PUBLIC_KEY: const_oid::ObjectIdentifier =
+            const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+        if *peer_key_algo != OID_EC_PUBLIC_KEY {
+            return Err(Error::Tls(format!(
+                "TLS peer certificate key is not ECDSA (algorithm OID: {})",
+                peer_key_algo
+            )));
+        }
+
         // Check 1: SPKI fingerprint matches attested value
         let actual_fingerprint = tls::cert_pubkey_fingerprint(&certs[0])?;
         if actual_fingerprint != expected_fingerprint {
             return Err(Error::CertificateMismatch);
         }
 
-        // Parse the certificate for SAN inspection
-        let cert = Certificate::from_der(certs[0].as_ref())
-            .map_err(|e| Error::Tls(format!("Failed to parse certificate for SAN check: {}", e)))?;
-
-        // Extract DNS SANs from the certificate
-        let dns_sans: Vec<String> = match cert.tbs_certificate.get::<SubjectAltName>() {
+        // Extract DNS SANs from the certificate (already parsed as peer_cert above)
+        let dns_sans: Vec<String> = match peer_cert.tbs_certificate.get::<SubjectAltName>() {
             Ok(Some((_, san))) => {
                 san.0.iter().filter_map(|name| {
                     if let x509_cert::ext::pkix::name::GeneralName::DnsName(dns) = name {
