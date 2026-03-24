@@ -512,7 +512,11 @@ fn verify_payload_hash_binding(
 
     let payload_hash_obj = match body.get("spec").and_then(|s| s.get("payloadHash")) {
         Some(h) => h,
-        None => return Ok(()), // payloadHash not present in all entry versions
+        None => {
+            return Err(Error::SigstoreVerification(
+                "DSSE Rekor entry missing required payloadHash field".into(),
+            ));
+        }
     };
 
     let expected_hash = match payload_hash_obj.get("value").and_then(|v| v.as_str()) {
