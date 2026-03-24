@@ -193,7 +193,13 @@ pub fn verify_rekor_entry(
         .and_then(|h| h.as_array())
         .ok_or_else(|| Error::SigstoreVerification("Missing hashes in inclusion proof".into()))?
         .iter()
-        .filter_map(|h| h.as_str())
+        .map(|h| {
+            h.as_str().ok_or_else(|| {
+                Error::SigstoreVerification("Non-string element in inclusion proof hashes".into())
+            })
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
         .map(decode_b64)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| Error::SigstoreVerification(format!("Failed to decode proof hash: {}", e)))?;
@@ -460,7 +466,11 @@ fn verify_signature_binding(bundle: &serde_json::Value, canonicalized_body: &[u8
 fn verify_kind_version(entry: &serde_json::Value, canonicalized_body: &[u8]) -> Result<()> {
     let kind_version = match entry.get("kindVersion") {
         Some(kv) => kv,
-        None => return Ok(()), // kindVersion is optional in older bundle formats
+        None => {
+            return Err(Error::SigstoreVerification(
+                "Missing kindVersion in tlog entry metadata".into(),
+            ));
+        }
     };
 
     let expected_kind = kind_version.get("kind").and_then(|k| k.as_str());
@@ -507,7 +517,11 @@ fn verify_payload_hash_binding(
 
     let expected_hash = match payload_hash_obj.get("value").and_then(|v| v.as_str()) {
         Some(h) => h,
-        None => return Ok(()),
+        None => {
+            return Err(Error::SigstoreVerification(
+                "Malformed payloadHash: object present but missing 'value' field".into(),
+            ));
+        }
     };
 
     let algorithm = payload_hash_obj
