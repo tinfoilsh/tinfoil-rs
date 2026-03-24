@@ -23,6 +23,28 @@ async fn test_wrong_fingerprint_rejected() {
     );
 }
 
+/// Test that TLS pinning rejects a second wrong fingerprint too (not just the first).
+/// Ensures the verifier runs on every connection, not just once.
+#[tokio::test]
+async fn test_wrong_fingerprint_rejected_repeatedly() {
+    let wrong_fp = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let client = create_pinned_client(wrong_fp).expect("Failed to create client");
+
+    // First attempt
+    let result1 = client
+        .get("https://inference.tinfoil.sh/.well-known/tinfoil-attestation")
+        .send()
+        .await;
+    assert!(result1.is_err(), "First request should fail");
+
+    // Second attempt — must also fail (verifier isn't bypassed after first failure)
+    let result2 = client
+        .get("https://inference.tinfoil.sh/.well-known/tinfoil-attestation")
+        .send()
+        .await;
+    assert!(result2.is_err(), "Second request should also fail");
+}
+
 /// Test that TLS pinning accepts connections with correct fingerprint
 #[tokio::test]
 async fn test_correct_fingerprint_accepted() {

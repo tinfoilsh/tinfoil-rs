@@ -58,9 +58,11 @@ async fn test_github_release() {
     assert_eq!(digest.len(), 64, "Digest should be 64 hex chars");
 }
 
-/// Test full end-to-end verification (hardware + sigstore + comparison)
+/// Test full end-to-end verification (hardware + sigstore + measurement comparison).
+/// This must FAIL if measurements don't match — swallowing mismatches would hide
+/// a broken verification pipeline.
 #[tokio::test]
-async fn test_full_verification() {
+async fn test_full_verification_measurements_match() {
     // Step 1: Hardware attestation
     let doc = attestation::fetch(ROUTER_HOST)
         .await
@@ -75,20 +77,13 @@ async fn test_full_verification() {
         .await
         .expect("Sigstore verification failed");
 
-    // Step 3: Compare measurements
-    let result = enclave.measurement.equals(&code_measurement);
-
-    // Note: Measurements may not match if there's been a recent deployment
-    // This is expected behavior - the test verifies both systems work
-    if result.is_err() {
-        eprintln!(
-            "Warning: Measurements don't match (may be due to recent deployment)\n\
-             Enclave: {}...\n\
-             Source:  {}...",
-            &enclave.measurement.registers[0][..48.min(enclave.measurement.registers[0].len())],
-            &code_measurement.registers[0][..48.min(code_measurement.registers[0].len())]
-        );
-    }
+    // Step 3: Compare measurements — this MUST succeed
+    enclave.measurement.equals(&code_measurement).expect(
+        &format!(
+            "Measurement mismatch!\n  Enclave: {:?}\n  Code:    {:?}",
+            enclave.measurement.registers, code_measurement.registers
+        ),
+    );
 }
 
 /// Test verification against multiple enclaves
