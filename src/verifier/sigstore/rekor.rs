@@ -546,32 +546,8 @@ fn verify_payload_hash_binding(
 }
 
 /// Parse a PEM-encoded certificate and return the DER bytes.
-fn parse_pem_certificate(pem: &str) -> Result<Vec<u8>> {
-    // Find the certificate content between BEGIN and END markers
-    let begin_marker = "-----BEGIN CERTIFICATE-----";
-    let end_marker = "-----END CERTIFICATE-----";
-
-    let start = pem.find(begin_marker).ok_or_else(|| {
-        Error::SigstoreVerification("Invalid PEM: missing BEGIN CERTIFICATE".into())
-    })?;
-    let end = pem.find(end_marker).ok_or_else(|| {
-        Error::SigstoreVerification("Invalid PEM: missing END CERTIFICATE".into())
-    })?;
-
-    if start >= end {
-        return Err(Error::SigstoreVerification(
-            "Invalid PEM: markers in wrong order".into(),
-        ));
-    }
-
-    // Extract the base64 content (skip the BEGIN marker)
-    let b64_content: String = pem[start + begin_marker.len()..end]
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-
-    // Decode the base64 to get DER bytes
-    decode_b64(&b64_content).map_err(|e| {
-        Error::SigstoreVerification(format!("Failed to decode PEM certificate: {}", e))
-    })
+fn parse_pem_certificate(pem_str: &str) -> Result<Vec<u8>> {
+    let parsed = pem::parse(pem_str)
+        .map_err(|e| Error::SigstoreVerification(format!("Invalid PEM certificate: {}", e)))?;
+    Ok(parsed.into_contents())
 }

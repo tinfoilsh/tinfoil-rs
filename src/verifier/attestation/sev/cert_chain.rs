@@ -128,29 +128,17 @@ fn oid_matches(oid: &der::oid::ObjectIdentifier, expected: &[u64]) -> bool {
 
 /// Decode a DER-encoded INTEGER to u8.
 fn decode_der_integer(data: &[u8]) -> Result<u8> {
-    if data.len() < 2 || data[0] != 0x02 {
-        return Err(Error::AttestationVerification(
-            "Invalid DER INTEGER tag".into()
-        ));
-    }
-    let len = data[1] as usize;
-    if data.len() < 2 + len {
-        return Err(Error::AttestationVerification(
-            "Invalid DER INTEGER length".into()
-        ));
-    }
-    let value_bytes = &data[2..2 + len];
-    if value_bytes.is_empty() {
-        return Ok(0);
-    }
-    // DER integers may have a leading 0x00 byte to indicate positive sign
-    // For u8, we allow: [0x00, val] or [val] where val <= 255
-    match value_bytes.len() {
-        1 => Ok(value_bytes[0]),
-        2 if value_bytes[0] == 0x00 => Ok(value_bytes[1]),
+    use der::Decode;
+    let uint = der::asn1::UintRef::from_der(data).map_err(|e| {
+        Error::AttestationVerification(format!("Invalid DER INTEGER: {}", e))
+    })?;
+    let bytes = uint.as_bytes();
+    match bytes.len() {
+        0 => Ok(0),
+        1 => Ok(bytes[0]),
         _ => Err(Error::AttestationVerification(format!(
             "DER INTEGER value {} does not fit in u8",
-            hex::encode(value_bytes)
+            hex::encode(bytes)
         ))),
     }
 }

@@ -101,43 +101,23 @@ pub fn validate_certificate_extensions(cert: &Certificate) -> Result<()> {
 }
 
 /// Decode an ASN.1 string from extension value bytes.
-/// Fulcio uses UTF8String (tag 0x0C) for these extensions.
+/// Fulcio uses UTF8String (tag 0x0C) for these extensions, but IA5String
+/// and PrintableString are also accepted.
 fn decode_asn1_string(bytes: &[u8]) -> Option<String> {
-    if bytes.len() < 2 {
-        return None;
+    use der::Decode;
+    // Try UTF8String first (most common for Fulcio V2 extensions)
+    if let Ok(s) = der::asn1::Utf8StringRef::from_der(bytes) {
+        return Some(s.to_string());
     }
-
-    // Check for UTF8String (0x0C) or IA5String (0x16) or PrintableString (0x13)
-    let tag = bytes[0];
-    if tag != 0x0C && tag != 0x16 && tag != 0x13 {
-        return None;
+    // IA5String (used by some V1 extensions)
+    if let Ok(s) = der::asn1::Ia5StringRef::from_der(bytes) {
+        return Some(s.to_string());
     }
-
-    // Parse length - handle both short and long form
-    let length_byte = bytes[1];
-    let (len, header_len) = if length_byte & 0x80 == 0 {
-        // Short form: length < 128, single byte
-        (length_byte as usize, 2)
-    } else {
-        // Long form: first byte indicates number of length bytes
-        let num_length_bytes = (length_byte & 0x7F) as usize;
-        if num_length_bytes == 0 || num_length_bytes > 4 || bytes.len() < 2 + num_length_bytes {
-            return None;
-        }
-
-        let mut len: usize = 0;
-        for i in 0..num_length_bytes {
-            len = (len << 8) | (bytes[2 + i] as usize);
-        }
-        (len, 2 + num_length_bytes)
-    };
-
-    let total_len = header_len.checked_add(len)?;
-    if bytes.len() < total_len {
-        return None;
+    // PrintableString (fallback)
+    if let Ok(s) = der::asn1::PrintableStringRef::from_der(bytes) {
+        return Some(s.to_string());
     }
-
-    String::from_utf8(bytes[header_len..total_len].to_vec()).ok()
+    None
 }
 
 /// Extract certificate info (OIDC issuer, workflow, repository) from a Fulcio certificate.
