@@ -4,7 +4,8 @@
 //! Rekor, Sigstore's transparency log, providing an immutable audit trail.
 
 use digest::Output;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 use super::checkpoint::SignedCheckpoint;
 use super::merkle::rfc6962::Rfc6269HasherTrait;
@@ -16,12 +17,14 @@ use crate::verifier::util::decode_b64;
 /// Verify Rekor transparency log entry with full cryptographic verification.
 ///
 /// This verifies:
-/// 1. The tlog entry exists in the bundle
+/// 1. The tlog entry exists in the bundle (no duplicates)
 /// 2. The integrated time is within the certificate's validity window
 /// 3. The checkpoint signature is valid (signed by Rekor's key)
 /// 4. The inclusion proof is valid (Merkle path from leaf to root)
-/// 5. The certificate in the bundle matches the one in the Rekor entry
-/// 6. The signature in the bundle matches the one in the Rekor entry
+/// 5. The entry body kind/version matches the metadata
+/// 6. The certificate in the bundle matches the one in the Rekor entry
+/// 7. The signature in the bundle matches the one in the Rekor entry
+/// 8. The payload hash in the Rekor entry matches the DSSE payload
 pub fn verify_rekor_entry(
     bundle: &serde_json::Value,
     cert_not_before: u64,
@@ -48,6 +51,23 @@ pub fn verify_rekor_entry(
             tlog_entries.len(),
             MAX_TLOG_ENTRIES
         )));
+    }
+
+    // Reject duplicate tlog entries (same logId + logIndex).
+    // Prevents artificial threshold satisfaction if multiple entries are ever required.
+    let mut seen_entries = HashSet::new();
+    for entry in tlog_entries {
+        let eid_log = entry
+            .get("logId")
+            .and_then(|l| l.get("keyId"))
+            .and_then(|k| k.as_str())
+            .unwrap_or("");
+        let eid_index = entry.get("logIndex").and_then(|i| i.as_str()).unwrap_or("");
+        if !seen_entries.insert((eid_log, eid_index)) {
+            return Err(Error::SigstoreVerification(
+                "Duplicate tlog entry detected (same logId + logIndex)".into(),
+            ));
+        }
     }
 
     let entry = &tlog_entries[0];
@@ -190,11 +210,19 @@ pub fn verify_rekor_entry(
         Error::SigstoreVerification(format!("Failed to decode canonicalizedBody: {}", e))
     })?;
 
+    // Verify the canonicalizedBody kind/version matches the entry's kindVersion metadata.
+    // Prevents accepting a body that was re-interpreted under a different schema.
+    verify_kind_version(entry, &body_bytes)?;
+
     // Verify certificate binding: ensure the certificate in the bundle matches the one in the Rekor entry
     verify_certificate_binding(bundle, &body_bytes)?;
 
     // Verify signature binding: ensure the signature in the bundle matches the one in the Rekor entry
     verify_signature_binding(bundle, &body_bytes)?;
+
+    // Verify payload hash binding: ensure the DSSE payload hash in the Rekor entry
+    // matches a fresh hash of the bundle's DSSE payload
+    verify_payload_hash_binding(bundle, &body_bytes)?;
 
     // RFC 6962 leaf hash: SHA256(0x00 || data)
     let leaf_hash = Rfc6269Default::hash_leaf(&body_bytes);
@@ -422,6 +450,96 @@ fn verify_signature_binding(bundle: &serde_json::Value, canonicalized_body: &[u8
              This could indicate a substitution attack."
                 .into(),
         ));
+    }
+
+    Ok(())
+}
+
+/// Verify that the canonicalizedBody's kind and apiVersion match the entry's kindVersion metadata.
+/// This prevents accepting a body that was re-interpreted under a different Rekor entry schema.
+fn verify_kind_version(entry: &serde_json::Value, canonicalized_body: &[u8]) -> Result<()> {
+    let kind_version = match entry.get("kindVersion") {
+        Some(kv) => kv,
+        None => return Ok(()), // kindVersion is optional in older bundle formats
+    };
+
+    let expected_kind = kind_version.get("kind").and_then(|k| k.as_str());
+    let expected_version = kind_version.get("version").and_then(|v| v.as_str());
+
+    let body: serde_json::Value = serde_json::from_slice(canonicalized_body).map_err(|e| {
+        Error::SigstoreVerification(format!("Failed to parse canonicalizedBody: {}", e))
+    })?;
+
+    let body_kind = body.get("kind").and_then(|k| k.as_str());
+    let body_version = body.get("apiVersion").and_then(|v| v.as_str());
+
+    if body_kind != expected_kind || body_version != expected_version {
+        return Err(Error::SigstoreVerification(format!(
+            "Tlog entry kind/version mismatch: body has {:?}/{:?}, metadata has {:?}/{:?}",
+            body_kind, body_version, expected_kind, expected_version
+        )));
+    }
+
+    Ok(())
+}
+
+/// Verify that the DSSE payload hash in the Rekor entry matches the bundle's DSSE payload.
+/// This cross-check ensures the Rekor entry was created for this exact payload, preventing
+/// an attacker from binding a valid signature to a different payload.
+fn verify_payload_hash_binding(
+    bundle: &serde_json::Value,
+    canonicalized_body: &[u8],
+) -> Result<()> {
+    let body: serde_json::Value = serde_json::from_slice(canonicalized_body).map_err(|e| {
+        Error::SigstoreVerification(format!("Failed to parse canonicalizedBody: {}", e))
+    })?;
+
+    // Only applies to DSSE entries that have a payloadHash field
+    let kind = body.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+    if kind != "dsse" {
+        return Ok(());
+    }
+
+    let payload_hash_obj = match body.get("spec").and_then(|s| s.get("payloadHash")) {
+        Some(h) => h,
+        None => return Ok(()), // payloadHash not present in all entry versions
+    };
+
+    let expected_hash = match payload_hash_obj.get("value").and_then(|v| v.as_str()) {
+        Some(h) => h,
+        None => return Ok(()),
+    };
+
+    let algorithm = payload_hash_obj
+        .get("algorithm")
+        .and_then(|a| a.as_str())
+        .unwrap_or("");
+    if algorithm != "sha256" {
+        return Err(Error::SigstoreVerification(format!(
+            "Unsupported payload hash algorithm: {algorithm}. Expected sha256"
+        )));
+    }
+
+    // Get the DSSE payload from the bundle and compute its hash
+    let payload_b64 = bundle
+        .get("dsseEnvelope")
+        .and_then(|d| d.get("payload"))
+        .and_then(|p| p.as_str())
+        .ok_or_else(|| {
+            Error::SigstoreVerification("Missing DSSE payload in bundle for hash check".into())
+        })?;
+
+    let payload = decode_b64(payload_b64).map_err(|e| {
+        Error::SigstoreVerification(format!("Failed to decode DSSE payload: {}", e))
+    })?;
+
+    let actual_hash = hex::encode(Sha256::digest(&payload));
+
+    if actual_hash != expected_hash {
+        return Err(Error::SigstoreVerification(format!(
+            "Payload hash mismatch: Rekor entry expects {}, computed {}",
+            expected_hash, actual_hash
+        )));
     }
 
     Ok(())
