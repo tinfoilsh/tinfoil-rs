@@ -163,6 +163,17 @@ fn verify_sct(cert_der: &[u8], issuer_spki_der: &[u8]) -> Result<()> {
     let all_scts = transparency::CertificateEmbeddedSCT::all_from_cert(&cert, issuer_spki_der)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to extract SCTs: {}", e)))?;
 
+    // Reject duplicate SCTs (same log ID) before verification.
+    // Prevents inflating the verified count if a threshold > 1 is ever used.
+    let mut seen_log_ids = std::collections::HashSet::new();
+    for sct in &all_scts {
+        if !seen_log_ids.insert(sct.log_id()) {
+            return Err(Error::SigstoreVerification(
+                "Duplicate SCT found (same log ID)".into(),
+            ));
+        }
+    }
+
     // Load CT log keyring (with validity periods)
     let ct_keyring = trust::load_ctlog_keyring()?;
 

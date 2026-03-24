@@ -161,6 +161,11 @@ impl<'a> CertificateEmbeddedSCT<'a> {
         })
     }
 
+    /// Returns the SCT's log ID (32-byte key hash).
+    pub fn log_id(&self) -> [u8; 32] {
+        self.sct.log_id.key_id
+    }
+
     /// Creates CertificateEmbeddedSCTs for ALL SCTs in the certificate.
     ///
     /// Returns an error only if no SCTs are found. Each SCT can then be
