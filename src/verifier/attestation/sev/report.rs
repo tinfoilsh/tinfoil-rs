@@ -113,8 +113,12 @@ pub(super) fn validate_mbz_fields(report: &[u8]) -> Result<()> {
     // Reserved after committed version fields: 0x1EF-0x1F0 (1 byte)
     validate_mbz_bytes(report, 0x1EF, 0x1F0, "reserved_after_committed_version")?;
 
-    // Reserved before signature: 0x1F8-0x2A0 (168 bytes)
-    validate_mbz_bytes(report, 0x1F8, 0x2A0, "reserved_before_signature")?;
+    // 0x1F8-0x200: launch_mit_vector (valid field in v5+)
+    // 0x200-0x208: current_mit_vector (valid field in v5+)
+    // For v2/v3 these bytes are reserved MBZ; for v5+ they are valid fields.
+    // 0x208-0x2A0: Reserved before signature (must be zero for all versions)
+    let mbz_before_sig_start = if version >= 5 { 0x208 } else { 0x1F8 };
+    validate_mbz_bytes(report, mbz_before_sig_start, 0x2A0, "reserved_before_signature")?;
 
     // Signature padding: after R||S (each 72 bytes) to end of signature field
     validate_mbz_bytes(
