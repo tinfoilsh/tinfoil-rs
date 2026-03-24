@@ -47,7 +47,14 @@ struct Subject {
 // Re-export CertificateInfo from certificate module
 pub use certificate::CertificateInfo;
 
-/// Verify a repository and return the expected measurement.
+/// Result of Sigstore verification: the code measurement and the release digest.
+#[derive(Debug)]
+pub struct SigstoreResult {
+    pub measurement: Measurement,
+    pub digest: String,
+}
+
+/// Verify a repository and return the expected measurement and release digest.
 ///
 /// This performs full Sigstore verification:
 /// 1. Fetches latest release digest from GitHub
@@ -57,12 +64,12 @@ pub use certificate::CertificateInfo;
 /// 5. Verifies Rekor transparency log entry (mandatory)
 /// 6. Verifies certificate was issued by trusted Fulcio CA
 /// 7. Extracts and returns the measurement
-pub async fn verify_repo(repo: &str) -> Result<Measurement> {
+pub async fn verify_repo(repo: &str) -> Result<SigstoreResult> {
     // 1. Fetch latest release digest
-    let digest = github::fetch_latest_digest(repo).await?;
+    let release_digest = github::fetch_latest_digest(repo).await?;
 
     // 2. Fetch the Sigstore attestation bundle
-    let bundle_json = github::fetch_attestation_bundle(repo, &digest).await?;
+    let bundle_json = github::fetch_attestation_bundle(repo, &release_digest).await?;
 
     // 3. Parse bundle
     let bundle: serde_json::Value = serde_json::from_slice(&bundle_json)
@@ -83,7 +90,12 @@ pub async fn verify_repo(repo: &str) -> Result<Measurement> {
     fulcio::verify_fulcio_chain(&cert_der, cert_not_before)?;
 
     // 8. Extract measurement from verified bundle and verify digest matches
-    extract_measurement_from_bundle(&bundle, &digest)
+    let measurement = extract_measurement_from_bundle(&bundle, &release_digest)?;
+
+    Ok(SigstoreResult {
+        measurement,
+        digest: release_digest,
+    })
 }
 
 /// Extract certificate DER bytes and validity window (not_before, not_after) as Unix timestamps
@@ -258,10 +270,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_repo_full() {
-        let measurement = verify_repo("tinfoilsh/confidential-llama3-3-70b").await;
-        assert!(measurement.is_ok(), "Failed to verify repo: {:?}", measurement);
-        let m = measurement.unwrap();
-        println!("Measurement (cryptographically verified): {:?}", m);
-        assert!(!m.registers[0].is_empty());
+        let result = verify_repo("tinfoilsh/confidential-llama3-3-70b").await;
+        assert!(result.is_ok(), "Failed to verify repo: {:?}", result);
+        let r = result.unwrap();
+        assert!(!r.measurement.registers[0].is_empty());
+        assert!(!r.digest.is_empty());
+        assert_eq!(r.digest.len(), 64);
     }
 }

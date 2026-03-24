@@ -396,6 +396,9 @@ impl Default for ValidationOptions {
 /// Ground truth after full verification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroundTruth {
+    /// SHA-256 hex digest of the release artifact
+    pub digest: String,
+
     /// TLS certificate fingerprint to pin
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_public_key: Option<String>,
@@ -504,6 +507,7 @@ mod tests {
     #[test]
     fn test_ground_truth_json_roundtrip() {
         let gt = GroundTruth {
+            digest: "abc123".into(),
             tls_public_key: Some("pubkey".into()),
             hpke_public_key: Some("hpkekey".into()),
             code_measurement: Measurement {

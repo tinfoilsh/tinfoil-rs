@@ -139,10 +139,11 @@ impl SecureClient {
     /// 4. TLS binding: pin all future connections to the attested certificate
     pub async fn verify(&mut self) -> Result<&GroundTruth> {
         // 1. Obtain code measurement (Sigstore verification or pinned value)
-        let code_measurement = if let Some(pinned) = &self.pinned_measurement {
-            pinned.clone()
+        let (code_measurement, digest) = if let Some(pinned) = &self.pinned_measurement {
+            (pinned.clone(), "pinned_no_digest".to_string())
         } else {
-            sigstore::verify_repo(&self.repo).await?
+            let result = sigstore::verify_repo(&self.repo).await?;
+            (result.measurement, result.digest)
         };
         
         // 2. Fetch and verify hardware attestation
@@ -174,6 +175,7 @@ impl SecureClient {
         let enclave_fingerprint = enclave_measurement.fingerprint();
 
         self.ground_truth = Some(GroundTruth {
+            digest,
             tls_public_key: Some(verification.tls_public_key_fp.clone()),
             hpke_public_key: verification.hpke_public_key.clone(),
             code_measurement,

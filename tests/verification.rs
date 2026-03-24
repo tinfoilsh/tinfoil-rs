@@ -32,14 +32,15 @@ async fn test_full_hardware_attestation() {
 /// Test Sigstore verification of code provenance
 #[tokio::test]
 async fn test_sigstore_verification() {
-    let measurement = sigstore::verify_repo(ROUTER_REPO)
+    let result = sigstore::verify_repo(ROUTER_REPO)
         .await
         .expect("Sigstore verification failed");
 
     assert!(
-        !measurement.registers[0].is_empty(),
+        !result.measurement.registers[0].is_empty(),
         "Source measurement should not be empty"
     );
+    assert!(!result.digest.is_empty(), "Digest should not be empty");
 }
 
 /// Test GitHub release fetching
@@ -73,15 +74,15 @@ async fn test_full_verification_measurements_match() {
         .expect("Hardware verification failed");
 
     // Step 2: Sigstore verification
-    let code_measurement = sigstore::verify_repo(ROUTER_REPO)
+    let sigstore_result = sigstore::verify_repo(ROUTER_REPO)
         .await
         .expect("Sigstore verification failed");
 
     // Step 3: Compare measurements — this MUST succeed
-    enclave.measurement.equals(&code_measurement).expect(
+    enclave.measurement.equals(&sigstore_result.measurement).expect(
         &format!(
             "Measurement mismatch!\n  Enclave: {:?}\n  Code:    {:?}",
-            enclave.measurement.registers, code_measurement.registers
+            enclave.measurement.registers, sigstore_result.measurement.registers
         ),
     );
 }
