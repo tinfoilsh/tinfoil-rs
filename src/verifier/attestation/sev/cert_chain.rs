@@ -312,6 +312,43 @@ fn validate_certificate_validity(cert: &x509_cert::Certificate, cert_name: &str)
     Ok(())
 }
 
+/// Validate BasicConstraints extension on a certificate.
+/// CA certificates (ARK, ASK) must have CA:true. Leaf certificates (VCEK) must not.
+fn validate_basic_constraints(
+    cert: &x509_cert::Certificate,
+    cert_name: &str,
+    expect_ca: bool,
+) -> Result<()> {
+    use x509_cert::ext::pkix::BasicConstraints;
+
+    match cert.tbs_certificate.get::<BasicConstraints>() {
+        Ok(Some((_critical, bc))) => {
+            if expect_ca && !bc.ca {
+                return Err(Error::AttestationVerification(format!(
+                    "{} certificate missing CA:true in BasicConstraints",
+                    cert_name
+                )));
+            }
+            if !expect_ca && bc.ca {
+                return Err(Error::AttestationVerification(format!(
+                    "{} leaf certificate has CA:true (expected leaf)",
+                    cert_name
+                )));
+            }
+            Ok(())
+        }
+        Ok(None) if expect_ca => Err(Error::AttestationVerification(format!(
+            "{} certificate missing BasicConstraints extension",
+            cert_name
+        ))),
+        Ok(None) => Ok(()), // Leaf cert without BasicConstraints is acceptable
+        Err(e) => Err(Error::AttestationVerification(format!(
+            "Failed to parse {} BasicConstraints: {}",
+            cert_name, e
+        ))),
+    }
+}
+
 /// Verify the certificate chain with full cryptographic verification.
 ///
 /// This function:
@@ -320,6 +357,7 @@ fn validate_certificate_validity(cert: &x509_cert::Certificate, cert_name: &str)
 /// 3. Verifies ASK signature against ARK public key
 /// 4. Verifies VCEK signature against ASK public key
 /// 5. Validates all certificates are within their validity period
+/// 6. Validates BasicConstraints (ARK/ASK must be CAs, VCEK must not)
 pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -> Result<()> {
     use x509_cert::Certificate;
     use der::Decode;
@@ -401,6 +439,11 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
     validate_certificate_validity(&vcek_cert, "VCEK")?;
     validate_certificate_validity(&ask_cert, "ASK")?;
     validate_certificate_validity(&ark_cert, "ARK")?;
+
+    // Validate BasicConstraints: ARK and ASK must be CAs, VCEK must not
+    validate_basic_constraints(&ark_cert, "ARK", true)?;
+    validate_basic_constraints(&ask_cert, "ASK", true)?;
+    validate_basic_constraints(&vcek_cert, "VCEK", false)?;
 
     // === STEP 1: Verify ARK public key matches pinned fingerprint ===
     // This is the root of trust - if this matches, we know we have AMD's genuine ARK
