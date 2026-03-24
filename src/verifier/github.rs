@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-use crate::constants::{ATTESTATION_PROXY, GITHUB_API_PROXY, GITHUB_DOWNLOAD_PROXY};
+use crate::constants::GITHUB_PROXY;
 use crate::error::{Error, Result};
 use super::util::fetch_with_retry;
 
@@ -13,7 +13,7 @@ struct ReleaseResponse {
 
 /// Fetch the latest release tag for a repository.
 pub async fn fetch_latest_tag(repo: &str) -> Result<String> {
-    let url = format!("{}/repos/{}/releases/latest", GITHUB_API_PROXY, repo);
+    let url = format!("{}/repos/{}/releases/latest", GITHUB_PROXY, repo);
 
     let response = fetch_with_retry(&url).await?;
 
@@ -30,7 +30,7 @@ pub async fn fetch_latest_tag(repo: &str) -> Result<String> {
 
 /// Fetch the attestation digest (tinfoil.hash) for a given repo and tag.
 pub async fn fetch_digest(repo: &str, tag: &str) -> Result<String> {
-    let url = format!("{}/{}/releases/download/{}/tinfoil.hash", GITHUB_DOWNLOAD_PROXY, repo, tag);
+    let url = format!("{}/{}/releases/download/{}/tinfoil.hash", GITHUB_PROXY, repo, tag);
 
     let response = fetch_with_retry(&url).await?;
 
@@ -73,7 +73,7 @@ struct AttestationsResponse {
 
 /// Fetch the Sigstore attestation bundle for a given repo and digest.
 pub async fn fetch_attestation_bundle(repo: &str, digest: &str) -> Result<Vec<u8>> {
-    let url = format!("{}/repos/{}/attestations/sha256:{}", ATTESTATION_PROXY, repo, digest);
+    let url = format!("{}/repos/{}/attestations/sha256:{}", GITHUB_PROXY, repo, digest);
 
     let response = fetch_with_retry(&url).await?;
 

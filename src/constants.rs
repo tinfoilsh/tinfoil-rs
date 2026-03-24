@@ -3,14 +3,8 @@
 //! This module contains URLs and default values used throughout the SDK
 //! for service discovery, GitHub API access, and attestation verification.
 
-/// Proxy for GitHub API requests (releases, attestations)
-pub const GITHUB_API_PROXY: &str = "https://api-github-proxy.tinfoil.sh";
-
-/// Proxy for GitHub release asset downloads (tinfoil.hash, etc.)
-pub const GITHUB_DOWNLOAD_PROXY: &str = "https://github-proxy.tinfoil.sh";
-
-/// Proxy for GitHub attestation API requests
-pub const ATTESTATION_PROXY: &str = "https://gh-attestation-proxy.tinfoil.sh";
+/// Proxy for all GitHub requests (API, downloads, attestations)
+pub const GITHUB_PROXY: &str = "https://github-proxy.tinfoil.sh";
 
 /// Router discovery endpoint URL
 pub const ROUTER_URL: &str = "https://atc.tinfoil.sh/routers?platform=snp";
