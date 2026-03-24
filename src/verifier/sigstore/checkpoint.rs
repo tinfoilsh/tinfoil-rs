@@ -118,9 +118,9 @@ impl SignedCheckpoint {
     }
 
     /// Verify that at least one of the checkpoint's signatures is valid.
-    /// The message signed is the marshaled note body with a trailing newline.
+    /// The signed message is the marshaled note body (which already ends with a newline).
     pub(crate) fn verify_signature(&self, key_der: &[u8], key_type: &str) -> Result<()> {
-        let message = format!("{}\n", self.note.marshal());
+        let message = self.note.marshal();
         let message_bytes = message.as_bytes();
 
         for sig in &self.signatures {

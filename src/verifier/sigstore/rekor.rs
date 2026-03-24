@@ -3,8 +3,12 @@
 //! This module verifies that signatures and certificates were logged in
 //! Rekor, Sigstore's transparency log, providing an immutable audit trail.
 
-use sha2::{Digest, Sha256};
+use digest::Output;
+use sha2::Sha256;
 
+use super::checkpoint::SignedCheckpoint;
+use super::merkle::rfc6962::Rfc6269HasherTrait;
+use super::merkle::{MerkleProofVerifier, Rfc6269Default};
 use super::trust;
 use crate::error::{Error, Result};
 use crate::verifier::util::decode_b64;
@@ -117,8 +121,8 @@ pub fn verify_rekor_entry(
     let key_der = &rekor_key.key_der;
     let key_type = &rekor_key.key_type;
 
-    // Get checkpoint (signed tree head)
-    let checkpoint = inclusion_proof
+    // Get checkpoint (signed tree head), verify its signature, and extract root hash
+    let checkpoint_str = inclusion_proof
         .get("checkpoint")
         .and_then(|c| c.get("envelope"))
         .and_then(|e| e.as_str())
@@ -126,8 +130,8 @@ pub fn verify_rekor_entry(
             Error::SigstoreVerification("Missing checkpoint in inclusion proof".into())
         })?;
 
-    // Verify checkpoint signature and get the root hash from the signed body
-    let checkpoint_root_hash = verify_checkpoint_signature(checkpoint, key_der, key_type)?;
+    let signed_checkpoint = SignedCheckpoint::decode(checkpoint_str)?;
+    signed_checkpoint.verify_signature(key_der, key_type)?;
 
     // Get root hash from inclusion proof
     let root_hash_b64 = inclusion_proof
@@ -142,10 +146,10 @@ pub fn verify_rekor_entry(
     // This prevents substitution attacks where an attacker provides a valid signed
     // checkpoint but modifies the inclusion proof's root hash.
     // See: sigstore-python PR #634, checkpoint.py verify_checkpoint()
-    if checkpoint_root_hash != root_hash {
+    if signed_checkpoint.note.hash.as_slice() != root_hash.as_slice() {
         return Err(Error::SigstoreVerification(format!(
             "Inclusion proof contains invalid root hash: signed checkpoint has {}, inclusion proof has {}",
-            hex::encode(&checkpoint_root_hash),
+            hex::encode(signed_checkpoint.note.hash),
             hex::encode(&root_hash)
         )));
     }
@@ -193,13 +197,39 @@ pub fn verify_rekor_entry(
     verify_signature_binding(bundle, &body_bytes)?;
 
     // RFC 6962 leaf hash: SHA256(0x00 || data)
-    let mut leaf_hasher = Sha256::new();
-    leaf_hasher.update([0x00]);
-    leaf_hasher.update(&body_bytes);
-    let leaf_hash: [u8; 32] = leaf_hasher.finalize().into();
+    let leaf_hash = Rfc6269Default::hash_leaf(&body_bytes);
 
-    // Verify Merkle inclusion proof
-    verify_merkle_inclusion(&leaf_hash, log_index, tree_size, &proof_hashes, &root_hash)?;
+    // Convert proof hashes from Vec<Vec<u8>> to Vec<Output<Sha256>>
+    let proof_outputs: Vec<Output<Sha256>> = proof_hashes
+        .iter()
+        .map(|h| {
+            <[u8; 32]>::try_from(h.as_slice())
+                .map(Into::into)
+                .map_err(|_| {
+                    Error::SigstoreVerification(
+                        "Invalid proof hash length (expected 32 bytes)".into(),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let root_output: Output<Sha256> = <[u8; 32]>::try_from(root_hash.as_slice())
+        .map(Into::into)
+        .map_err(|_| {
+            Error::SigstoreVerification("Invalid root hash length (expected 32 bytes)".into())
+        })?;
+
+    // Verify Merkle inclusion proof using RFC 6962 two-phase decomposition
+    Rfc6269Default::verify_inclusion(
+        log_index,
+        &leaf_hash,
+        tree_size,
+        &proof_outputs,
+        &root_output,
+    )
+    .map_err(|e| {
+        Error::SigstoreVerification(format!("Merkle inclusion proof verification failed: {}", e))
+    })?;
 
     Ok(())
 }
@@ -426,221 +456,4 @@ fn parse_pem_certificate(pem: &str) -> Result<Vec<u8>> {
     decode_b64(&b64_content).map_err(|e| {
         Error::SigstoreVerification(format!("Failed to decode PEM certificate: {}", e))
     })
-}
-
-/// Verify checkpoint signature and return the root hash from the signed body.
-///
-/// The checkpoint note format is:
-/// ```text
-/// <origin>
-/// <tree_size>
-/// <root_hash_base64>
-/// [<extension_lines>]
-///
-/// — <origin> <signature_base64>
-/// ```
-///
-/// Returns the root hash extracted from the signed checkpoint body.
-/// This must be compared against the inclusion proof's root hash to prevent
-/// substitution attacks (see sigstore-python PR #634).
-fn verify_checkpoint_signature(
-    checkpoint: &str,
-    key_der: &[u8],
-    key_type: &str,
-) -> Result<Vec<u8>> {
-    // Parse checkpoint note format:
-    // <origin>\n<tree_size>\n<root_hash_base64>\n[<extension_lines>]\n\n— <origin> <signature_base64>\n
-    let parts: Vec<&str> = checkpoint.split("\n\n").collect();
-    if parts.len() < 2 {
-        return Err(Error::SigstoreVerification(
-            "Invalid checkpoint format: missing signature section".into(),
-        ));
-    }
-
-    let note_body = parts[0];
-    let signature_line = parts[1].trim();
-
-    // Parse the note body to extract root hash (line 3, 0-indexed line 2)
-    let lines: Vec<&str> = note_body.lines().collect();
-    if lines.len() < 3 {
-        return Err(Error::SigstoreVerification(
-            "Checkpoint note body must have at least 3 lines (origin, tree_size, root_hash)".into(),
-        ));
-    }
-    let checkpoint_root_hash = decode_b64(lines[2]).map_err(|e| {
-        Error::SigstoreVerification(format!("Failed to decode checkpoint root hash: {}", e))
-    })?;
-
-    // Signature line format: "— <origin> <signature_base64>"
-    if !signature_line.starts_with("— ") {
-        return Err(Error::SigstoreVerification(
-            "Invalid checkpoint signature line format".into(),
-        ));
-    }
-
-    let sig_parts: Vec<&str> = signature_line[4..].splitn(2, ' ').collect();
-    if sig_parts.len() < 2 {
-        return Err(Error::SigstoreVerification(
-            "Invalid checkpoint signature format".into(),
-        ));
-    }
-
-    let signature_b64 = sig_parts[1].trim();
-    let signature_bytes = decode_b64(signature_b64).map_err(|e| {
-        Error::SigstoreVerification(format!("Failed to decode checkpoint signature: {}", e))
-    })?;
-
-    // The message to verify is the note body with a trailing newline
-    let message = format!("{}\n", note_body);
-
-    match key_type {
-        "PKIX_ECDSA_P256_SHA_256" => {
-            verify_ecdsa_p256_signature(message.as_bytes(), &signature_bytes, key_der)?;
-        }
-        "PKIX_ED25519" => {
-            verify_ed25519_signature(message.as_bytes(), &signature_bytes, key_der)?;
-        }
-        _ => {
-            return Err(Error::SigstoreVerification(format!(
-                "Unsupported Rekor key type: {}",
-                key_type
-            )));
-        }
-    }
-
-    Ok(checkpoint_root_hash)
-}
-
-/// Verify ECDSA P-256 signature (for original Rekor log).
-fn verify_ecdsa_p256_signature(message: &[u8], signature: &[u8], key_der: &[u8]) -> Result<()> {
-    use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-    use p256::pkcs8::DecodePublicKey;
-
-    // Checkpoint signatures include a 4-byte key hint prefix
-    if signature.len() < 4 {
-        return Err(Error::SigstoreVerification(
-            "Checkpoint signature too short".into(),
-        ));
-    }
-    let sig_bytes = &signature[4..];
-
-    // Parse the public key from SPKI DER
-    let verifying_key = VerifyingKey::from_public_key_der(key_der).map_err(|e| {
-        Error::SigstoreVerification(format!("Invalid Rekor ECDSA public key: {}", e))
-    })?;
-
-    // Parse the signature (DER-encoded)
-    let sig = Signature::from_der(sig_bytes).map_err(|e| {
-        Error::SigstoreVerification(format!("Invalid ECDSA signature format: {}", e))
-    })?;
-
-    // Verify
-    verifying_key.verify(message, &sig).map_err(|_| {
-        Error::SigstoreVerification("Checkpoint ECDSA signature verification failed".into())
-    })?;
-
-    Ok(())
-}
-
-/// Verify Ed25519 signature (for Rekor log2025-1).
-fn verify_ed25519_signature(message: &[u8], signature: &[u8], key_der: &[u8]) -> Result<()> {
-    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-
-    // Checkpoint signatures include a 4-byte key hint prefix
-    if signature.len() < 4 + 64 {
-        return Err(Error::SigstoreVerification(
-            "Ed25519 checkpoint signature too short".into(),
-        ));
-    }
-    let sig_bytes = &signature[4..4 + 64];
-
-    // Ed25519 public key in SPKI format: skip the SPKI header to get raw 32-byte key
-    // SPKI for Ed25519: 30 2a 30 05 06 03 2b 65 70 03 21 00 <32 bytes>
-    if key_der.len() < 44 {
-        return Err(Error::SigstoreVerification(
-            "Invalid Ed25519 SPKI key length".into(),
-        ));
-    }
-    let raw_key = &key_der[key_der.len() - 32..];
-
-    let verifying_key = VerifyingKey::try_from(raw_key).map_err(|e| {
-        Error::SigstoreVerification(format!("Invalid Rekor Ed25519 public key: {}", e))
-    })?;
-
-    let sig = Signature::try_from(sig_bytes).map_err(|e| {
-        Error::SigstoreVerification(format!("Invalid Ed25519 signature format: {}", e))
-    })?;
-
-    verifying_key.verify(message, &sig).map_err(|_| {
-        Error::SigstoreVerification("Checkpoint Ed25519 signature verification failed".into())
-    })?;
-
-    Ok(())
-}
-
-/// Verify RFC 6962 Merkle inclusion proof.
-fn verify_merkle_inclusion(
-    leaf_hash: &[u8; 32],
-    index: u64,
-    tree_size: u64,
-    proof: &[Vec<u8>],
-    expected_root: &[u8],
-) -> Result<()> {
-    if index >= tree_size {
-        return Err(Error::SigstoreVerification(format!(
-            "Log index {} >= tree size {}",
-            index, tree_size
-        )));
-    }
-
-    // Validate proof length per RFC 6962 decomposition (matches sigstore-rs)
-    let inner = u64::BITS - (index ^ (tree_size - 1)).leading_zeros();
-    let border = (index >> inner).count_ones();
-    let expected_len = (inner + border) as usize;
-    if proof.len() != expected_len {
-        return Err(Error::SigstoreVerification(format!(
-            "Invalid inclusion proof length: got {}, expected {}",
-            proof.len(),
-            expected_len
-        )));
-    }
-
-    let mut current_hash = *leaf_hash;
-    let mut idx = index;
-    let mut size = tree_size;
-
-    for sibling in proof {
-        if sibling.len() != 32 {
-            return Err(Error::SigstoreVerification(
-                "Invalid proof hash length".into(),
-            ));
-        }
-
-        // RFC 6962 interior node hash: SHA256(0x01 || left || right)
-        let mut hasher = Sha256::new();
-        hasher.update([0x01]);
-
-        // Determine if current node is left or right child
-        if idx % 2 == 0 && idx + 1 < size {
-            // Current is left child
-            hasher.update(current_hash);
-            hasher.update(sibling);
-        } else {
-            // Current is right child
-            hasher.update(sibling);
-            hasher.update(current_hash);
-        }
-
-        current_hash = hasher.finalize().into();
-        idx /= 2;
-        size = (size + 1) / 2;
-    }
-
-    if current_hash.as_slice() != expected_root {
-        return Err(Error::SigstoreVerification(
-            "Merkle inclusion proof verification failed: computed root does not match".into(),
-        ));
-    }
-
-    Ok(())
 }
