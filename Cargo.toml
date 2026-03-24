@@ -62,6 +62,9 @@ thiserror = "1"
 # Hex encoding
 hex = "0.4"
 
+# Platform cache directory
+dirs = "6"
+
 # Sigstore verification
 # NOTE: sigstore-rs 0.13 cannot be used because it requires the `oauth` module
 # even for verification-only use cases, and that module uses Rust edition 2024

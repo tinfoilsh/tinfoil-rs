@@ -12,9 +12,17 @@ use sha2::{Sha256, Sha384, Digest};
 use crate::error::{Error, Result};
 use crate::verifier::attestation::constants::*;
 
-/// Fetch VCEK certificate from AMD KDS via Tinfoil's proxy.
+/// Build the cache path for a VCEK certificate.
+fn vcek_cache_path(product: &str, chip_id_hex: &str, reported_tcb: u64) -> Option<std::path::PathBuf> {
+    let cache_dir = dirs::cache_dir()?.join("tinfoil");
+    let filename = format!("VCEK_{}_{}_{:016x}.der", product, chip_id_hex, reported_tcb);
+    Some(cache_dir.join(filename))
+}
+
+/// Fetch VCEK certificate from AMD KDS via Tinfoil's proxy, with disk caching.
 pub(super) async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
     use crate::verifier::util::fetch_with_retry;
+    use std::fs;
 
     // Parse TCB components
     let tcb_val = u64::from_le_bytes(tcb.try_into().unwrap());
@@ -25,7 +33,15 @@ pub(super) async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
 
     let chip_id_hex = hex::encode(chip_id);
 
-    // AMD KDS URL format (via Tinfoil proxy)
+    // Try disk cache first
+    let cache_path = vcek_cache_path("Genoa", &chip_id_hex, tcb_val);
+    if let Some(ref path) = cache_path {
+        if let Ok(cached) = fs::read(path) {
+            return Ok(cached);
+        }
+    }
+
+    // Cache miss — fetch from AMD KDS
     let url = format!(
         "{}/vcek/v1/Genoa/{}?blSPL={}&teeSPL={}&snpSPL={}&ucodeSPL={}",
         crate::constants::KDS_PROXY, chip_id_hex, bl_spl, tee_spl, snp_spl, ucode_spl
@@ -43,9 +59,21 @@ pub(super) async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
     }
 
     let vcek_der = response.bytes().await
-        .map_err(|e| Error::AttestationVerification(format!("Failed to read VCEK: {}", e)))?;
+        .map_err(|e| Error::AttestationVerification(format!("Failed to read VCEK: {}", e)))?
+        .to_vec();
 
-    Ok(vcek_der.to_vec())
+    // Write to cache (atomic: write tmp then rename)
+    if let Some(ref path) = cache_path {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+            let tmp = path.with_extension("tmp");
+            if fs::write(&tmp, &vcek_der).is_ok() {
+                let _ = fs::rename(&tmp, path);
+            }
+        }
+    }
+
+    Ok(vcek_der)
 }
 
 /// Get AMD certificate chain (ASK + ARK) from embedded assets.
