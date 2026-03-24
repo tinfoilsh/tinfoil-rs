@@ -126,7 +126,7 @@ impl SecureClient {
 
     /// Get the ground truth as a JSON string
     pub fn ground_truth_json(&self) -> Result<String> {
-        let gt = self.ground_truth.as_ref().ok_or(Error::NotVerified)?;
+        let gt = self.ground_truth.as_ref().ok_or(Error::Configuration("Client not verified - call verify() first".into()))?;
         serde_json::to_string(gt).map_err(Error::Json)
     }
 
@@ -313,7 +313,7 @@ impl SecureClient {
     /// Use this to plug into any HTTP-based SDK (e.g. `async-openai`'s
     /// `Client::with_http_client()`).
     pub fn http_client(&self) -> Result<&reqwest::Client> {
-        self.pinned_client.as_ref().ok_or(Error::NotVerified)
+        self.pinned_client.as_ref().ok_or(Error::Configuration("Client not verified - call verify() first".into()))
     }
 
     /// Returns the base URL for API requests to this enclave.

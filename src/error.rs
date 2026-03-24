@@ -1,54 +1,111 @@
-//! Error types for the Tinfoil client
+//! Error types for the Tinfoil SDK.
+//!
+//! Users should match on three categories:
+//!
+//! ```text
+//! Error
+//! ├── Configuration  — Client misconfigured (fix your code, retrying won't help)
+//! ├── Attestation    — Verification failed (may be transient, can retry)
+//! └── Api            — OpenAI API error (passthrough from async-openai)
+//! ```
+//!
+//! Use [`is_configuration()`](Error::is_configuration),
+//! [`is_attestation()`](Error::is_attestation), and
+//! [`is_api()`](Error::is_api) to classify errors.
 
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("HTTP request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    // =====================================================================
+    // Public categories (user-facing)
+    // =====================================================================
+    /// Client misconfigured — fix your code, retrying will not help.
+    #[error("{0}")]
+    Configuration(String),
 
-    #[error("JSON parsing failed: {0}")]
-    Json(#[from] serde_json::Error),
+    /// OpenAI API error. These pass through unchanged from `async-openai`.
+    #[error("API error: {0}")]
+    Api(#[from] async_openai::error::OpenAIError),
 
-    #[error("Base64 decoding failed: {0}")]
-    Base64(#[from] base64::DecodeError),
-
-    #[error("Attestation fetch failed: {0}")]
+    // =====================================================================
+    // Attestation errors (internal variants, all classified as attestation)
+    //
+    // These mirror the error types used in sigstore-rs and the attestation
+    // modules so the internal code stays consistent with upstream.
+    // Users should match with is_attestation() rather than these variants.
+    // =====================================================================
+    /// Attestation document fetch failed.
+    #[error("{0}")]
     AttestationFetch(String),
 
-    #[error("Attestation verification failed: {0}")]
+    /// Hardware attestation verification failed.
+    #[error("{0}")]
     AttestationVerification(String),
 
-    #[error("Sigstore verification failed: {0}")]
-    SigstoreVerification(String),
-
-    #[error("GitHub API error: {0}")]
-    GitHub(String),
-
-    #[error("Network error: {0}")]
-    Network(String),
-
-    #[error("Unsupported attestation format: {0}")]
-    UnsupportedFormat(String),
-
-    #[error("Measurement mismatch: expected {expected}, got {actual}")]
-    MeasurementMismatch { expected: String, actual: String },
-
+    /// TLS certificate fingerprint mismatch.
     #[error("TLS certificate fingerprint mismatch")]
     CertificateMismatch,
 
-    #[error("Client not verified - call verify() first")]
-    NotVerified,
+    /// Sigstore verification failed.
+    /// Uses the same variant name as our sigstore module internals,
+    /// matching the sigstore-rs error patterns.
+    #[error("{0}")]
+    SigstoreVerification(String),
 
-    #[error("TLS error: {0}")]
+    /// GitHub API error during attestation bundle fetch.
+    #[error("{0}")]
+    GitHub(String),
+
+    /// Measurement mismatch between code and enclave.
+    #[error("Measurement mismatch: expected {expected}, got {actual}")]
+    MeasurementMismatch { expected: String, actual: String },
+
+    /// TLS-related error during verification.
+    #[error("{0}")]
     Tls(String),
 
+    /// Network error during attestation fetch.
+    #[error("{0}")]
+    Network(String),
+
+    /// Unsupported attestation format.
+    #[error("{0}")]
+    UnsupportedFormat(String),
+
+    /// HTTP error (from reqwest).
+    #[error("HTTP request failed: {0}")]
+    Http(#[from] reqwest::Error),
+
+    /// JSON parsing error.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// Base64 decoding error.
+    #[error("Base64 error: {0}")]
+    Base64(#[from] base64::DecodeError),
+
+    /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
 
-    #[error("API error: HTTP {status}: {message}")]
-    Api { status: u16, message: String },
+impl Error {
+    /// Returns true if this is a configuration error (fix your code).
+    pub fn is_configuration(&self) -> bool {
+        matches!(self, Error::Configuration(_))
+    }
+
+    /// Returns true if this is an attestation/verification error (can retry).
+    pub fn is_attestation(&self) -> bool {
+        !self.is_configuration() && !self.is_api()
+    }
+
+    /// Returns true if this is an OpenAI API error.
+    pub fn is_api(&self) -> bool {
+        matches!(self, Error::Api(_))
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
