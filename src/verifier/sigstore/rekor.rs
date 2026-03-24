@@ -3,16 +3,14 @@
 //! This module verifies that signatures and certificates were logged in
 //! Rekor, Sigstore's transparency log, providing an immutable audit trail.
 
-use digest::Output;
-use sha2::{Digest, Sha256};
-use std::collections::HashSet;
-
 use super::checkpoint::SignedCheckpoint;
 use super::merkle::rfc6962::Rfc6269HasherTrait;
 use super::merkle::{MerkleProofVerifier, Rfc6269Default};
 use super::trust;
 use crate::error::{Error, Result};
 use crate::verifier::util::decode_b64;
+use digest::Output;
+use sha2::{Digest, Sha256};
 
 /// Verify Rekor transparency log entry with full cryptographic verification.
 ///
@@ -37,37 +35,11 @@ pub fn verify_rekor_entry(
         .and_then(|t| t.as_array())
         .ok_or_else(|| Error::SigstoreVerification("No tlogEntries in bundle".into()))?;
 
-    if tlog_entries.is_empty() {
-        return Err(Error::SigstoreVerification(
-            "Bundle has no Rekor tlog entries - transparency log verification required".into(),
-        ));
-    }
-
-    // Limit entry count to prevent DoS from oversized bundles
-    const MAX_TLOG_ENTRIES: usize = 32;
-    if tlog_entries.len() > MAX_TLOG_ENTRIES {
+    if tlog_entries.len() != 1 {
         return Err(Error::SigstoreVerification(format!(
-            "Too many tlog entries: {} (max {})",
-            tlog_entries.len(),
-            MAX_TLOG_ENTRIES
+            "Expected exactly 1 tlog entry, got {}",
+            tlog_entries.len()
         )));
-    }
-
-    // Reject duplicate tlog entries (same logId + logIndex).
-    // Prevents artificial threshold satisfaction if multiple entries are ever required.
-    let mut seen_entries = HashSet::new();
-    for entry in tlog_entries {
-        let eid_log = entry
-            .get("logId")
-            .and_then(|l| l.get("keyId"))
-            .and_then(|k| k.as_str())
-            .unwrap_or("");
-        let eid_index = entry.get("logIndex").and_then(|i| i.as_str()).unwrap_or("");
-        if !seen_entries.insert((eid_log, eid_index)) {
-            return Err(Error::SigstoreVerification(
-                "Duplicate tlog entry detected (same logId + logIndex)".into(),
-            ));
-        }
     }
 
     let entry = &tlog_entries[0];
