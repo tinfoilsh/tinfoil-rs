@@ -164,6 +164,22 @@ pub fn extract_certificate_info(cert: &Certificate) -> Result<CertificateInfo> {
         }
     }
 
+    if issuer.is_empty() {
+        return Err(Error::SigstoreVerification(
+            "Certificate missing required OIDC issuer extension".into(),
+        ));
+    }
+    if repository.is_empty() {
+        return Err(Error::SigstoreVerification(
+            "Certificate missing required repository extension".into(),
+        ));
+    }
+    if subject_workflow.is_empty() {
+        return Err(Error::SigstoreVerification(
+            "Certificate missing required workflow extension".into(),
+        ));
+    }
+
     Ok(CertificateInfo {
         issuer,
         subject_workflow,
@@ -225,8 +241,13 @@ plAvxwkAIR2jurboJZ4Zm9rNAx8KvA+A5yQFzNkGgKDLjTJrKmSKoIcWV3j7WfdL
         // Should pass validation
         assert!(validate_certificate_extensions(&cert).is_ok());
 
-        // Should extract certificate info
-        let info = extract_certificate_info(&cert).unwrap();
-        assert!(info.issuer.contains("github.com"));
+        // This test cert has an OIDC issuer but lacks the GitHub-specific
+        // repository and workflow extensions, so extraction should fail.
+        let err = extract_certificate_info(&cert).unwrap_err();
+        assert!(
+            err.to_string().contains("missing required"),
+            "Expected missing-field error, got: {}",
+            err
+        );
     }
 }
