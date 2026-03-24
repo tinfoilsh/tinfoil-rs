@@ -11,6 +11,7 @@
 
 // Submodules adapted from sigstore-rs (Apache 2.0 License)
 pub mod certificate;
+pub mod checkpoint;
 pub mod dsse;
 pub mod fulcio;
 pub mod keyring;
