@@ -23,10 +23,14 @@ use super::report::{validate_mbz_bytes, validate_mbz_fields, validate_signer_inf
 /// firmware could be rolled back.
 fn validate_committed_tcb(report: &[u8]) -> Result<()> {
     let committed_tcb = u64::from_le_bytes(
-        report[COMMITTED_TCB_OFFSET..COMMITTED_TCB_OFFSET + 8].try_into().unwrap()
+        report[COMMITTED_TCB_OFFSET..COMMITTED_TCB_OFFSET + 8]
+            .try_into()
+            .unwrap(),
     );
     let current_tcb = u64::from_le_bytes(
-        report[CURRENT_TCB_OFFSET..CURRENT_TCB_OFFSET + 8].try_into().unwrap()
+        report[CURRENT_TCB_OFFSET..CURRENT_TCB_OFFSET + 8]
+            .try_into()
+            .unwrap(),
     );
 
     if committed_tcb != current_tcb {
@@ -80,57 +84,64 @@ fn validate_policy(report_policy: &SnpPolicy, required: &SnpPolicy) -> Result<()
     if required_version > report_version {
         return Err(Error::AttestationVerification(format!(
             "Required ABI version ({}.{}) is greater than report's ABI version ({}.{})",
-            required.abi_major, required.abi_minor,
-            report_policy.abi_major, report_policy.abi_minor
+            required.abi_major,
+            required.abi_minor,
+            report_policy.abi_major,
+            report_policy.abi_minor
         )));
     }
 
     // Unauthorized capabilities (report has them, required doesn't allow)
     if !required.migrate_ma && report_policy.migrate_ma {
         return Err(Error::AttestationVerification(
-            "Unauthorized migration agent capability".into()
+            "Unauthorized migration agent capability".into(),
         ));
     }
     if !required.debug && report_policy.debug {
         return Err(Error::AttestationVerification(
-            "Debug mode not allowed".into()
+            "Debug mode not allowed".into(),
         ));
     }
     if !required.smt && report_policy.smt {
         return Err(Error::AttestationVerification(
-            "Unauthorized SMT capability".into()
+            "Unauthorized SMT capability".into(),
         ));
     }
     if !required.cxl_allowed && report_policy.cxl_allowed {
         return Err(Error::AttestationVerification(
-            "Unauthorized CXL capability".into()
+            "Unauthorized CXL capability".into(),
         ));
     }
     if !required.mem_aes256_xts && report_policy.mem_aes256_xts {
         return Err(Error::AttestationVerification(
-            "Unauthorized memory encryption mode (AES-256-XTS)".into()
+            "Unauthorized memory encryption mode (AES-256-XTS)".into(),
         ));
     }
 
     // Required restrictions (report lacks what required mandates)
+    if required.mem_aes256_xts && !report_policy.mem_aes256_xts {
+        return Err(Error::AttestationVerification(
+            "AES-256-XTS memory encryption required but not present".into(),
+        ));
+    }
     if required.single_socket && !report_policy.single_socket {
         return Err(Error::AttestationVerification(
-            "Single socket restriction required but not present".into()
+            "Single socket restriction required but not present".into(),
         ));
     }
     if required.rapl_dis && !report_policy.rapl_dis {
         return Err(Error::AttestationVerification(
-            "RAPL disabled required but not present".into()
+            "RAPL disabled required but not present".into(),
         ));
     }
     if required.ciphertext_hiding_dram && !report_policy.ciphertext_hiding_dram {
         return Err(Error::AttestationVerification(
-            "Ciphertext hiding in DRAM required but not enforced".into()
+            "Ciphertext hiding in DRAM required but not enforced".into(),
         ));
     }
     if required.page_swap_disabled && !report_policy.page_swap_disabled {
         return Err(Error::AttestationVerification(
-            "Page swap disabled required but not present".into()
+            "Page swap disabled required but not present".into(),
         ));
     }
 
@@ -145,44 +156,44 @@ fn validate_platform_info(report_info: &SnpPlatformInfo, required: &SnpPlatformI
     // Unauthorized features (report has it enabled, but required doesn't allow it)
     if report_info.smt_enabled && !required.smt_enabled {
         return Err(Error::AttestationVerification(
-            "Unauthorized platform feature SMT enabled".into()
+            "Unauthorized platform feature SMT enabled".into(),
         ));
     }
 
     // Required capabilities (report must have these if required mandates them)
     if required.smt_enabled && !report_info.smt_enabled {
         return Err(Error::AttestationVerification(
-            "SMT required but not enabled on platform".into()
+            "SMT required but not enabled on platform".into(),
         ));
     }
     if required.tsme_enabled && !report_info.tsme_enabled {
         return Err(Error::AttestationVerification(
-            "TSME required but not enabled on platform".into()
+            "TSME required but not enabled on platform".into(),
         ));
     }
     if required.ecc_enabled && !report_info.ecc_enabled {
         return Err(Error::AttestationVerification(
-            "ECC required but not enabled on platform".into()
+            "ECC required but not enabled on platform".into(),
         ));
     }
     if required.rapl_disabled && !report_info.rapl_disabled {
         return Err(Error::AttestationVerification(
-            "RAPL disabled required but RAPL is enabled on platform".into()
+            "RAPL disabled required but RAPL is enabled on platform".into(),
         ));
     }
     if required.ciphertext_hiding_dram_enabled && !report_info.ciphertext_hiding_dram_enabled {
         return Err(Error::AttestationVerification(
-            "Ciphertext hiding in DRAM required but not enabled on platform".into()
+            "Ciphertext hiding in DRAM required but not enabled on platform".into(),
         ));
     }
     if required.alias_check_complete && !report_info.alias_check_complete {
         return Err(Error::AttestationVerification(
-            "Alias check completion required but not complete on platform".into()
+            "Alias check completion required but not complete on platform".into(),
         ));
     }
     if required.tio_enabled && !report_info.tio_enabled {
         return Err(Error::AttestationVerification(
-            "TIO required but not enabled on platform".into()
+            "TIO required but not enabled on platform".into(),
         ));
     }
 
@@ -197,14 +208,13 @@ fn validate_platform_info(report_info: &SnpPlatformInfo, required: &SnpPlatformI
 ///
 /// For production workloads, we typically expect VMPL 0.
 fn validate_vmpl(report: &[u8], expected_vmpl: Option<u8>) -> Result<()> {
-    let vmpl = u32::from_le_bytes(
-        report[VMPL_OFFSET..VMPL_OFFSET + 4].try_into().unwrap()
-    );
+    let vmpl = u32::from_le_bytes(report[VMPL_OFFSET..VMPL_OFFSET + 4].try_into().unwrap());
 
     // VMPL must be in valid range 0-3
     if vmpl > 3 {
         return Err(Error::AttestationVerification(format!(
-            "VMPL {} is not in valid range 0-3", vmpl
+            "VMPL {} is not in valid range 0-3",
+            vmpl
         )));
     }
 
@@ -212,7 +222,8 @@ fn validate_vmpl(report: &[u8], expected_vmpl: Option<u8>) -> Result<()> {
     if let Some(expected) = expected_vmpl {
         if vmpl != expected as u32 {
             return Err(Error::AttestationVerification(format!(
-                "VMPL mismatch: expected {}, got {}", expected, vmpl
+                "VMPL mismatch: expected {}, got {}",
+                expected, vmpl
             )));
         }
     }
@@ -227,7 +238,11 @@ fn validate_vmpl(report: &[u8], expected_vmpl: Option<u8>) -> Result<()> {
 /// 2. VCEK TCB validation (ensures VCEK cert extensions match report TCB)
 ///
 /// Returns maskChipKey flag for HWID validation.
-pub(super) fn validate_report_with_chain(report: &[u8], vcek: &[u8], options: &ValidationOptions) -> Result<bool> {
+pub(super) fn validate_report_with_chain(
+    report: &[u8],
+    vcek: &[u8],
+    options: &ValidationOptions,
+) -> Result<bool> {
     // Validate report fields using options
     let mask_chip_key = validate_report_fields_with_options(report, options)?;
 
@@ -246,7 +261,9 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
 
     // Validate signature algorithm (must be 1 = ECDSA P-384 SHA-384) (always required)
     let signature_algo = u32::from_le_bytes(
-        report[SIGNATURE_ALGO_OFFSET..SIGNATURE_ALGO_OFFSET + 4].try_into().unwrap()
+        report[SIGNATURE_ALGO_OFFSET..SIGNATURE_ALGO_OFFSET + 4]
+            .try_into()
+            .unwrap(),
     );
     if signature_algo != SIGNATURE_ALGO_ECDSA_P384_SHA384 {
         return Err(Error::AttestationVerification(format!(
@@ -260,7 +277,7 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
         report,
         SIGNATURE_OFFSET + ECDSA_P384_SIGNATURE_SIZE,
         REPORT_SIZE,
-        "signature_padding"
+        "signature_padding",
     )?;
 
     // Validate signer info field (returns maskChipKey for HWID validation)
@@ -269,7 +286,7 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
     // Reject permit_provisional_firmware=true (not supported, matches Python reference)
     if options.permit_provisional_firmware {
         return Err(Error::AttestationVerification(
-            "permit_provisional_firmware=true is not supported".into()
+            "permit_provisional_firmware=true is not supported".into(),
         ));
     }
 
@@ -277,14 +294,13 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
     validate_committed_tcb(report)?;
 
     // Extract and validate guest policy
-    let policy_raw = u64::from_le_bytes(
-        report[POLICY_OFFSET..POLICY_OFFSET + 8].try_into().unwrap()
-    );
+    let policy_raw =
+        u64::from_le_bytes(report[POLICY_OFFSET..POLICY_OFFSET + 8].try_into().unwrap());
 
     // Bit 17 must be 1 (reserved per AMD spec) - always required
     if policy_raw & POLICY_RESERVED_BIT_17 == 0 {
         return Err(Error::AttestationVerification(
-            "Policy bit 17 must be 1 (reserved)".into()
+            "Policy bit 17 must be 1 (reserved)".into(),
         ));
     }
 
@@ -305,11 +321,14 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
     // Validate Guest SVN if specified
     if let Some(min_guest_svn) = options.minimum_guest_svn {
         let guest_svn = u32::from_le_bytes(
-            report[GUEST_SVN_OFFSET..GUEST_SVN_OFFSET + 4].try_into().unwrap()
+            report[GUEST_SVN_OFFSET..GUEST_SVN_OFFSET + 4]
+                .try_into()
+                .unwrap(),
         );
         if guest_svn < min_guest_svn {
             return Err(Error::AttestationVerification(format!(
-                "Guest SVN {} is below minimum {}", guest_svn, min_guest_svn
+                "Guest SVN {} is below minimum {}",
+                guest_svn, min_guest_svn
             )));
         }
     }
@@ -322,14 +341,16 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
     if let Some(min_build) = options.minimum_build {
         if build < min_build {
             return Err(Error::AttestationVerification(format!(
-                "Current firmware build {} is below minimum {}", build, min_build
+                "Current firmware build {} is below minimum {}",
+                build, min_build
             )));
         }
         // Also check committed build (matches Python reference)
         let committed_build = report[COMMITTED_BUILD_OFFSET];
         if committed_build < min_build {
             return Err(Error::AttestationVerification(format!(
-                "Committed firmware build {} is below minimum {}", committed_build, min_build
+                "Committed firmware build {} is below minimum {}",
+                committed_build, min_build
             )));
         }
     }
@@ -362,34 +383,43 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
     if let Some(ref min_tcb) = options.minimum_tcb {
         // Check reported_tcb
         let reported_tcb = u64::from_le_bytes(
-            report[REPORTED_TCB_OFFSET..REPORTED_TCB_OFFSET + 8].try_into().unwrap()
+            report[REPORTED_TCB_OFFSET..REPORTED_TCB_OFFSET + 8]
+                .try_into()
+                .unwrap(),
         );
         let reported_parts = TcbParts::from_u64(reported_tcb);
         if !reported_parts.meets_minimum(min_tcb) {
             return Err(Error::AttestationVerification(format!(
-                "Reported TCB ({:?}) below minimum ({:?})", reported_parts, min_tcb
+                "Reported TCB ({:?}) below minimum ({:?})",
+                reported_parts, min_tcb
             )));
         }
 
         // Check current_tcb
         let current_tcb = u64::from_le_bytes(
-            report[CURRENT_TCB_OFFSET..CURRENT_TCB_OFFSET + 8].try_into().unwrap()
+            report[CURRENT_TCB_OFFSET..CURRENT_TCB_OFFSET + 8]
+                .try_into()
+                .unwrap(),
         );
         let current_parts = TcbParts::from_u64(current_tcb);
         if !current_parts.meets_minimum(min_tcb) {
             return Err(Error::AttestationVerification(format!(
-                "Current TCB ({:?}) below minimum ({:?})", current_parts, min_tcb
+                "Current TCB ({:?}) below minimum ({:?})",
+                current_parts, min_tcb
             )));
         }
 
         // Check committed_tcb
         let committed_tcb = u64::from_le_bytes(
-            report[COMMITTED_TCB_OFFSET..COMMITTED_TCB_OFFSET + 8].try_into().unwrap()
+            report[COMMITTED_TCB_OFFSET..COMMITTED_TCB_OFFSET + 8]
+                .try_into()
+                .unwrap(),
         );
         let committed_parts = TcbParts::from_u64(committed_tcb);
         if !committed_parts.meets_minimum(min_tcb) {
             return Err(Error::AttestationVerification(format!(
-                "Committed TCB ({:?}) below minimum ({:?})", committed_parts, min_tcb
+                "Committed TCB ({:?}) below minimum ({:?})",
+                committed_parts, min_tcb
             )));
         }
     }
@@ -397,12 +427,15 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
     // Validate launch_tcb separately if specified (may have different requirements)
     if let Some(ref min_launch_tcb) = options.minimum_launch_tcb {
         let launch_tcb = u64::from_le_bytes(
-            report[LAUNCH_TCB_OFFSET..LAUNCH_TCB_OFFSET + 8].try_into().unwrap()
+            report[LAUNCH_TCB_OFFSET..LAUNCH_TCB_OFFSET + 8]
+                .try_into()
+                .unwrap(),
         );
         let launch_parts = TcbParts::from_u64(launch_tcb);
         if !launch_parts.meets_minimum(min_launch_tcb) {
             return Err(Error::AttestationVerification(format!(
-                "Launch TCB ({:?}) below minimum ({:?})", launch_parts, min_launch_tcb
+                "Launch TCB ({:?}) below minimum ({:?})",
+                launch_parts, min_launch_tcb
             )));
         }
     }
@@ -410,7 +443,9 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
     // Validate platform info if specified
     if let Some(ref required_platform_info) = options.platform_info {
         let platform_info_raw = u64::from_le_bytes(
-            report[PLATFORM_INFO_OFFSET..PLATFORM_INFO_OFFSET + 8].try_into().unwrap()
+            report[PLATFORM_INFO_OFFSET..PLATFORM_INFO_OFFSET + 8]
+                .try_into()
+                .unwrap(),
         );
 
         // Validate platform_info reserved bits must be zero
@@ -419,9 +454,10 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
         // Reserved: bit 6, bits 8-63
         const PLATFORM_INFO_VALID_MASK: u64 = 0b10111111; // bits 0-5 and 7
         if platform_info_raw & !PLATFORM_INFO_VALID_MASK != 0 {
-            return Err(Error::AttestationVerification(
-                format!("Platform info has non-zero reserved bits: 0x{:x}", platform_info_raw)
-            ));
+            return Err(Error::AttestationVerification(format!(
+                "Platform info has non-zero reserved bits: 0x{:x}",
+                platform_info_raw
+            )));
         }
 
         let report_platform_info = SnpPlatformInfo::from_u64(platform_info_raw);
@@ -437,7 +473,8 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
         if actual != expected.as_slice() {
             return Err(Error::AttestationVerification(format!(
                 "report_data mismatch: expected {}, got {}",
-                hex::encode(expected), hex::encode(actual)
+                hex::encode(expected),
+                hex::encode(actual)
             )));
         }
     }
@@ -447,7 +484,8 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
         if actual != expected.as_slice() {
             return Err(Error::AttestationVerification(format!(
                 "host_data mismatch: expected {}, got {}",
-                hex::encode(expected), hex::encode(actual)
+                hex::encode(expected),
+                hex::encode(actual)
             )));
         }
     }
@@ -457,7 +495,8 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
         if actual != expected.as_slice() {
             return Err(Error::AttestationVerification(format!(
                 "image_id mismatch: expected {}, got {}",
-                hex::encode(expected), hex::encode(actual)
+                hex::encode(expected),
+                hex::encode(actual)
             )));
         }
     }
@@ -467,7 +506,8 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
         if actual != expected.as_slice() {
             return Err(Error::AttestationVerification(format!(
                 "family_id mismatch: expected {}, got {}",
-                hex::encode(expected), hex::encode(actual)
+                hex::encode(expected),
+                hex::encode(actual)
             )));
         }
     }
@@ -477,7 +517,8 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
         if actual != expected.as_slice() {
             return Err(Error::AttestationVerification(format!(
                 "report_id mismatch: expected {}, got {}",
-                hex::encode(expected), hex::encode(actual)
+                hex::encode(expected),
+                hex::encode(actual)
             )));
         }
     }
@@ -487,7 +528,8 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
         if actual != expected.as_slice() {
             return Err(Error::AttestationVerification(format!(
                 "report_id_ma mismatch: expected {}, got {}",
-                hex::encode(expected), hex::encode(actual)
+                hex::encode(expected),
+                hex::encode(actual)
             )));
         }
     }
@@ -497,7 +539,8 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
         if actual != expected.as_slice() {
             return Err(Error::AttestationVerification(format!(
                 "measurement mismatch: expected {}, got {}",
-                hex::encode(expected), hex::encode(actual)
+                hex::encode(expected),
+                hex::encode(actual)
             )));
         }
     }
@@ -507,7 +550,8 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
         if actual != expected.as_slice() {
             return Err(Error::AttestationVerification(format!(
                 "chip_id mismatch: expected {}, got {}",
-                hex::encode(expected), hex::encode(actual)
+                hex::encode(expected),
+                hex::encode(actual)
             )));
         }
     }
@@ -566,20 +610,28 @@ mod tests {
     fn test_wrong_signature_algorithm_zero() {
         let mut report = create_test_report(2);
         // Set signature algorithm to 0 (invalid)
-        report[SIGNATURE_ALGO_OFFSET..SIGNATURE_ALGO_OFFSET + 4].copy_from_slice(&0u32.to_le_bytes());
+        report[SIGNATURE_ALGO_OFFSET..SIGNATURE_ALGO_OFFSET + 4]
+            .copy_from_slice(&0u32.to_le_bytes());
         let result = validate_report_fields_with_options(&report, &minimal_options());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unsupported signature algorithm"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported signature algorithm"));
     }
 
     #[test]
     fn test_wrong_signature_algorithm_two() {
         let mut report = create_test_report(2);
         // Set signature algorithm to 2 (hypothetical future algorithm)
-        report[SIGNATURE_ALGO_OFFSET..SIGNATURE_ALGO_OFFSET + 4].copy_from_slice(&2u32.to_le_bytes());
+        report[SIGNATURE_ALGO_OFFSET..SIGNATURE_ALGO_OFFSET + 4]
+            .copy_from_slice(&2u32.to_le_bytes());
         let result = validate_report_fields_with_options(&report, &minimal_options());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unsupported signature algorithm"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported signature algorithm"));
     }
 
     // =========================================================================
@@ -593,7 +645,10 @@ mod tests {
         report[POLICY_OFFSET..POLICY_OFFSET + 8].copy_from_slice(&0u64.to_le_bytes());
         let result = validate_report_fields_with_options(&report, &minimal_options());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Policy bit 17 must be 1"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Policy bit 17 must be 1"));
     }
 
     #[test]
@@ -604,14 +659,18 @@ mod tests {
         report[POLICY_OFFSET..POLICY_OFFSET + 8].copy_from_slice(&policy.to_le_bytes());
         let result = validate_report_fields_with_options(&report, &minimal_options());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Policy bits 63-26 must be zero"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Policy bits 63-26 must be zero"));
     }
 
     #[test]
     fn test_policy_debug_mode_not_allowed() {
         let report = create_test_report(2);
         // Set debug bit in policy (bit 19)
-        let mut policy = u64::from_le_bytes(report[POLICY_OFFSET..POLICY_OFFSET + 8].try_into().unwrap());
+        let mut policy =
+            u64::from_le_bytes(report[POLICY_OFFSET..POLICY_OFFSET + 8].try_into().unwrap());
         policy |= 1u64 << 19; // DEBUG bit
 
         let mut report = report;
@@ -626,14 +685,18 @@ mod tests {
 
         let result = validate_report_fields_with_options(&report, &options);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Debug mode not allowed"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Debug mode not allowed"));
     }
 
     #[test]
     fn test_policy_unauthorized_smt() {
         let report = create_test_report(2);
         // Set SMT bit in policy (bit 16)
-        let mut policy = u64::from_le_bytes(report[POLICY_OFFSET..POLICY_OFFSET + 8].try_into().unwrap());
+        let mut policy =
+            u64::from_le_bytes(report[POLICY_OFFSET..POLICY_OFFSET + 8].try_into().unwrap());
         policy |= 1u64 << 16; // SMT bit
 
         let mut report = report;
@@ -648,7 +711,10 @@ mod tests {
 
         let result = validate_report_fields_with_options(&report, &options);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unauthorized SMT capability"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unauthorized SMT capability"));
     }
 
     // =========================================================================
@@ -686,7 +752,10 @@ mod tests {
 
         let result = validate_report_fields_with_options(&report, &options);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Guest SVN 0 is below minimum 1"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Guest SVN 0 is below minimum 1"));
     }
 
     // =========================================================================
@@ -702,7 +771,10 @@ mod tests {
 
         let result = validate_report_fields_with_options(&report, &options);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("firmware build 0 is below minimum 1"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("firmware build 0 is below minimum 1"));
     }
 
     #[test]
@@ -714,7 +786,10 @@ mod tests {
 
         let result = validate_report_fields_with_options(&report, &options);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("firmware version 0.0 is below minimum 1.0"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("firmware version 0.0 is below minimum 1.0"));
     }
 
     // =========================================================================
@@ -726,7 +801,8 @@ mod tests {
         let mut report = create_test_report(2);
         // Set SMT enabled in platform info (bit 0)
         let platform_info: u64 = 1; // SMT enabled
-        report[PLATFORM_INFO_OFFSET..PLATFORM_INFO_OFFSET + 8].copy_from_slice(&platform_info.to_le_bytes());
+        report[PLATFORM_INFO_OFFSET..PLATFORM_INFO_OFFSET + 8]
+            .copy_from_slice(&platform_info.to_le_bytes());
 
         // Create options that disallow SMT
         let mut options = minimal_options();
@@ -737,7 +813,10 @@ mod tests {
 
         let result = validate_report_fields_with_options(&report, &options);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unauthorized platform feature SMT enabled"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unauthorized platform feature SMT enabled"));
     }
 
     #[test]
@@ -754,7 +833,10 @@ mod tests {
 
         let result = validate_report_fields_with_options(&report, &options);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("TSME required but not enabled"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("TSME required but not enabled"));
     }
 
     // =========================================================================
@@ -769,7 +851,10 @@ mod tests {
 
         let result = validate_report_fields_with_options(&report, &minimal_options());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("VMPL 4 is not in valid range 0-3"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("VMPL 4 is not in valid range 0-3"));
     }
 
     #[test]
@@ -784,7 +869,10 @@ mod tests {
 
         let result = validate_report_fields_with_options(&report, &options);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("VMPL mismatch: expected 0, got 1"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("VMPL mismatch: expected 0, got 1"));
     }
 
     // =========================================================================
@@ -798,12 +886,17 @@ mod tests {
         // TCB format: bits 0-7=bl_spl, 8-15=tee_spl, 16-47=reserved(MBZ), 48-55=snp_spl, 56-63=ucode_spl
         let committed_tcb: u64 = 0x480E_0000_0000_0007; // valid TCB with ucode=0x48, snp=0x0E, bl=0x07
         let current_tcb: u64 = 0x480E_0000_0000_0001; // same but different bl_spl
-        report[COMMITTED_TCB_OFFSET..COMMITTED_TCB_OFFSET + 8].copy_from_slice(&committed_tcb.to_le_bytes());
-        report[CURRENT_TCB_OFFSET..CURRENT_TCB_OFFSET + 8].copy_from_slice(&current_tcb.to_le_bytes());
+        report[COMMITTED_TCB_OFFSET..COMMITTED_TCB_OFFSET + 8]
+            .copy_from_slice(&committed_tcb.to_le_bytes());
+        report[CURRENT_TCB_OFFSET..CURRENT_TCB_OFFSET + 8]
+            .copy_from_slice(&current_tcb.to_le_bytes());
 
         let result = validate_report_fields_with_options(&report, &minimal_options());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Provisional firmware not allowed"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Provisional firmware not allowed"));
     }
 
     #[test]
@@ -815,7 +908,10 @@ mod tests {
 
         let result = validate_report_fields_with_options(&report, &minimal_options());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("committed_build (1) != current_build (2)"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("committed_build (1) != current_build (2)"));
     }
 
     #[test]
@@ -826,7 +922,10 @@ mod tests {
 
         let result = validate_report_fields_with_options(&report, &options);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("permit_provisional_firmware=true is not supported"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("permit_provisional_firmware=true is not supported"));
     }
 
     // =========================================================================
@@ -844,7 +943,10 @@ mod tests {
 
         let result = validate_report_fields_with_options(&report, &options);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("report_data mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("report_data mismatch"));
     }
 
     #[test]
@@ -858,7 +960,10 @@ mod tests {
 
         let result = validate_report_fields_with_options(&report, &options);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("measurement mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("measurement mismatch"));
     }
 
     #[test]
@@ -872,7 +977,10 @@ mod tests {
 
         let result = validate_report_fields_with_options(&report, &options);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("host_data mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("host_data mismatch"));
     }
 
     #[test]
@@ -908,7 +1016,10 @@ mod tests {
 
         let result = validate_policy(&report_policy, &required_policy);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Required ABI version (2.0) is greater than report's ABI version (1.0)"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Required ABI version (2.0) is greater than report's ABI version (1.0)"));
     }
 
     #[test]
@@ -924,7 +1035,10 @@ mod tests {
 
         let result = validate_policy(&report_policy, &required_policy);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unauthorized migration agent capability"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unauthorized migration agent capability"));
     }
 
     #[test]
@@ -940,7 +1054,10 @@ mod tests {
 
         let result = validate_policy(&report_policy, &required_policy);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Single socket restriction required but not present"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Single socket restriction required but not present"));
     }
 
     // =========================================================================
@@ -960,7 +1077,10 @@ mod tests {
 
         let result = validate_platform_info(&report_info, &required_info);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("ECC required but not enabled"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("ECC required but not enabled"));
     }
 
     #[test]
@@ -976,7 +1096,10 @@ mod tests {
 
         let result = validate_platform_info(&report_info, &required_info);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("RAPL disabled required but RAPL is enabled"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("RAPL disabled required but RAPL is enabled"));
     }
 
     // =========================================================================
@@ -1012,7 +1135,10 @@ mod tests {
 
         let result = validate_committed_tcb(&report);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("committed_minor (1) != current_minor (2)"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("committed_minor (1) != current_minor (2)"));
     }
 
     #[test]
@@ -1023,6 +1149,9 @@ mod tests {
 
         let result = validate_committed_tcb(&report);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("committed_major (1) != current_major (2)"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("committed_major (1) != current_major (2)"));
     }
 }
