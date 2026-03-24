@@ -12,30 +12,43 @@ Add to your `Cargo.toml`:
 ```toml
 [dependencies]
 tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs" }
+tokio = { version = "1", features = ["full"] }
 ```
 
 ## Quick Start
 
-The Tinfoil Rust client provides secure communication with Tinfoil enclaves. It has an OpenAI-compatible API with additional security features:
+The Tinfoil Rust client is a wrapper around [async-openai](https://github.com/64bit/async-openai) and provides secure communication with Tinfoil enclaves. It has the same API as the async-openai client, with additional security features:
 
 - Automatic attestation validation to ensure enclave integrity verification
-- TLS certificate pinning using attested certificates to provide direct-to-enclave encrypted communication
+- Supports [Encrypted HTTP Body Protocol](https://docs.tinfoil.sh/resources/ehbp) to provide direct-to-enclave encrypted communication with attested public keys
+- Supports a fallback mode with TLS certificate pinning using attested certificates to provide direct-to-enclave encrypted communication over TLS
 
 ```rust
-use tinfoil::{SecureClient, ChatMessage};
+use tinfoil::Client;
+use tinfoil::async_openai::types::{
+    ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a client
-    let mut client = SecureClient::new_default_client("<YOUR_API_KEY>").await?;
+    let client = Client::new_default("<YOUR_API_KEY>").await?;
 
-    // Make requests using the OpenAI-compatible API
-    // Note: enclave verification and TLS pinning happens automatically
-    let response = client.chat(vec![
-        ChatMessage::user("Say this is a test"),
-    ]).await?;
+    // Make requests using the OpenAI client API
+    // Note: enclave verification and direct-to-enclave encryption happens automatically
+    let request = CreateChatCompletionRequestArgs::default()
+        .model("llama3-3-70b")
+        .messages(vec![
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("Say this is a test")
+                .build()?
+                .into(),
+        ])
+        .build()?;
 
-    println!("{}", response.choices[0].message.content);
+    let response = client.chat().create(request).await?;
+
+    println!("{}", response.choices[0].message.content.as_ref().unwrap());
 
     Ok(())
 }
@@ -44,67 +57,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Usage
 
 ```rust
-// 1. Create a client (automatically verifies and sets up TLS pinning)
-let mut client = SecureClient::new_default_client(
+// 1. Create a client
+let client = Client::new_default(
     std::env::var("TINFOIL_API_KEY")?
 ).await?;
 
-// 2. Use client with OpenAI-compatible API
-let response = client.chat(vec![
-    ChatMessage::user("Hello!"),
-]).await?;
+// 2. Use client as you would async_openai::Client
+// see https://docs.rs/async-openai for API documentation
 ```
 
 ## Advanced Functionality
 
 ```rust
-use tinfoil::{SecureClient, verifier::attestation, verifier::sigstore};
+use tinfoil::{Client, SecureClient};
 
-// For manual verification, create a client for a specific host
-let mut client = SecureClient::new("inference.tinfoil.sh", "your-api-key");
+// Create a client with explicit enclave and repo parameters
+let client = Client::new(
+    "enclave.example.com",
+    "org/repo",
+    "<YOUR_API_KEY>",
+).await?;
 
-// Manual verification
-let ground_truth = client.verify().await?;
-println!("Verified enclave: {:?}", ground_truth.enclave_fingerprint);
-
-// Or perform step-by-step verification
-let doc = attestation::fetch("inference.tinfoil.sh").await?;
-let enclave = attestation::verify_full(&doc).await?;
-println!("Hardware attestation verified");
-
-let source = sigstore::verify_repo("tinfoilsh/confidential-model-router").await?;
-enclave.measurement.equals(&source)?;
-println!("Code provenance verified");
+// For direct HTTP access, use the underlying http_client
+let http = client.http_client()?;
+let resp = http
+    .get(format!("https://{}/health", client.enclave()))
+    .send()
+    .await?;
 ```
 
 ## API Documentation
 
-This library provides an OpenAI-compatible API for use with Tinfoil enclaves. See the [Rust SDK documentation](https://docs.tinfoil.sh/sdk/rust-sdk) for complete API usage.
-
-### Chat Completions
-
-```rust
-// Simple chat
-let response = client.chat(vec![
-    ChatMessage::user("What is 2+2?"),
-]).await?;
-
-// Chat with specific model
-let response = client.chat_with_model("qwen3-coder-480b", vec![
-    ChatMessage::system("You are a helpful assistant"),
-    ChatMessage::user("Write a function to sort a vector"),
-], None).await?;
-
-// Chat with tools
-let response = client.chat_with_tools(messages, tools).await?;
-```
-
-### Embeddings
-
-```rust
-let embedding = client.embed("text to embed").await?;
-// Returns Vec<f32> with 768 dimensions
-```
+This library is a drop-in replacement for [async-openai](https://github.com/64bit/async-openai) that can be used with Tinfoil. All methods and types are identical. See the [async-openai documentation](https://docs.rs/async-openai) for complete API usage and documentation.
 
 ## Reporting Vulnerabilities
 
