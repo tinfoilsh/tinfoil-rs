@@ -25,6 +25,7 @@ serde_json = "1"
 sev = { version = "7", default-features = false, features = ["snp", "crypto_nossl"] }
 
 # Crypto primitives
+digest = "0.10"
 sha2 = "0.10"
 x509-cert = { version = "0.2", features = ["sct"] }
 
@@ -77,3 +78,4 @@ time = { version = "0.3", features = ["parsing"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
+hex-literal = "0.4"

@@ -14,6 +14,7 @@ pub mod certificate;
 pub mod dsse;
 pub mod fulcio;
 pub mod keyring;
+pub mod merkle;
 pub mod rekor;
 pub mod transparency;
 pub mod trust;
