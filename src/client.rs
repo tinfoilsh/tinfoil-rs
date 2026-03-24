@@ -3,6 +3,7 @@
 //! After verification, ALL requests are made through a TLS connection that
 //! validates the server certificate fingerprint matches the attested value.
 
+use async_openai::config::OpenAIConfig;
 use crate::error::{Error, Result};
 use crate::verifier::attestation::{self, types::{AttestationDocument, GroundTruth, Measurement}};
 use crate::verifier::sigstore;
@@ -323,6 +324,118 @@ impl SecureClient {
     /// Returns the API key used for authentication.
     pub fn api_key(&self) -> &str {
         &self.api_key
+    }
+}
+
+/// OpenAI-compatible client backed by a verified Tinfoil enclave.
+///
+/// This wraps [`async_openai::Client`] with the enclave's TLS-pinned transport,
+/// matching the Go SDK's pattern where `tinfoil.Client` embeds `*openai.Client`.
+///
+/// All OpenAI methods are available via [`Deref`](std::ops::Deref) — call
+/// `.chat()`, `.embeddings()`, `.audio()` etc. directly on this client.
+///
+/// # Example
+/// ```rust,ignore
+/// use tinfoil::Client;
+/// use async_openai::types::CreateChatCompletionRequestArgs;
+///
+/// let client = Client::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", "api-key").await?;
+///
+/// let request = CreateChatCompletionRequestArgs::default()
+///     .model("model-name")
+///     .messages(vec![/* ... */])
+///     .build()?;
+///
+/// // Streaming
+/// let mut stream = client.chat().create_stream(request.clone()).await?;
+///
+/// // Non-streaming
+/// let response = client.chat().create(request).await?;
+/// ```
+pub struct Client {
+    openai: async_openai::Client<OpenAIConfig>,
+    secure: SecureClient,
+}
+
+impl Client {
+    /// Create a new attested OpenAI client for the given enclave.
+    ///
+    /// This performs full attestation verification before returning:
+    /// Sigstore code provenance, hardware attestation, measurement comparison,
+    /// and TLS certificate pinning.
+    pub async fn new(
+        enclave: impl Into<String>,
+        repo: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> Result<Self> {
+        let api_key = api_key.into();
+        let mut secure = SecureClient::new(enclave, repo, &api_key);
+        secure.verify().await?;
+        Self::from_secure_client(secure, &api_key)
+    }
+
+    /// Create an attested OpenAI client using router discovery.
+    ///
+    /// Discovers available routers, verifies the first one that passes
+    /// attestation, and returns a ready-to-use client.
+    pub async fn new_default(api_key: impl Into<String>) -> Result<Self> {
+        let api_key = api_key.into();
+        let secure = SecureClient::new_default_client(&api_key).await?;
+        Self::from_secure_client(secure, &api_key)
+    }
+
+    /// Create from an already-verified `SecureClient`.
+    fn from_secure_client(secure: SecureClient, api_key: &str) -> Result<Self> {
+        let http = secure.http_client()?.clone();
+        let config = OpenAIConfig::new()
+            .with_api_key(api_key)
+            .with_api_base(format!("{}/v1", secure.base_url()));
+
+        let openai = async_openai::Client::with_config(config).with_http_client(http);
+
+        Ok(Self { openai, secure })
+    }
+
+    /// Re-verify the enclave attestation (e.g. after certificate rotation).
+    ///
+    /// On success, the underlying OpenAI client is replaced with one backed
+    /// by the new pinned transport.
+    pub async fn verify(&mut self) -> Result<&GroundTruth> {
+        self.secure.verify().await?;
+
+        let http = self.secure.http_client()?.clone();
+        let config = OpenAIConfig::new()
+            .with_api_key(self.secure.api_key())
+            .with_api_base(format!("{}/v1", self.secure.base_url()));
+        self.openai = async_openai::Client::with_config(config).with_http_client(http);
+
+        Ok(self.secure.ground_truth().unwrap())
+    }
+
+    /// Returns the underlying `SecureClient` for low-level access.
+    pub fn secure_client(&self) -> &SecureClient {
+        &self.secure
+    }
+
+    /// Returns the enclave hostname.
+    pub fn enclave(&self) -> &str {
+        self.secure.host()
+    }
+
+    /// Returns the pinned `reqwest::Client` for raw HTTP requests to the enclave.
+    pub fn http_client(&self) -> Result<&reqwest::Client> {
+        self.secure.http_client()
+    }
+}
+
+/// Deref to the inner `async_openai::Client`, exposing all OpenAI methods directly.
+/// This mirrors Go's struct embedding where `tinfoil.Client` promotes `*openai.Client`.
+impl std::ops::Deref for Client {
+    type Target = async_openai::Client<OpenAIConfig>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.openai
     }
 }
 

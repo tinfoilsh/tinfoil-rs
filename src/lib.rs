@@ -33,29 +33,29 @@
 //! ## Example
 //!
 //! ```rust,ignore
-//! use tinfoil::SecureClient;
+//! use tinfoil::Client;
+//! use tinfoil::async_openai::types::CreateChatCompletionRequestArgs;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let mut client = SecureClient::new(
+//!     // Attestation + TLS pinning happens automatically in the constructor.
+//!     let client = Client::new(
 //!         "inference.tinfoil.sh",
 //!         "tinfoilsh/confidential-model-router",
 //!         "api-key",
-//!     );
+//!     ).await?;
 //!     
-//!     // verify() attests the enclave and pins TLS to the attested certificate.
-//!     client.verify().await?;
+//!     // All async-openai methods are available directly via Deref.
+//!     let request = CreateChatCompletionRequestArgs::default()
+//!         .model("model-name")
+//!         .messages(vec![/* ... */])
+//!         .build()?;
 //!     
-//!     // Use the pinned HTTP client for requests to the enclave.
-//!     let http = client.http_client()?;
-//!     let resp = http.post(format!("{}/v1/chat/completions", client.base_url()))
-//!         .bearer_auth(client.api_key())
-//!         .json(&serde_json::json!({
-//!             "model": "model-name",
-//!             "messages": [{"role": "user", "content": "Hello!"}]
-//!         }))
-//!         .send()
-//!         .await?;
+//!     // Non-streaming
+//!     let response = client.chat().create(request.clone()).await?;
+//!     
+//!     // Streaming
+//!     let stream = client.chat().create_stream(request).await?;
 //!     
 //!     Ok(())
 //! }
@@ -67,6 +67,7 @@ pub mod discovery;
 pub mod error;
 pub mod verifier;
 
-pub use client::SecureClient;
+pub use async_openai;
+pub use client::{Client, SecureClient};
 pub use error::Error;
 pub use verifier::{GroundTruth, Measurement, PredicateType};

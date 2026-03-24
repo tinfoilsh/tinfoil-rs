@@ -12,6 +12,9 @@ tokio = { version = "1", features = ["full"] }
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
+# OpenAI-compatible API client (injected with our pinned reqwest client)
+async-openai = { version = "0.34", features = ["chat-completion", "embedding", "audio", "responses"] }
+
 # TLS 
 rustls = "0.23"
 webpki-roots = "0.26"
