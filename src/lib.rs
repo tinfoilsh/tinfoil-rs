@@ -37,25 +37,30 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Create client with enclave host and GitHub repo for code provenance
 //!     let mut client = SecureClient::new(
 //!         "inference.tinfoil.sh",
 //!         "tinfoilsh/confidential-model-router",
 //!         "api-key",
 //!     );
 //!     
-//!     // verify() performs all three steps automatically:
-//!     // 1. Sigstore verification (code provenance from GitHub Actions)
-//!     // 2. Hardware attestation (AMD SEV-SNP certificate chain)
-//!     // 3. Measurement comparison (code matches enclave)
-//!     // Then pins TLS to the attested certificate for all future requests.
+//!     // verify() attests the enclave and pins TLS to the attested certificate.
 //!     client.verify().await?;
+//!     
+//!     // Use the pinned HTTP client for requests to the enclave.
+//!     let http = client.http_client()?;
+//!     let resp = http.post(format!("{}/v1/chat/completions", client.base_url()))
+//!         .bearer_auth(client.api_key())
+//!         .json(&serde_json::json!({
+//!             "model": "model-name",
+//!             "messages": [{"role": "user", "content": "Hello!"}]
+//!         }))
+//!         .send()
+//!         .await?;
 //!     
 //!     Ok(())
 //! }
 //! ```
 
-pub mod api;
 pub mod client;
 pub mod constants;
 pub mod discovery;
@@ -64,5 +69,4 @@ pub mod verifier;
 
 pub use client::SecureClient;
 pub use error::Error;
-pub use api::{ChatMessage, ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse};
 pub use verifier::{GroundTruth, Measurement, PredicateType};

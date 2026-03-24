@@ -1,8 +1,6 @@
-//! Integration tests for the Tinfoil API
-//!
-//! Tests that require TINFOIL_API_KEY will skip if the env var is not set.
+//! Integration tests for the Tinfoil secure client
 
-use tinfoil::{ChatMessage, SecureClient};
+use tinfoil::SecureClient;
 
 /// Test client verification flow
 #[tokio::test]
@@ -22,51 +20,8 @@ async fn test_client_verification() {
         !gt.enclave_measurement.registers[0].is_empty(),
         "Should have measurement"
     );
-}
 
-/// Test embedding API (requires valid API key)
-///
-/// Run with: TINFOIL_API_KEY=<key> cargo test test_embedding_api -- --ignored
-#[tokio::test]
-#[ignore = "requires TINFOIL_API_KEY environment variable"]
-async fn test_embedding_api() {
-    let api_key = std::env::var("TINFOIL_API_KEY")
-        .expect("TINFOIL_API_KEY must be set to run this test");
-
-    let mut client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", &api_key);
-
-    let embedding = client
-        .embed("Hello, secure world!")
-        .await
-        .expect("Embedding should succeed");
-
-    assert!(!embedding.is_empty(), "Embedding should not be empty");
-    assert!(embedding.len() > 100, "Embedding should have many dimensions");
-}
-
-/// Test chat API (requires valid API key)
-///
-/// Run with: TINFOIL_API_KEY=<key> cargo test test_chat_api -- --ignored
-#[tokio::test]
-#[ignore = "requires TINFOIL_API_KEY environment variable"]
-async fn test_chat_api() {
-    let api_key = std::env::var("TINFOIL_API_KEY")
-        .expect("TINFOIL_API_KEY must be set to run this test");
-
-    let mut client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", &api_key);
-
-    let response = client
-        .chat(vec![ChatMessage::user(
-            "What is 2+2? Reply with just the number.",
-        )])
-        .await
-        .expect("Chat should succeed");
-
-    assert!(!response.choices.is_empty(), "Should have choices");
-    let content = response.choices[0]
-        .message
-        .content
-        .as_ref()
-        .expect("Should have content");
-    assert!(content.contains('4'), "Response should contain '4': {}", content);
+    // After verification, http_client() should return a usable client
+    assert!(client.http_client().is_ok(), "Should have HTTP client after verification");
+    assert!(!client.base_url().is_empty(), "Should have base URL");
 }

@@ -3,13 +3,10 @@
 //! After verification, ALL requests are made through a TLS connection that
 //! validates the server certificate fingerprint matches the attested value.
 
-use crate::api::{ChatMessage, ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse, Tool};
 use crate::error::{Error, Result};
 use crate::verifier::attestation::{self, types::{AttestationDocument, GroundTruth, Measurement}};
 use crate::verifier::sigstore;
 use crate::verifier::tls;
-
-use crate::constants::DEFAULT_CHAT_MODEL;
 
 /// Secure client for Tinfoil inference with hardware attestation
 /// 
@@ -306,129 +303,26 @@ impl SecureClient {
         Ok(())
     }
     
-    /// Get the HTTP client, ensuring verification has been done
-    fn get_client(&self) -> Result<&reqwest::Client> {
+    /// Returns the underlying `reqwest::Client` pinned to the attested TLS certificate.
+    ///
+    /// All requests through this client validate the server certificate against
+    /// the attested fingerprint. This is the Rust equivalent of Go's `HTTPClient()`
+    /// and Python's `NewSecureClient()`.
+    ///
+    /// Use this to plug into any HTTP-based SDK (e.g. `async-openai`'s
+    /// `Client::with_http_client()`).
+    pub fn http_client(&self) -> Result<&reqwest::Client> {
         self.pinned_client.as_ref().ok_or(Error::NotVerified)
     }
-    
-    /// Ensure client is verified, verify if needed
-    async fn ensure_verified(&mut self) -> Result<()> {
-        if !self.is_verified() {
-            self.verify().await?;
-        }
-        Ok(())
+
+    /// Returns the base URL for API requests to this enclave.
+    pub fn base_url(&self) -> String {
+        format!("https://{}", self.host)
     }
 
-    /// Send a POST request with automatic re-verification on certificate errors.
-    ///
-    /// If the request fails with a connection error (e.g. TLS certificate rotation),
-    /// performs full re-attestation and retries the request once. If re-verification
-    /// fails, the original connection error is returned. This matches the Go SDK's
-    /// `reVerifyingTransport` behavior.
-    async fn send_with_reverify(
-        &mut self,
-        url: &str,
-        body: &(impl serde::Serialize + Sync),
-    ) -> Result<reqwest::Response> {
-        self.ensure_verified().await?;
-
-        // First attempt
-        let first_err = match self.try_send(url, body).await {
-            Ok(resp) => return Ok(resp),
-            Err(e) => e,
-        };
-
-        // Only retry on connection errors (TLS handshake failures from cert rotation)
-        let should_retry = matches!(&first_err, Error::Http(e) if e.is_connect());
-        if !should_retry {
-            return Err(first_err);
-        }
-
-        // Re-verify: full attestation cycle. If this fails, return the original error.
-        if self.verify().await.is_err() {
-            return Err(first_err);
-        }
-
-        // Retry once with the new pinned client
-        self.try_send(url, body).await
-    }
-
-    /// Send a single POST request using the current pinned client.
-    async fn try_send(
-        &self,
-        url: &str,
-        body: &(impl serde::Serialize + Sync),
-    ) -> Result<reqwest::Response> {
-        let client = self.get_client()?;
-        let response = client
-            .post(url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(body)
-            .send()
-            .await?;
-        Ok(response)
-    }
-    
-    /// Make a chat completion request
-    pub async fn chat(&mut self, messages: Vec<ChatMessage>) -> Result<ChatResponse> {
-        self.chat_with_model(DEFAULT_CHAT_MODEL, messages, None).await
-    }
-    
-    /// Make a chat completion request with tools
-    pub async fn chat_with_tools(
-        &mut self,
-        messages: Vec<ChatMessage>,
-        tools: Vec<Tool>,
-    ) -> Result<ChatResponse> {
-        self.chat_with_model(DEFAULT_CHAT_MODEL, messages, Some(tools)).await
-    }
-    
-    /// Make a chat completion request with a specific model
-    pub async fn chat_with_model(
-        &mut self,
-        model: &str,
-        messages: Vec<ChatMessage>,
-        tools: Option<Vec<Tool>>,
-    ) -> Result<ChatResponse> {
-        let mut request = ChatRequest::new(model, messages);
-        if let Some(t) = tools {
-            request = request.with_tools(t);
-        }
-        
-        let url = format!("https://{}/v1/chat/completions", self.host);
-        
-        let response = self.send_with_reverify(&url, &request).await?;
-        
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::Api { status, message: body });
-        }
-        
-        let chat_response: ChatResponse = response.json().await?;
-        Ok(chat_response)
-    }
-    
-    /// Generate an embedding for the given text
-    pub async fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
-        let request = EmbeddingRequest::new(text);
-        let url = format!("https://{}/v1/embeddings", self.host);
-        
-        let response = self.send_with_reverify(&url, &request).await?;
-        
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::Api { status, message: body });
-        }
-        
-        let embed_response: EmbeddingResponse = response.json().await?;
-        
-        embed_response
-            .embedding()
-            .map(|e| e.to_vec())
-            .ok_or(Error::NoEmbedding)
+    /// Returns the API key used for authentication.
+    pub fn api_key(&self) -> &str {
+        &self.api_key
     }
 }
 
@@ -446,6 +340,6 @@ mod tests {
     #[test]
     fn test_not_verified_error() {
         let client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", "test-key");
-        assert!(client.get_client().is_err());
+        assert!(client.http_client().is_err());
     }
 }

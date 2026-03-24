@@ -18,11 +18,5 @@ pub const DEFAULT_ROUTER: &str = "inference.tinfoil.sh";
 /// Default repository for the confidential model router
 pub const DEFAULT_REPO: &str = "tinfoilsh/confidential-model-router";
 
-/// Default chat model
-pub const DEFAULT_CHAT_MODEL: &str = "gpt-oss-120b";
-
-/// Default embedding model
-pub const DEFAULT_EMBED_MODEL: &str = "nomic-embed-text";
-
 /// AMD KDS proxy for VCEK certificate fetching
 pub const KDS_PROXY: &str = "https://kds-proxy.tinfoil.sh";

@@ -49,9 +49,6 @@ pub enum Error {
 
     #[error("API error: HTTP {status}: {message}")]
     Api { status: u16, message: String },
-
-    #[error("No embedding in response")]
-    NoEmbedding,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
