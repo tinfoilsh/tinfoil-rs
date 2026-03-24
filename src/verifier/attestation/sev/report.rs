@@ -48,6 +48,9 @@ pub(super) fn validate_report_structure(report: &[u8]) -> Result<()> {
         )));
     }
 
+    // Report version: 2 = spec rev 1.55, 3 = rev 1.56, 5 = rev 1.58.
+    // Matches go-sev-guest MaxSupportedReportVersion = 5.
+    // Version 4 was never released by AMD.
     let version = u32::from_le_bytes([report[0], report[1], report[2], report[3]]);
     if version < 2 || (version > 3 && version != 5) {
         return Err(Error::AttestationVerification(format!(

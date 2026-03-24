@@ -94,13 +94,24 @@ pub fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::SigstoreVerification("No payload".into()))?;
 
-    let signature_b64 = dsse
+    let signatures = dsse
         .get("signatures")
         .and_then(|s| s.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|sig| sig.get("sig"))
+        .ok_or_else(|| {
+            Error::SigstoreVerification("No signatures array in DSSE envelope".into())
+        })?;
+
+    if signatures.len() != 1 {
+        return Err(Error::SigstoreVerification(format!(
+            "DSSE envelope must have exactly 1 signature, got {}",
+            signatures.len()
+        )));
+    }
+
+    let signature_b64 = signatures[0]
+        .get("sig")
         .and_then(|s| s.as_str())
-        .ok_or_else(|| Error::SigstoreVerification("No signature".into()))?;
+        .ok_or_else(|| Error::SigstoreVerification("No sig field in DSSE signature".into()))?;
 
     // Decode payload (it's base64 in the envelope)
     let payload = decode_b64(payload_b64)
