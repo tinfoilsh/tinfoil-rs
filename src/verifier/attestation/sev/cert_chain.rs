@@ -6,6 +6,7 @@
 //! - Validating certificate CNs and location fields
 //! - RSA-PSS SHA-384 signature verification
 
+use der::Decode;
 use sha2::{Sha256, Sha384, Digest};
 
 use crate::error::{Error, Result};
@@ -116,15 +117,7 @@ fn extract_signature_from_cert(cert_der: &[u8]) -> Result<Vec<u8>> {
     Ok(cert.signature.raw_bytes().to_vec())
 }
 
-/// Check if an OID matches the expected value.
-fn oid_matches(oid: &der::oid::ObjectIdentifier, expected: &[u64]) -> bool {
-    let oid_str = oid.to_string();
-    let expected_str = expected.iter()
-        .map(|n| n.to_string())
-        .collect::<Vec<_>>()
-        .join(".");
-    oid_str == expected_str
-}
+
 
 /// Decode a DER-encoded INTEGER to u8.
 fn decode_der_integer(data: &[u8]) -> Result<u8> {
@@ -144,16 +137,19 @@ fn decode_der_integer(data: &[u8]) -> Result<u8> {
 }
 
 /// Extract extension value by OID from VCEK certificate.
-fn get_vcek_extension(vcek_der: &[u8], target_oid: &[u64]) -> Result<Option<Vec<u8>>> {
-    use x509_cert::Certificate;
+fn get_vcek_extension(
+    vcek_der: &[u8],
+    target_oid: &const_oid::ObjectIdentifier,
+) -> Result<Option<Vec<u8>>> {
     use der::Decode;
+    use x509_cert::Certificate;
 
     let cert = Certificate::from_der(vcek_der)
         .map_err(|e| Error::AttestationVerification(format!("Failed to parse VCEK: {}", e)))?;
 
     if let Some(extensions) = &cert.tbs_certificate.extensions {
         for ext in extensions.iter() {
-            if oid_matches(&ext.extn_id, target_oid) {
+            if ext.extn_id == *target_oid {
                 return Ok(Some(ext.extn_value.as_bytes().to_vec()));
             }
         }
@@ -177,7 +173,7 @@ pub(super) fn validate_vcek_hwid(vcek_der: &[u8], chip_id: &[u8], mask_chip_key:
     }
 
     // Extract HWID from VCEK OID extension
-    let hwid = get_vcek_extension(vcek_der, OID_HWID)?
+    let hwid = get_vcek_extension(vcek_der, &OID_HWID)?
         .ok_or_else(|| Error::AttestationVerification("Missing HWID in VCEK".into()))?;
 
     // HWID must be exactly 64 bytes
@@ -207,7 +203,7 @@ pub(super) fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> 
     let ucode_spl = ((tcb_val >> 56) & 0xFF) as u8;
 
     // Validate BL_SPL
-    let vcek_bl = get_vcek_extension(vcek_der, OID_BL_SPL)?
+    let vcek_bl = get_vcek_extension(vcek_der, &OID_BL_SPL)?
         .ok_or_else(|| Error::AttestationVerification("Missing BL_SPL in VCEK".into()))?;
     let vcek_bl_val = decode_der_integer(&vcek_bl)?;
     if vcek_bl_val != bl_spl {
@@ -217,7 +213,7 @@ pub(super) fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> 
     }
 
     // Validate TEE_SPL
-    let vcek_tee = get_vcek_extension(vcek_der, OID_TEE_SPL)?
+    let vcek_tee = get_vcek_extension(vcek_der, &OID_TEE_SPL)?
         .ok_or_else(|| Error::AttestationVerification("Missing TEE_SPL in VCEK".into()))?;
     let vcek_tee_val = decode_der_integer(&vcek_tee)?;
     if vcek_tee_val != tee_spl {
@@ -227,7 +223,7 @@ pub(super) fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> 
     }
 
     // Validate SNP_SPL
-    let vcek_snp = get_vcek_extension(vcek_der, OID_SNP_SPL)?
+    let vcek_snp = get_vcek_extension(vcek_der, &OID_SNP_SPL)?
         .ok_or_else(|| Error::AttestationVerification("Missing SNP_SPL in VCEK".into()))?;
     let vcek_snp_val = decode_der_integer(&vcek_snp)?;
     if vcek_snp_val != snp_spl {
@@ -237,7 +233,7 @@ pub(super) fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> 
     }
 
     // Validate UCODE_SPL
-    let vcek_ucode = get_vcek_extension(vcek_der, OID_UCODE_SPL)?
+    let vcek_ucode = get_vcek_extension(vcek_der, &OID_UCODE_SPL)?
         .ok_or_else(|| Error::AttestationVerification("Missing UCODE_SPL in VCEK".into()))?;
     let vcek_ucode_val = decode_der_integer(&vcek_ucode)?;
     if vcek_ucode_val != ucode_spl {
@@ -246,19 +242,22 @@ pub(super) fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> 
         )));
     }
 
-    // Validate PRODUCT_NAME is "Genoa" (ASN.1 IA5String: 0x16 0x05 "Genoa")
-    let vcek_product = get_vcek_extension(vcek_der, OID_PRODUCT_NAME)?
+    // Validate PRODUCT_NAME is "Genoa"
+    let vcek_product = get_vcek_extension(vcek_der, &OID_PRODUCT_NAME)?
         .ok_or_else(|| Error::AttestationVerification("Missing PRODUCT_NAME in VCEK".into()))?;
-    // Expected: IA5String tag (0x16), length (0x05), "Genoa"
-    let expected_product = b"\x16\x05Genoa";
-    if vcek_product != expected_product {
+    let product_name = der::asn1::Ia5StringRef::from_der(&vcek_product)
+        .map_err(|e| {
+            Error::AttestationVerification(format!("Invalid PRODUCT_NAME encoding: {}", e))
+        })?;
+    if product_name.as_str() != "Genoa" {
         return Err(Error::AttestationVerification(format!(
-            "VCEK PRODUCT_NAME is not Genoa: {:?}", vcek_product
+            "VCEK PRODUCT_NAME is not Genoa: {:?}",
+            product_name.as_str()
         )));
     }
 
     // Reject if CSP_ID is present (indicates cloud service provider cert, not chip-specific)
-    if get_vcek_extension(vcek_der, OID_CSP_ID)?.is_some() {
+    if get_vcek_extension(vcek_der, &OID_CSP_ID)?.is_some() {
         return Err(Error::AttestationVerification(
             "VCEK contains unexpected CSP_ID extension".into()
         ));
@@ -363,13 +362,13 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
     }
 
     // Public key must be EC with P-384 curve
-    // OID for ecPublicKey: 1.2.840.10045.2.1
-    // OID for secp384r1: 1.3.132.0.34
     let vcek_spki = &vcek_cert.tbs_certificate.subject_public_key_info;
-    const OID_EC_PUBLIC_KEY: &[u64] = &[1, 2, 840, 10045, 2, 1];
-    const OID_SECP384R1: &[u64] = &[1, 3, 132, 0, 34];
+    const OID_EC_PUBLIC_KEY: const_oid::ObjectIdentifier =
+        const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+    const OID_SECP384R1: const_oid::ObjectIdentifier =
+        const_oid::ObjectIdentifier::new_unwrap("1.3.132.0.34");
 
-    if !oid_matches(&vcek_spki.algorithm.oid, OID_EC_PUBLIC_KEY) {
+    if vcek_spki.algorithm.oid != OID_EC_PUBLIC_KEY {
         return Err(Error::AttestationVerification(format!(
             "VCEK public key is not EC: {}", vcek_spki.algorithm.oid
         )));
@@ -377,12 +376,10 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
 
     // Verify curve is P-384 (secp384r1)
     if let Some(params) = &vcek_spki.algorithm.parameters {
-        use der::{Decode, Encode};
-        let params_der = params.to_der()
-            .map_err(|_| Error::AttestationVerification("Failed to encode VCEK curve parameters".into()))?;
-        let curve_oid = der::oid::ObjectIdentifier::from_der(params_der.as_slice())
+        let curve_oid = params
+            .decode_as::<der::asn1::ObjectIdentifier>()
             .map_err(|_| Error::AttestationVerification("Failed to parse VCEK curve OID".into()))?;
-        if !oid_matches(&curve_oid, OID_SECP384R1) {
+        if curve_oid != OID_SECP384R1 {
             return Err(Error::AttestationVerification(format!(
                 "VCEK public key curve is not P-384: {}", curve_oid
             )));

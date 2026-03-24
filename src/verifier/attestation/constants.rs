@@ -167,26 +167,33 @@ pub const POLICY_RESERVED_BIT_17: u64 = 1 << 17;
 // OID arc: 1.3.6.1.4.1.3704.1 (AMD SEV)
 
 /// OID for bootloader SPL (Security Patch Level) in VCEK certificate.
-pub const OID_BL_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 1];
+pub const OID_BL_SPL: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.4.1.3704.1.3.1");
 
 /// OID for TEE SPL in VCEK certificate.
-pub const OID_TEE_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 2];
+pub const OID_TEE_SPL: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.4.1.3704.1.3.2");
 
 /// OID for SNP SPL in VCEK certificate.
-pub const OID_SNP_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 3];
+pub const OID_SNP_SPL: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.4.1.3704.1.3.3");
 
 /// OID for microcode SPL in VCEK certificate.
-pub const OID_UCODE_SPL: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 3, 8];
+pub const OID_UCODE_SPL: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.4.1.3704.1.3.8");
 
 /// OID for hardware ID in VCEK certificate.
-pub const OID_HWID: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 4];
+pub const OID_HWID: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.4.1.3704.1.4");
 
 /// OID for product name in VCEK certificate (e.g., "Genoa").
-pub const OID_PRODUCT_NAME: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 2];
+pub const OID_PRODUCT_NAME: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.4.1.3704.1.2");
 
 /// OID for Cloud Service Provider ID in VCEK certificate.
 /// Presence of this OID indicates a CSP-specific certificate, not chip-specific.
-pub const OID_CSP_ID: &[u64] = &[1, 3, 6, 1, 4, 1, 3704, 1, 5];
+pub const OID_CSP_ID: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.4.1.3704.1.5");
 
 // =============================================================================
 // AMD Root of Trust
