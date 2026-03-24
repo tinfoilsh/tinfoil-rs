@@ -40,9 +40,9 @@ pub(super) fn decode_report(body: &str) -> Result<Vec<u8>> {
 
 /// Validate basic report structure (size and version).
 pub(super) fn validate_report_structure(report: &[u8]) -> Result<()> {
-    if report.len() != REPORT_SIZE {
+    if report.len() < REPORT_SIZE {
         return Err(Error::AttestationVerification(format!(
-            "Invalid report size: expected {}, got {}",
+            "Report too small: expected at least {} bytes, got {}",
             REPORT_SIZE,
             report.len()
         )));
@@ -262,14 +262,19 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_report_structure_wrong_size() {
-        let report = vec![0u8; 100]; // Wrong size
+    fn test_validate_report_structure_too_small() {
+        let report = vec![0u8; 100]; // Too small
         let result = validate_report_structure(&report);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid report size"));
+        assert!(result.unwrap_err().to_string().contains("Report too small"));
+    }
+
+    #[test]
+    fn test_validate_report_structure_larger_accepted() {
+        // Reports larger than REPORT_SIZE should be accepted (trailing bytes ignored)
+        let mut report = create_test_report(2);
+        report.extend_from_slice(&[0u8; 64]); // Append extra bytes
+        assert!(validate_report_structure(&report).is_ok());
     }
 
     // =========================================================================
