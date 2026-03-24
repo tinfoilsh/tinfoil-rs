@@ -423,6 +423,11 @@ impl Client {
         self.secure.host()
     }
 
+    /// Returns the GitHub repository used for code provenance verification.
+    pub fn repo(&self) -> &str {
+        &self.secure.repo
+    }
+
     /// Returns the pinned `reqwest::Client` for raw HTTP requests to the enclave.
     pub fn http_client(&self) -> Result<&reqwest::Client> {
         self.secure.http_client()
