@@ -13,9 +13,6 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    env:
-      TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
-
     steps:
       - uses: actions/checkout@v4
 
@@ -44,6 +41,8 @@ jobs:
 
       - name: Check if API key is available
         id: gate
+        env:
+          TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
         run: |
           if [ -z "$TINFOIL_API_KEY" ]; then
             echo "run=false" >> $GITHUB_OUTPUT
@@ -53,4 +52,6 @@ jobs:
 
       - name: Run API integration tests
         if: steps.gate.outputs.run == 'true'
+        env:
+          TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
         run: cargo test --test '*' --verbose -- --ignored
