@@ -37,7 +37,11 @@ pub(super) async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
     let cache_path = vcek_cache_path("Genoa", &chip_id_hex, tcb_val);
     if let Some(ref path) = cache_path {
         if let Ok(cached) = fs::read(path) {
-            return Ok(cached);
+            if x509_cert::Certificate::from_der(&cached).is_ok() {
+                return Ok(cached);
+            }
+            // Cache corrupted — discard and fall through to network fetch
+            let _ = fs::remove_file(path);
         }
     }
 
