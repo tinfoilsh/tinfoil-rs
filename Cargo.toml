@@ -85,3 +85,4 @@ time = { version = "0.3", features = ["parsing"] }
 [dev-dependencies]
 tokio-test = "0.4"
 hex-literal = "0.4"
+p256 = { version = "0.13", features = ["ecdsa"] }
