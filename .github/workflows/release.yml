@@ -5,15 +5,14 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: Release
+  build:
+    name: Build & Test
     runs-on: ubuntu-latest
 
     steps:
@@ -38,6 +37,16 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked --release --verbose
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Create GitHub Release
         env:
