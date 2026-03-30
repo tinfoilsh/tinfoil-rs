@@ -495,6 +495,259 @@ mod test_verify {
         Ok(())
     }
 
+    #[derive(Debug)]
+    struct ConsistencyTestVector<'a> {
+        size1: u64,
+        size2: u64,
+        proof: &'a [[u8; 32]],
+    }
+
+    #[derive(Debug)]
+    struct ConsistencyProbe<'a> {
+        size1: u64,
+        size2: u64,
+        root1: &'a [u8; 32],
+        root2: &'a [u8; 32],
+        proof: Vec<[u8; 32]>,
+        desc: &'static str,
+    }
+
+    const CONSISTENCY_PROOFS: [ConsistencyTestVector; 5] = [
+        ConsistencyTestVector {
+            size1: 1,
+            size2: 1,
+            proof: &[],
+        },
+        ConsistencyTestVector {
+            size1: 1,
+            size2: 8,
+            proof: &[
+                hex!("96a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7"),
+                hex!("5f083f0a1a33ca076a95279832580db3e0ef4584bdff1f54c8a360f50de3031e"),
+                hex!("6b47aaf29ee3c2af9af889bc1fb9254dabd31177f16232dd6aab035ca39bf6e4"),
+            ],
+        },
+        ConsistencyTestVector {
+            size1: 6,
+            size2: 8,
+            proof: &[
+                hex!("0ebc5d3437fbe2db158b9f126a1d118e308181031d0a949f8dededebc558ef6a"),
+                hex!("ca854ea128ed050b41b35ffc1b87b8eb2bde461e9e3b5596ece6b9d5975a0ae0"),
+                hex!("d37ee418976dd95753c1c73862b9398fa2a2cf9b4ff0fdfe8b30cd95209614b7"),
+            ],
+        },
+        ConsistencyTestVector {
+            size1: 2,
+            size2: 5,
+            proof: &[
+                hex!("5f083f0a1a33ca076a95279832580db3e0ef4584bdff1f54c8a360f50de3031e"),
+                hex!("bc1a0643b12e4d2d7c77918f44e0f4f79a838b6cf9ec5b5c283e1f4d88599e6b"),
+            ],
+        },
+        ConsistencyTestVector {
+            size1: 6,
+            size2: 7,
+            proof: &[
+                hex!("0ebc5d3437fbe2db158b9f126a1d118e308181031d0a949f8dededebc558ef6a"),
+                hex!("b08693ec2e721597130641e8211e7eedccb4c26413963eee6c1e2ed16ffb1a5f"),
+                hex!("d37ee418976dd95753c1c73862b9398fa2a2cf9b4ff0fdfe8b30cd95209614b7"),
+            ],
+        },
+    ];
+
+    fn corrupt_consistency_proof<'a>(
+        size1: u64,
+        size2: u64,
+        root1: &'a [u8; 32],
+        root2: &'a [u8; 32],
+        proof: &[[u8; 32]],
+    ) -> Vec<ConsistencyProbe<'a>> {
+        let ln = proof.len();
+        let mut ret = vec![
+            ConsistencyProbe {
+                size1: size1 - 1,
+                size2,
+                root1,
+                root2,
+                proof: proof.to_vec(),
+                desc: "size1 - 1",
+            },
+            ConsistencyProbe {
+                size1: size1 + 1,
+                size2,
+                root1,
+                root2,
+                proof: proof.to_vec(),
+                desc: "size1 + 1",
+            },
+            ConsistencyProbe {
+                size1: size1 ^ 2,
+                size2,
+                root1,
+                root2,
+                proof: proof.to_vec(),
+                desc: "size1 ^ 2",
+            },
+            ConsistencyProbe {
+                size1,
+                size2: size2 * 2,
+                root1,
+                root2,
+                proof: proof.to_vec(),
+                desc: "size2 * 2",
+            },
+            ConsistencyProbe {
+                size1,
+                size2: size2 / 2,
+                root1,
+                root2,
+                proof: proof.to_vec(),
+                desc: "size2 / 2",
+            },
+            ConsistencyProbe {
+                size1,
+                size2,
+                root1: &ZERO_HASH,
+                root2,
+                proof: proof.to_vec(),
+                desc: "wrong root1",
+            },
+            ConsistencyProbe {
+                size1,
+                size2,
+                root1,
+                root2: &ZERO_HASH,
+                proof: proof.to_vec(),
+                desc: "wrong root2",
+            },
+            ConsistencyProbe {
+                size1,
+                size2,
+                root1: root2,
+                root2: root1,
+                proof: proof.to_vec(),
+                desc: "swapped roots",
+            },
+            ConsistencyProbe {
+                size1,
+                size2,
+                root1,
+                root2,
+                proof: vec![],
+                desc: "empty proof",
+            },
+            ConsistencyProbe {
+                size1,
+                size2,
+                root1,
+                root2,
+                proof: [proof, &[ZERO_HASH]].concat(),
+                desc: "trailing garbage",
+            },
+            ConsistencyProbe {
+                size1,
+                size2,
+                root1,
+                root2,
+                proof: [proof, &[*root1]].concat(),
+                desc: "trailing root1",
+            },
+            ConsistencyProbe {
+                size1,
+                size2,
+                root1,
+                root2,
+                proof: [proof, &[*root2]].concat(),
+                desc: "trailing root2",
+            },
+            ConsistencyProbe {
+                size1,
+                size2,
+                root1,
+                root2,
+                proof: [&[ZERO_HASH], proof].concat(),
+                desc: "preceding garbage",
+            },
+            ConsistencyProbe {
+                size1,
+                size2,
+                root1,
+                root2,
+                proof: [&[*root1], proof].concat(),
+                desc: "preceding root1",
+            },
+            ConsistencyProbe {
+                size1,
+                size2,
+                root1,
+                root2,
+                proof: [&[*root2], proof].concat(),
+                desc: "preceding root2",
+            },
+            ConsistencyProbe {
+                size1,
+                size2,
+                root1,
+                root2,
+                proof: [&[proof[0]], proof].concat(),
+                desc: "preceding proof[0]",
+            },
+        ];
+        if ln > 0 {
+            ret.push(ConsistencyProbe {
+                size1,
+                size2,
+                root1,
+                root2,
+                proof: proof[..ln - 1].to_vec(),
+                desc: "truncated proof",
+            });
+        }
+        ret.extend((0..ln).map(|i| {
+            let mut wrong_proof = proof.to_vec();
+            wrong_proof[i][i] ^= 4;
+            ConsistencyProbe {
+                size1,
+                size2,
+                root1,
+                root2,
+                proof: wrong_proof,
+                desc: "proof with flipped bit",
+            }
+        }));
+        ret
+    }
+
+    fn verifier_consistency_check(
+        size1: u64,
+        size2: u64,
+        proof: &[[u8; 32]],
+        root1: &[u8; 32],
+        root2: &[u8; 32],
+    ) -> Result<(), String> {
+        let proof_hashes = proof.iter().map(|&h| h.into()).collect::<Vec<_>>();
+        Rfc6269Default::verify_consistency(size1, size2, &proof_hashes, root1.into(), root2.into())
+            .map_err(|err| format!("incorrectly rejected with {err:?}"))?;
+        if proof.is_empty() {
+            return Ok(());
+        }
+        for (i, p) in corrupt_consistency_proof(size1, size2, root1, root2, proof)
+            .iter()
+            .enumerate()
+        {
+            Rfc6269Default::verify_consistency(
+                p.size1,
+                p.size2,
+                &p.proof.iter().map(|&h| h.into()).collect::<Vec<_>>(),
+                p.root1.as_slice().into(),
+                p.root2.as_slice().into(),
+            )
+            .err()
+            .ok_or(format!("[{i}] incorrectly accepted: {:?}", p.desc))?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_verify_inclusion_single_entry() {
         let data = b"data";
@@ -557,6 +810,55 @@ mod test_verify {
                 leaf_hash,
             );
             assert!(result.is_err(), "{result:?}")
+        }
+    }
+
+    #[test]
+    fn test_verify_consistency() {
+        let root1 = &[0; 32].into();
+        let root2 = &[1; 32].into();
+        let proof1 = [].as_slice();
+        let proof2 = [SHA256_EMPTY_TREE_HASH.into()];
+        let empty_tree_hash = &SHA256_EMPTY_TREE_HASH.into();
+        let test_cases = [
+            // Same sizes but the root hashes differ.
+            (0, 0, root1, root2, proof1, true),
+            (1, 1, root1, root2, proof1, true),
+            // Sizes that are always consistent.
+            (0, 0, empty_tree_hash, empty_tree_hash, proof1, false),
+            (0, 1, empty_tree_hash, root2, proof1, false),
+            (1, 1, root2, root2, proof1, false),
+            // Time travel to the past.
+            (1, 0, root1, root2, proof1, true),
+            (2, 1, root1, root2, proof1, true),
+            // Empty proof.
+            (1, 2, root1, root2, proof1, true),
+            // Roots don't match with equal size, append-only violated.
+            (0, 0, empty_tree_hash, root2, proof1, true),
+            (1, 1, empty_tree_hash, root2, proof1, true),
+            // Roots match but the proof is not empty.
+            (0, 0, empty_tree_hash, empty_tree_hash, &proof2, true),
+            (0, 1, empty_tree_hash, empty_tree_hash, &proof2, true),
+            (1, 1, empty_tree_hash, empty_tree_hash, &proof2, true),
+        ];
+        for (i, (size1, size2, r1, r2, proof, want_err)) in test_cases.into_iter().enumerate() {
+            let res = Rfc6269Default::verify_consistency(size1, size2, proof, r1, r2);
+            assert_eq!(
+                res.is_err(),
+                want_err,
+                "unexpected proof result {res:?}, case {i}"
+            );
+        }
+
+        for p in CONSISTENCY_PROOFS.into_iter() {
+            let result = verifier_consistency_check(
+                p.size1,
+                p.size2,
+                p.proof,
+                &ROOTS[p.size1 as usize - 1],
+                &ROOTS[p.size2 as usize - 1],
+            );
+            assert!(result.is_ok(), "failed with error: {result:?}");
         }
     }
 }
