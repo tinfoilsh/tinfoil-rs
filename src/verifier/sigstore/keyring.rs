@@ -121,11 +121,16 @@ pub struct Keyring(HashMap<[u8; 32], Key>);
 impl Keyring {
     /// Creates a `Keyring` from DER encoded SPKI-format public keys (no validity periods).
     pub fn new<'a>(keys: impl IntoIterator<Item = &'a [u8]>) -> Result<Self> {
+        let parsed: Vec<Key> = keys
+            .into_iter()
+            .map(Key::new)
+            .collect::<Result<Vec<_>>>()?;
+
         Ok(Self(
-            keys.into_iter()
-                .flat_map(Key::new)
-                .map(|k| Ok((k.fingerprint, k)))
-                .collect::<Result<_>>()?,
+            parsed
+                .into_iter()
+                .map(|k| (k.fingerprint, k))
+                .collect(),
         ))
     }
 
@@ -135,13 +140,18 @@ impl Keyring {
     pub fn new_with_validity<'a>(
         keys: impl IntoIterator<Item = (&'a [u8], Option<u64>, Option<u64>)>,
     ) -> Result<Self> {
+        let parsed: Vec<Key> = keys
+            .into_iter()
+            .map(|(der, from, until)| {
+                Key::new(der).map(|k| k.with_validity(from, until))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
         Ok(Self(
-            keys.into_iter()
-                .flat_map(|(der, from, until)| {
-                    Key::new(der).ok().map(|k| k.with_validity(from, until))
-                })
-                .map(|k| Ok((k.fingerprint, k)))
-                .collect::<Result<_>>()?,
+            parsed
+                .into_iter()
+                .map(|k| (k.fingerprint, k))
+                .collect(),
         ))
     }
 
@@ -202,5 +212,19 @@ mod tests {
         let keyring = Keyring(HashMap::new());
         let result = keyring.verify(&[0u8; 32], &[], &[]);
         assert!(matches!(result, Err(KeyringError::KeyNotFound)));
+    }
+
+    #[test]
+    fn test_keyring_rejects_malformed_key() {
+        let bad_key: &[u8] = &[0x00, 0x01, 0x02, 0x03];
+        let result = Keyring::new([bad_key]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_keyring_with_validity_rejects_malformed_key() {
+        let bad_key: &[u8] = &[0x00, 0x01, 0x02];
+        let result = Keyring::new_with_validity([(bad_key, None, None)]);
+        assert!(result.is_err());
     }
 }
