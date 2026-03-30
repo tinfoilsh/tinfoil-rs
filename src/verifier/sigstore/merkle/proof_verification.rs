@@ -104,6 +104,81 @@ where
         Ok(Box::new(res))
     }
 
+    /// `verify_consistency` checks that the passed-in consistency proof is valid
+    /// between the passed in tree sizes, with respect to the corresponding root
+    /// hashes. Requires `0 <= old_size <= new_size`.
+    fn verify_consistency(
+        old_size: u64,
+        new_size: u64,
+        proof_hashes: &[O],
+        old_root: &O,
+        new_root: &O,
+    ) -> Result<(), MerkleProofError> {
+        use std::cmp::Ordering;
+
+        match (
+            Ord::cmp(&old_size, &new_size),
+            old_size == 0,
+            proof_hashes.is_empty(),
+        ) {
+            (Ordering::Greater, _, _) => {
+                return Err(NewTreeSmaller {
+                    new: new_size,
+                    old: old_size,
+                });
+            }
+            (Ordering::Equal, _, true) => {
+                return Self::verify_match(old_root, new_root).map_err(|_| MismatchedRoot {
+                    got: hex::encode(new_root.as_ref()),
+                    expected: hex::encode(old_root.as_ref()),
+                });
+            }
+            (Ordering::Equal, _, false) | (Ordering::Less, true, false) => {
+                return Err(UnexpectedNonEmptyProof);
+            }
+            (Ordering::Less, true, true) => {
+                return Self::verify_match(old_root, &Self::empty_root())
+                    .map_err(|_| WrongEmptyTreeHash);
+            }
+            (Ordering::Less, false, true) => return Err(UnexpectedEmptyProof),
+            (Ordering::Less, false, false) => {}
+        }
+
+        let shift = old_size.trailing_zeros() as u64;
+        let (inner, border) = Self::decomp_inclusion_proof(old_size - 1, new_size);
+        let inner = inner - shift;
+
+        let (seed, start) = if old_size == 1 << shift {
+            (old_root, 0)
+        } else {
+            (&proof_hashes[0], 1)
+        };
+
+        match (proof_hashes.len() as u64, start + inner + border) {
+            (got, want) if got != want => return Err(WrongProofSize { got, want }),
+            _ => {}
+        }
+
+        let proof = &proof_hashes[start as usize..];
+        let mask = (old_size - 1) >> shift;
+
+        let hash1 = Self::chain_inner_right(seed, &proof[..inner as usize], mask);
+        let hash1 = Self::chain_border_right(&hash1, &proof[inner as usize..]);
+        Self::verify_match(&hash1, old_root).map_err(|_| MismatchedRoot {
+            got: hex::encode(old_root.as_ref()),
+            expected: hex::encode(hash1.as_ref()),
+        })?;
+
+        let hash2 = Self::chain_inner(seed, &proof[..inner as usize], mask);
+        let hash2 = Self::chain_border_right(&hash2, &proof[inner as usize..]);
+        Self::verify_match(&hash2, new_root).map_err(|_| MismatchedRoot {
+            got: hex::encode(new_root.as_ref()),
+            expected: hex::encode(hash2.as_ref()),
+        })?;
+
+        Ok(())
+    }
+
     /// `chain_inner` computes a subtree hash for a node on or below the tree's right
     /// border. Assumes `proof_hashes` are ordered from lower levels to upper, and
     /// `seed` is the initial subtree/leaf hash on the path located at the specified
@@ -119,6 +194,22 @@ where
                     (h, &seed)
                 };
                 Self::hash_children(left, right)
+            })
+    }
+
+    /// `chain_inner_right` computes a subtree hash like `chain_inner`, but only takes
+    /// hashes to the left from the path into consideration, which effectively means
+    /// the result is a hash of the corresponding earlier version of this subtree.
+    fn chain_inner_right(seed: &O, proof_hashes: &[O], index: u64) -> O {
+        proof_hashes
+            .iter()
+            .enumerate()
+            .fold(seed.clone(), |seed, (i, h)| {
+                if ((index >> i) & 1) == 1 {
+                    Self::hash_children(h, seed)
+                } else {
+                    seed
+                }
             })
     }
 
