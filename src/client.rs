@@ -138,6 +138,10 @@ impl SecureClient {
     /// 3. Measurement comparison: ensure enclave runs the expected code
     /// 4. TLS binding: pin all future connections to the attested certificate
     pub async fn verify(&mut self) -> Result<&GroundTruth> {
+        // Clear prior trust state so a failure leaves the client unverified
+        self.pinned_client = None;
+        self.ground_truth = None;
+
         // 1. Obtain code measurement (Sigstore verification or pinned value)
         let (code_measurement, digest) = if let Some(pinned) = &self.pinned_measurement {
             (pinned.clone(), "pinned_no_digest".to_string())
