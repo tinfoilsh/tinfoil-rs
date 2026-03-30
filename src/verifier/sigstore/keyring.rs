@@ -206,6 +206,33 @@ impl Keyring {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p256::ecdsa::{signature::Signer, SigningKey};
+    use x509_cert::spki::EncodePublicKey;
+
+    fn test_signing_key() -> SigningKey {
+        // Well-known test scalar (RFC 6979 A.2.5)
+        SigningKey::from_slice(&hex_literal::hex!(
+            "C9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721"
+        ))
+        .expect("create test signing key")
+    }
+
+    fn test_keyring_and_id() -> (Keyring, [u8; 32]) {
+        let sk = test_signing_key();
+        let vk = sk.verifying_key();
+        let spki_der = vk.to_public_key_der().expect("encode SPKI");
+        let keyring = Keyring::new([spki_der.as_bytes()]).expect("create keyring");
+
+        // Compute key fingerprint (SHA-256 of SPKI DER)
+        let fingerprint: [u8; 32] = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(spki_der.as_bytes());
+            h.finalize().into()
+        };
+
+        (keyring, fingerprint)
+    }
 
     #[test]
     fn test_keyring_key_not_found() {
@@ -226,5 +253,108 @@ mod tests {
         let bad_key: &[u8] = &[0x00, 0x01, 0x02];
         let result = Keyring::new_with_validity([(bad_key, None, None)]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_success() {
+        let sk = test_signing_key();
+        let (keyring, key_id) = test_keyring_and_id();
+        let message = b"some message";
+        let sig: p256::ecdsa::DerSignature = sk.sign(message);
+        assert!(keyring.verify(&key_id, sig.as_bytes(), message).is_ok());
+    }
+
+    #[test]
+    fn test_verify_wrong_key_id() {
+        let sk = test_signing_key();
+        let (keyring, _) = test_keyring_and_id();
+        let message = b"some message";
+        let sig: p256::ecdsa::DerSignature = sk.sign(message);
+        let result = keyring.verify(&[0u8; 32], sig.as_bytes(), message);
+        assert!(matches!(result, Err(KeyringError::KeyNotFound)));
+    }
+
+    #[test]
+    fn test_verify_wrong_payload() {
+        let sk = test_signing_key();
+        let (keyring, key_id) = test_keyring_and_id();
+        let sig: p256::ecdsa::DerSignature = sk.sign(b"some message");
+        let result = keyring.verify(&key_id, sig.as_bytes(), b"different message");
+        assert!(matches!(result, Err(KeyringError::VerificationFailed)));
+    }
+
+    #[test]
+    fn test_verify_wrong_keyring() {
+        let sk = test_signing_key();
+        let message = b"some message";
+        let sig: p256::ecdsa::DerSignature = sk.sign(message);
+
+        // Build a keyring with a different key
+        let other_sk = SigningKey::from_slice(
+            &hex_literal::hex!("0000000000000000000000000000000000000000000000000000000000000001"),
+        )
+        .expect("create other key");
+        let other_vk = other_sk.verifying_key();
+        let other_spki = other_vk.to_public_key_der().expect("encode SPKI");
+        let other_keyring = Keyring::new([other_spki.as_bytes()]).expect("create keyring");
+
+        // The key_id from the original key won't be found in other_keyring
+        let (_, key_id) = test_keyring_and_id();
+        let result = other_keyring.verify(&key_id, sig.as_bytes(), message);
+        assert!(matches!(result, Err(KeyringError::KeyNotFound)));
+    }
+
+    #[test]
+    fn test_verify_at_before_validity() {
+        let sk = test_signing_key();
+        let vk = sk.verifying_key();
+        let spki_der = vk.to_public_key_der().expect("encode SPKI");
+
+        let keyring = Keyring::new_with_validity([(
+            spki_der.as_bytes(),
+            Some(1000),  // valid_from
+            Some(2000),  // valid_until
+        )])
+        .expect("create keyring");
+
+        let fingerprint: [u8; 32] = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(spki_der.as_bytes());
+            h.finalize().into()
+        };
+
+        let message = b"some message";
+        let sig: p256::ecdsa::DerSignature = sk.sign(message);
+
+        let result = keyring.verify_at(&fingerprint, sig.as_bytes(), message, 999);
+        assert!(matches!(result, Err(KeyringError::KeyNotValidAtTime)));
+    }
+
+    #[test]
+    fn test_verify_at_after_validity() {
+        let sk = test_signing_key();
+        let vk = sk.verifying_key();
+        let spki_der = vk.to_public_key_der().expect("encode SPKI");
+
+        let keyring = Keyring::new_with_validity([(
+            spki_der.as_bytes(),
+            Some(1000),
+            Some(2000),
+        )])
+        .expect("create keyring");
+
+        let fingerprint: [u8; 32] = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(spki_der.as_bytes());
+            h.finalize().into()
+        };
+
+        let message = b"some message";
+        let sig: p256::ecdsa::DerSignature = sk.sign(message);
+
+        let result = keyring.verify_at(&fingerprint, sig.as_bytes(), message, 2001);
+        assert!(matches!(result, Err(KeyringError::KeyNotValidAtTime)));
     }
 }
