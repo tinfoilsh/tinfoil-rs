@@ -250,4 +250,155 @@ plAvxwkAIR2jurboJZ4Zm9rNAx8KvA+A5yQFzNkGgKDLjTJrKmSKoIcWV3j7WfdL
             err
         );
     }
+
+    fn parse_test_cert() -> Certificate {
+        let cert_pem = r#"-----BEGIN CERTIFICATE-----
+MIICzDCCAlGgAwIBAgIUF96OLbM9/tDVHKCJliXLTFvnfjAwCgYIKoZIzj0EAwMw
+NzEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MR4wHAYDVQQDExVzaWdzdG9yZS1pbnRl
+cm1lZGlhdGUwHhcNMjMxMjEzMDU1MDU1WhcNMjMxMjEzMDYwMDU1WjAAMFkwEwYH
+KoZIzj0CAQYIKoZIzj0DAQcDQgAEmir+Lah2291zCsLkmREQNLzf99z571BNB+fa
+rerSLGzcwLFK7GRLTGYcO0oStxCYavxRQPMo3JvB8vGtZbn/76OCAXAwggFsMA4G
+A1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAzAdBgNVHQ4EFgQU8U9M
+t9GMrRm8+gifPtc63nlP3OIwHwYDVR0jBBgwFoAU39Ppz1YkEZb5qNjpKFWixi4Y
+ZD8wGwYDVR0RAQH/BBEwD4ENYXNjQHRldHN1by5zaDAsBgorBgEEAYO/MAEBBB5o
+dHRwczovL2dpdGh1Yi5jb20vbG9naW4vb2F1dGgwLgYKKwYBBAGDvzABCAQgDB5o
+dHRwczovL2dpdGh1Yi5jb20vbG9naW4vb2F1dGgwgYkGCisGAQQB1nkCBAIEewR5
+AHcAdQDdPTBqxscRMmMZHhyZZzcCokpeuN48rf+HinKALynujgAAAYxhumYsAAAE
+AwBGMEQCIHRRe20lRrNM4xd07mpjTtgaE6FGS3jjF++zW8ZMnth3AiAd6LVAAeVW
+hSW4T0XJRw9lGU6/EK9+ELZpEjrY03dJ1zAKBggqhkjOPQQDAwNpADBmAjEAiHqK
+W9PQ/5h7VROVIWPaxUo3LhrL2sZanw4bzTDBDY0dRR19ZFzjtAph1RzpQqppAjEA
+plAvxwkAIR2jurboJZ4Zm9rNAx8KvA+A5yQFzNkGgKDLjTJrKmSKoIcWV3j7WfdL
+-----END CERTIFICATE-----"#;
+        let pem = pem::parse(cert_pem).unwrap();
+        Certificate::from_der(pem.contents()).unwrap()
+    }
+
+    /// OID for KeyUsage: 2.5.29.15
+    const KEY_USAGE_OID: &str = "2.5.29.15";
+    /// OID for ExtendedKeyUsage: 2.5.29.37
+    const EXT_KEY_USAGE_OID: &str = "2.5.29.37";
+
+    fn cert_without_extension(oid_to_remove: &str) -> Certificate {
+        let cert = parse_test_cert();
+        let mut tbs = cert.tbs_certificate.clone();
+        tbs.extensions = tbs.extensions.map(|exts| {
+            exts.iter()
+                .filter(|ext| ext.extn_id.to_string() != oid_to_remove)
+                .cloned()
+                .collect()
+        });
+        Certificate {
+            tbs_certificate: tbs,
+            signature_algorithm: cert.signature_algorithm.clone(),
+            signature: cert.signature.clone(),
+        }
+    }
+
+    #[test]
+    fn test_validate_missing_key_usage() {
+        let cert = cert_without_extension(KEY_USAGE_OID);
+        let err = validate_certificate_extensions(&cert).unwrap_err();
+        assert!(
+            err.to_string().contains("KeyUsage"),
+            "Expected KeyUsage error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_missing_ext_key_usage() {
+        let cert = cert_without_extension(EXT_KEY_USAGE_OID);
+        let err = validate_certificate_extensions(&cert).unwrap_err();
+        assert!(
+            err.to_string().contains("ExtendedKeyUsage"),
+            "Expected ExtendedKeyUsage error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_no_digital_signature() {
+        use der::Encode;
+
+        let cert = parse_test_cert();
+        let mut tbs = cert.tbs_certificate.clone();
+
+        // Replace KeyUsage extension with one that has no digitalSignature bit
+        // KeyUsage is a BIT STRING; 0x00 = no bits set
+        let ku_oid: der::asn1::ObjectIdentifier = KEY_USAGE_OID.parse().unwrap();
+        let empty_ku_value = der::asn1::BitString::from_bytes(&[0x00]).unwrap();
+        let empty_ku_der = empty_ku_value.to_der().unwrap();
+
+        tbs.extensions = tbs.extensions.map(|exts| {
+            exts.iter()
+                .map(|ext| {
+                    if ext.extn_id == ku_oid {
+                        x509_cert::ext::Extension {
+                            extn_id: ext.extn_id.clone(),
+                            critical: ext.critical,
+                            extn_value: der::asn1::OctetString::new(empty_ku_der.clone()).unwrap(),
+                        }
+                    } else {
+                        ext.clone()
+                    }
+                })
+                .collect()
+        });
+
+        let modified = Certificate {
+            tbs_certificate: tbs,
+            signature_algorithm: cert.signature_algorithm.clone(),
+            signature: cert.signature.clone(),
+        };
+
+        let err = validate_certificate_extensions(&modified).unwrap_err();
+        assert!(
+            err.to_string().contains("digitalSignature"),
+            "Expected digitalSignature error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_no_code_signing() {
+        use der::Encode;
+
+        let cert = parse_test_cert();
+        let mut tbs = cert.tbs_certificate.clone();
+
+        // Replace ExtendedKeyUsage with one that only has serverAuth (not codeSigning)
+        let eku_oid: der::asn1::ObjectIdentifier = EXT_KEY_USAGE_OID.parse().unwrap();
+        let server_auth_oid: der::asn1::ObjectIdentifier = "1.3.6.1.5.5.7.3.1".parse().unwrap();
+        let eku = ExtendedKeyUsage(vec![server_auth_oid]);
+        let eku_der = eku.to_der().unwrap();
+
+        tbs.extensions = tbs.extensions.map(|exts| {
+            exts.iter()
+                .map(|ext| {
+                    if ext.extn_id == eku_oid {
+                        x509_cert::ext::Extension {
+                            extn_id: ext.extn_id.clone(),
+                            critical: ext.critical,
+                            extn_value: der::asn1::OctetString::new(eku_der.clone()).unwrap(),
+                        }
+                    } else {
+                        ext.clone()
+                    }
+                })
+                .collect()
+        });
+
+        let modified = Certificate {
+            tbs_certificate: tbs,
+            signature_algorithm: cert.signature_algorithm.clone(),
+            signature: cert.signature.clone(),
+        };
+
+        let err = validate_certificate_extensions(&modified).unwrap_err();
+        assert!(
+            err.to_string().contains("codeSigning"),
+            "Expected codeSigning error, got: {}",
+            err
+        );
+    }
 }
