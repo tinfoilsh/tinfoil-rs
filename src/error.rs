@@ -10,7 +10,8 @@
 //! ```
 //!
 //! Use [`is_configuration()`](Error::is_configuration),
-//! [`is_attestation()`](Error::is_attestation), and
+//! [`is_attestation()`](Error::is_attestation),
+//! [`is_retryable()`](Error::is_retryable), and
 //! [`is_api()`](Error::is_api) to classify errors.
 
 use thiserror::Error;
@@ -97,9 +98,44 @@ impl Error {
         matches!(self, Error::Configuration(_))
     }
 
-    /// Returns true if this is an attestation/verification error (can retry).
+    /// Returns true if this is an attestation/verification error.
+    ///
+    /// This includes all non-configuration, non-API errors. Use
+    /// [`is_retryable()`](Error::is_retryable) to check if the error
+    /// is likely transient and worth retrying.
     pub fn is_attestation(&self) -> bool {
-        !self.is_configuration() && !self.is_api()
+        matches!(
+            self,
+            Error::AttestationFetch(_)
+                | Error::AttestationVerification(_)
+                | Error::CertificateMismatch
+                | Error::SigstoreVerification(_)
+                | Error::GitHub(_)
+                | Error::MeasurementMismatch { .. }
+                | Error::Tls(_)
+                | Error::Network(_)
+                | Error::UnsupportedFormat(_)
+                | Error::Http(_)
+                | Error::Json(_)
+                | Error::Base64(_)
+                | Error::Io(_)
+        )
+    }
+
+    /// Returns true if this error is likely transient and the operation
+    /// may succeed on retry.
+    ///
+    /// Network-related errors (fetch failures, HTTP errors, TLS handshake
+    /// failures) are retryable. Parse errors, verification failures, and
+    /// mismatches are permanent.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Error::AttestationFetch(_)
+                | Error::Network(_)
+                | Error::Http(_)
+                | Error::Tls(_)
+        )
     }
 
     /// Returns true if this is an OpenAI API error.
