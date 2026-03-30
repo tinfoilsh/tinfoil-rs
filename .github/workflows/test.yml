@@ -31,13 +31,13 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --locked --verbose
 
       - name: Run unit tests
-        run: cargo test --lib --verbose
+        run: cargo test --locked --lib --verbose
 
       - name: Run integration tests
-        run: cargo test --test '*' --verbose
+        run: cargo test --locked --test '*' --verbose
 
       - name: Check if API key is available
         id: gate
@@ -54,4 +54,4 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         env:
           TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
-        run: cargo test --test '*' --verbose -- --ignored
+        run: cargo test --locked --test '*' --verbose -- --ignored
