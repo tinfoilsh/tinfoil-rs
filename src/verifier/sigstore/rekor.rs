@@ -541,3 +541,191 @@ fn parse_pem_certificate(pem_str: &str) -> Result<Vec<u8>> {
         .map_err(|e| Error::SigstoreVerification(format!("Invalid PEM certificate: {}", e)))?;
     Ok(parsed.into_contents())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BUNDLE_JSON: &str = include_str!("../../../assets/rekor_test_bundle.json");
+
+    // Certificate validity window extracted from the test bundle's certificate.
+    // notBefore=Mar 26 18:04:46 2026 GMT -> 1774548286
+    // notAfter=Mar 26 18:14:46 2026 GMT  -> 1774548886
+    const CERT_NOT_BEFORE: u64 = 1774548286;
+    const CERT_NOT_AFTER: u64 = 1774548886;
+
+    fn parse_bundle() -> serde_json::Value {
+        serde_json::from_str(BUNDLE_JSON).expect("parse test bundle")
+    }
+
+    #[test]
+    fn test_verify_rekor_entry_valid() {
+        let bundle = parse_bundle();
+        assert!(
+            verify_rekor_entry(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_ok(),
+            "valid bundle should pass verification"
+        );
+    }
+
+    #[test]
+    fn test_modified_certificate() {
+        let mut bundle = parse_bundle();
+        // Replace the certificate with a different base64 string
+        bundle["verificationMaterial"]["certificate"]["rawBytes"] =
+            serde_json::Value::String("dGFtcGVyZWQ=".to_string()); // "tampered" in base64
+        assert!(
+            verify_rekor_entry(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_err(),
+            "modified certificate should fail cert binding"
+        );
+    }
+
+    #[test]
+    fn test_modified_signature() {
+        let mut bundle = parse_bundle();
+        // Alter the DSSE signature
+        let sig = bundle["dsseEnvelope"]["signatures"][0]["sig"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Flip a character in the base64 signature
+        let mut tampered = sig.into_bytes();
+        if let Some(b) = tampered.get_mut(10) {
+            *b = if *b == b'A' { b'B' } else { b'A' };
+        }
+        bundle["dsseEnvelope"]["signatures"][0]["sig"] =
+            serde_json::Value::String(String::from_utf8(tampered).unwrap());
+        assert!(
+            verify_rekor_entry(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_err(),
+            "modified signature should fail signature binding"
+        );
+    }
+
+    #[test]
+    fn test_modified_payload() {
+        let mut bundle = parse_bundle();
+        // Tamper with the DSSE payload (changes its hash)
+        let payload = bundle["dsseEnvelope"]["payload"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut tampered = payload.into_bytes();
+        if let Some(b) = tampered.get_mut(5) {
+            *b = if *b == b'A' { b'B' } else { b'A' };
+        }
+        bundle["dsseEnvelope"]["payload"] =
+            serde_json::Value::String(String::from_utf8(tampered).unwrap());
+        assert!(
+            verify_rekor_entry(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_err(),
+            "modified payload should fail payload hash binding"
+        );
+    }
+
+    #[test]
+    fn test_modified_checkpoint() {
+        let mut bundle = parse_bundle();
+        // Corrupt the checkpoint envelope
+        bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["checkpoint"]["envelope"] =
+            serde_json::Value::String("corrupted checkpoint".to_string());
+        assert!(
+            verify_rekor_entry(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_err(),
+            "modified checkpoint should fail checkpoint signature"
+        );
+    }
+
+    #[test]
+    fn test_modified_root_hash() {
+        let mut bundle = parse_bundle();
+        // Swap first and second half of the root hash
+        let root = bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["rootHash"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut tampered = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &root,
+        )
+        .unwrap();
+        // Flip a byte
+        tampered[0] ^= 0xFF;
+        let new_root = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &tampered,
+        );
+        bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["rootHash"] =
+            serde_json::Value::String(new_root);
+        assert!(
+            verify_rekor_entry(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_err(),
+            "modified root hash should fail cross-check"
+        );
+    }
+
+    #[test]
+    fn test_modified_log_index() {
+        let mut bundle = parse_bundle();
+        let idx = bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["logIndex"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let new_idx: u64 = idx.parse::<u64>().unwrap() + 1;
+        bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["logIndex"] =
+            serde_json::Value::String(new_idx.to_string());
+        assert!(
+            verify_rekor_entry(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_err(),
+            "modified log index should fail Merkle inclusion"
+        );
+    }
+
+    #[test]
+    fn test_modified_tree_size() {
+        let mut bundle = parse_bundle();
+        let size = bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["treeSize"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Double the tree size to definitely break the proof decomposition
+        let new_size: u64 = size.parse::<u64>().unwrap() * 2;
+        bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["treeSize"] =
+            serde_json::Value::String(new_size.to_string());
+        assert!(
+            verify_rekor_entry(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_err(),
+            "modified tree size should fail Merkle inclusion"
+        );
+    }
+
+    #[test]
+    fn test_modified_kind_version() {
+        let mut bundle = parse_bundle();
+        bundle["verificationMaterial"]["tlogEntries"][0]["kindVersion"]["kind"] =
+            serde_json::Value::String("hashedrekord".to_string());
+        assert!(
+            verify_rekor_entry(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_err(),
+            "modified kind should fail kind/version check"
+        );
+    }
+
+    #[test]
+    fn test_time_outside_window() {
+        let bundle = parse_bundle();
+        // Set cert validity window that excludes the integrated time
+        // The real integrated time is 1774548286, so set window far in the future
+        assert!(
+            verify_rekor_entry(&bundle, 2000000000, 2000000600).is_err(),
+            "integrated time outside cert window should fail"
+        );
+    }
+
+    #[test]
+    fn test_multiple_tlog_entries() {
+        let mut bundle = parse_bundle();
+        // Duplicate the tlog entry
+        let entry = bundle["verificationMaterial"]["tlogEntries"][0].clone();
+        bundle["verificationMaterial"]["tlogEntries"]
+            .as_array_mut()
+            .unwrap()
+            .push(entry);
+        assert!(
+            verify_rekor_entry(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_err(),
+            "multiple tlog entries should be rejected"
+        );
+    }
+}
