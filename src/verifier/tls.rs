@@ -141,6 +141,7 @@ pub fn create_pinned_client(pinned_fingerprint: &str) -> Result<reqwest::Client>
     // Build reqwest client with this config
     let client = reqwest::Client::builder()
         .use_preconfigured_tls(config)
+        .https_only(true)
         .build()
         .map_err(|e| Error::Tls(format!("Failed to build HTTP client: {}", e)))?;
     
@@ -236,6 +237,14 @@ jaDTSFaq1NIwodHp7X9fOG48uRuJWS8GmifD969sC4Ut2FJFoklceBVUNCHR
         let result = cert_pubkey_fingerprint(&cert);
         assert!(result.is_err(), "Invalid DER should fail");
         assert!(result.unwrap_err().to_string().contains("Failed to parse certificate"));
+    }
+
+    #[tokio::test]
+    async fn test_pinned_client_rejects_http() {
+        let fp = "0".repeat(64);
+        let client = create_pinned_client(&fp).expect("Failed to create client");
+        let result = client.get("http://example.com").send().await;
+        assert!(result.is_err(), "HTTP request should be rejected by https_only");
     }
 
     #[test]
