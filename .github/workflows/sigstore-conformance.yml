@@ -34,7 +34,7 @@ jobs:
         run: cargo build --locked --bin conformance
 
       - name: Run sigstore-conformance
-        uses: sigstore/sigstore-conformance@main
+        uses: sigstore/sigstore-conformance@f725061bb10d8065e506e6fc7022211a24808f6e
         with:
           entrypoint: ${{ github.workspace }}/target/debug/conformance
           skip-signing: true
