@@ -45,7 +45,7 @@ impl std::fmt::Display for MerkleProofError {
     }
 }
 
-pub(crate) trait MerkleProofVerifier<O>: Rfc6269HasherTrait<O>
+pub trait MerkleProofVerifier<O>: Rfc6269HasherTrait<O>
 where
     O: Eq + AsRef<[u8]> + Clone + Debug,
 {

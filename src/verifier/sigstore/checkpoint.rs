@@ -77,7 +77,7 @@ pub enum ParseCheckpointError {
 impl SignedCheckpoint {
     /// Decode from the signed note format used by Rekor for envelopes.
     /// See https://github.com/transparency-dev/formats/blob/2de64aa755f08489bda36125786ced79688af872/log/README.md#signed-envelope
-    pub(crate) fn decode(s: &str) -> Result<Self> {
+    pub fn decode(s: &str) -> Result<Self> {
         let checkpoint = s.trim_start_matches('"').trim_end_matches('"');
 
         let Some((note, sigs)) = checkpoint.split_once("\n\n") else {
@@ -87,7 +87,7 @@ impl SignedCheckpoint {
         };
 
         let signatures: Vec<CheckpointSignature> = sigs
-            .split("\n\n")
+            .lines()
             .filter(|s| !s.trim().is_empty())
             .map(CheckpointSignature::decode)
             .collect::<std::result::Result<_, _>>()?;
@@ -119,7 +119,7 @@ impl SignedCheckpoint {
 
     /// Verify that at least one of the checkpoint's signatures is valid.
     /// The signed message is the marshaled note body (which already ends with a newline).
-    pub(crate) fn verify_signature(&self, key_der: &[u8], key_type: &str) -> Result<()> {
+    pub fn verify_signature(&self, key_der: &[u8], key_type: &str) -> Result<()> {
         let message = self.note.marshal();
         let message_bytes = message.as_bytes();
 
@@ -143,7 +143,7 @@ impl SignedCheckpoint {
 impl Checkpoint {
     /// Marshal the note body.
     /// See https://github.com/transparency-dev/formats/blob/2de64aa755f08489bda36125786ced79688af872/log/README.md#checkpoint-body
-    pub(crate) fn marshal(&self) -> String {
+    pub fn marshal(&self) -> String {
         let hash_b64 = BASE64_STANDARD.encode(self.hash);
         let other_content: String = self.other_content.iter().fold(String::new(), |mut acc, c| {
             writeln!(acc, "{c}").expect("failed to write to string");
