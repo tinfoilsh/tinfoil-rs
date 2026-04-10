@@ -187,6 +187,44 @@ pub fn load_ctlog_keyring() -> Result<Keyring> {
     .map_err(|e| Error::SigstoreVerification(format!("Failed to create CT log keyring: {}", e)))
 }
 
+/// Load Certificate Transparency log keyring from a trusted root JSON string.
+pub fn load_ctlog_keyring_from_json(json: &str) -> Result<Keyring> {
+    let root: TrustedRoot = serde_json::from_str(json)
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse trusted root: {}", e)))?;
+
+    let mut keys_with_validity: Vec<(Vec<u8>, Option<u64>, Option<u64>)> = Vec::new();
+    for ctlog in root.ctlogs {
+        if ctlog.public_key.key_details != "PKIX_ECDSA_P256_SHA_256" {
+            continue;
+        }
+        let public_key_der = decode_b64(&ctlog.public_key.raw_bytes).map_err(|e| {
+            Error::SigstoreVerification(format!("Failed to decode CT log key: {}", e))
+        })?;
+
+        let (valid_from, valid_until) = match &ctlog.public_key.valid_for {
+            Some(vf) => {
+                let from = parse_rfc3339_to_unix(&vf.start)?;
+                let until = vf
+                    .end
+                    .as_ref()
+                    .map(|e| parse_rfc3339_to_unix(e))
+                    .transpose()?;
+                (Some(from), until)
+            }
+            None => (None, None),
+        };
+
+        keys_with_validity.push((public_key_der, valid_from, valid_until));
+    }
+
+    Keyring::new_with_validity(
+        keys_with_validity
+            .iter()
+            .map(|(der, from, until)| (der.as_slice(), *from, *until)),
+    )
+    .map_err(|e| Error::SigstoreVerification(format!("Failed to create CT log keyring: {}", e)))
+}
+
 /// Load Fulcio Certificate Authorities from embedded trust root.
 pub fn load_fulcio_cas() -> Result<Vec<FulcioCa>> {
     load_fulcio_cas_from_json(TRUSTED_ROOT_JSON)

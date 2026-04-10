@@ -27,6 +27,7 @@ use tinfoil::verifier::sigstore::checkpoint::SignedCheckpoint;
 use tinfoil::verifier::sigstore::dsse::compute_pae;
 use tinfoil::verifier::sigstore::merkle::rfc6962::Rfc6269HasherTrait;
 use tinfoil::verifier::sigstore::merkle::{MerkleProofVerifier, Rfc6269Default};
+use tinfoil::verifier::sigstore::transparency;
 use tinfoil::verifier::sigstore::trust;
 use tinfoil::verifier::util::decode_b64;
 
@@ -192,7 +193,12 @@ fn verify_bundle(args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("Certificate validation: {e}"))?;
     }
 
-    // 9. Verify Rekor transparency log entry
+    // 9. Verify SCTs (Signed Certificate Timestamps) for cert-based verification
+    if let Some(ref cert_bytes) = cert_der {
+        verify_scts(cert_bytes, &tr_json)?;
+    }
+
+    // 10. Verify Rekor transparency log entry
     verify_rekor_entry(
         &bundle,
         &tr_json,
@@ -201,12 +207,12 @@ fn verify_bundle(args: &[String]) -> Result<(), String> {
         has_dsse,
     )?;
 
-    // 10. Verify Fulcio certificate chain (cert-based only)
+    // 11. Verify Fulcio certificate chain (cert-based only)
     if let Some(ref cert_bytes) = cert_der {
         verify_fulcio_chain(cert_bytes, &tr_json)?;
     }
 
-    // 11. Verify artifact digest matches bundle content
+    // 12. Verify artifact digest matches bundle content
     verify_artifact_digest(&bundle, &artifact_sha256, has_msg_sig, &vargs.artifact)?;
 
     Ok(())
@@ -1209,6 +1215,70 @@ fn verify_payload_hash_binding(bundle: &serde_json::Value, body: &[u8]) -> Resul
         ));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SCT (Signed Certificate Timestamp) verification
+// ---------------------------------------------------------------------------
+
+fn verify_scts(cert_der: &[u8], trusted_root_json: &str) -> Result<(), String> {
+    let cert =
+        Certificate::from_der(cert_der).map_err(|e| format!("Parse cert for SCT: {e}"))?;
+
+    // Find the issuer SPKI from the Fulcio CAs in the trusted root
+    let fulcio_cas = trust::load_fulcio_cas_from_json(trusted_root_json)
+        .map_err(|e| format!("Load Fulcio CAs for SCT: {e}"))?;
+
+    let issuer_spki_der = fulcio_cas
+        .iter()
+        .filter(|ca| !ca.cert_chain_der.is_empty())
+        .find_map(|ca| {
+            let issuer_cert = Certificate::from_der(&ca.cert_chain_der[0]).ok()?;
+            if cert.tbs_certificate.issuer == issuer_cert.tbs_certificate.subject {
+                use der::Encode;
+                issuer_cert
+                    .tbs_certificate
+                    .subject_public_key_info
+                    .to_der()
+                    .ok()
+            } else {
+                None
+            }
+        })
+        .ok_or("Could not find issuer certificate for SCT verification")?;
+
+    // Parse all SCTs from the certificate
+    let all_scts = transparency::CertificateEmbeddedSCT::all_from_cert(&cert, &issuer_spki_der)
+        .map_err(|e| format!("Failed to extract SCTs: {e}"))?;
+
+    // Reject duplicate SCTs (same log ID)
+    let mut seen_log_ids = std::collections::HashSet::new();
+    for sct in &all_scts {
+        if !seen_log_ids.insert(sct.log_id()) {
+            return Err("Duplicate SCT found (same log ID)".into());
+        }
+    }
+
+    // Load CT log keyring from the provided trusted root
+    let ct_keyring = trust::load_ctlog_keyring_from_json(trusted_root_json)
+        .map_err(|e| format!("Load CT log keyring: {e}"))?;
+
+    // Try each SCT - succeed if at least one verifies
+    let mut last_err = None;
+    for sct in &all_scts {
+        match transparency::verify_sct(sct, &ct_keyring) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    Err(format!(
+        "No valid SCT found ({} SCTs checked). Last error: {}",
+        all_scts.len(),
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "no SCTs in certificate".into())
+    ))
 }
 
 // ---------------------------------------------------------------------------
