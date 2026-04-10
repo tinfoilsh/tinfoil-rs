@@ -103,7 +103,12 @@ pub struct RekorKey {
 
 /// Load Rekor public keys from embedded trust root.
 pub fn load_rekor_keys() -> Result<Vec<RekorKey>> {
-    let root: TrustedRoot = serde_json::from_str(TRUSTED_ROOT_JSON)
+    load_rekor_keys_from_json(TRUSTED_ROOT_JSON)
+}
+
+/// Load Rekor public keys from a trusted root JSON string.
+pub fn load_rekor_keys_from_json(json: &str) -> Result<Vec<RekorKey>> {
+    let root: TrustedRoot = serde_json::from_str(json)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to parse trusted root: {}", e)))?;
 
     let mut keys = Vec::new();
@@ -184,7 +189,12 @@ pub fn load_ctlog_keyring() -> Result<Keyring> {
 
 /// Load Fulcio Certificate Authorities from embedded trust root.
 pub fn load_fulcio_cas() -> Result<Vec<FulcioCa>> {
-    let root: TrustedRoot = serde_json::from_str(TRUSTED_ROOT_JSON)
+    load_fulcio_cas_from_json(TRUSTED_ROOT_JSON)
+}
+
+/// Load Fulcio Certificate Authorities from a trusted root JSON string.
+pub fn load_fulcio_cas_from_json(json: &str) -> Result<Vec<FulcioCa>> {
+    let root: TrustedRoot = serde_json::from_str(json)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to parse trusted root: {}", e)))?;
 
     let mut cas = Vec::new();

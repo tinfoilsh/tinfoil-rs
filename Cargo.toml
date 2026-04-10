@@ -29,7 +29,7 @@ sev = { version = "7", default-features = false, features = ["snp", "crypto_noss
 
 # Crypto primitives
 digest = "0.10"
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["oid"] }
 x509-cert = { version = "0.2", features = ["sct"] }
 
 # TLS encoding for SCT verification (used by x509-cert's sct feature)
@@ -81,6 +81,10 @@ time = { version = "0.3", features = ["parsing"] }
 # NOTE: sigstore-rs 0.13.0 uses Rust 2024 edition with let-chains (stabilized in 1.88.0)
 # which don't compile on Rust 1.87. We implement verification manually in src/sigstore.rs.
 # sigstore = { version = "0.13", default-features = false, features = ["verify", "cert", "rekor", "rustls-tls"] }
+
+[[bin]]
+name = "conformance"
+path = "src/bin/conformance.rs"
 
 [dev-dependencies]
 tokio-test = "0.4"
