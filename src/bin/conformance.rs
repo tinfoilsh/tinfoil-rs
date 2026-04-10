@@ -525,7 +525,9 @@ fn decode_asn1_string(bytes: &[u8]) -> Option<String> {
     if let Ok(s) = der::asn1::PrintableStringRef::from_der(bytes) {
         return Some(s.to_string());
     }
-    None
+    // Fallback: older Fulcio V1 certificates stored the OIDC issuer as raw
+    // UTF-8 bytes without an ASN.1 tag wrapper.
+    std::str::from_utf8(bytes).ok().map(|s| s.to_string())
 }
 
 // ---------------------------------------------------------------------------

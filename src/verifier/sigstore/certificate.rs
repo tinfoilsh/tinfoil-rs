@@ -117,7 +117,9 @@ fn decode_asn1_string(bytes: &[u8]) -> Option<String> {
     if let Ok(s) = der::asn1::PrintableStringRef::from_der(bytes) {
         return Some(s.to_string());
     }
-    None
+    // Fallback: older Fulcio V1 certificates stored the OIDC issuer as raw
+    // UTF-8 bytes without an ASN.1 tag wrapper.
+    std::str::from_utf8(bytes).ok().map(|s| s.to_string())
 }
 
 /// Extract certificate info (OIDC issuer, workflow, repository) from a Fulcio certificate.
@@ -207,9 +209,19 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_asn1_string_invalid_tag() {
-        // Invalid tag
-        let bytes = [0x30, 0x04, b't', b'e', b's', b't'];
+    fn test_decode_asn1_string_raw_utf8_fallback() {
+        // Raw UTF-8 bytes without ASN.1 tag (as used by older Fulcio V1 certs)
+        let url = b"https://github.com/login/oauth";
+        assert_eq!(
+            decode_asn1_string(url),
+            Some("https://github.com/login/oauth".to_string())
+        );
+    }
+
+    #[test]
+    fn test_decode_asn1_string_invalid_utf8() {
+        // Invalid UTF-8 bytes
+        let bytes = [0xFF, 0xFE, 0x00, 0x01];
         assert_eq!(decode_asn1_string(&bytes), None);
     }
 
