@@ -10,6 +10,16 @@ use p256::ecdsa::{
     signature::{hazmat::PrehashVerifier, Verifier as _},
     Signature as P256Signature, VerifyingKey,
 };
+
+/// Curve OID constants
+const OID_P256: &str = "1.2.840.10045.3.1.7";
+const OID_P384: &str = "1.3.132.0.34";
+
+/// Public key info: raw bytes + curve OID string
+struct PubKeyInfo {
+    raw_bytes: Vec<u8>,
+    curve_oid: Option<String>,
+}
 use sha2::{Digest, Sha256};
 use x509_cert::Certificate;
 
@@ -282,23 +292,41 @@ fn verify_message_signature(
         .ok_or("Missing messageDigest.digest")?;
     let digest_bytes = decode_b64(digest_b64).map_err(|e| format!("Decode digest: {e}"))?;
 
-    // Get public key from cert or key file
-    let pubkey_bytes = get_verifying_key_bytes(bundle, cert_der, key_path)?;
+    let key_info = get_verifying_key_info(bundle, cert_der, key_path)?;
 
-    // Verify signature over the pre-hashed digest (ECDSA signs the hash, not raw data)
-    let verifying_key = VerifyingKey::from_sec1_bytes(&pubkey_bytes)
-        .map_err(|e| format!("Invalid public key: {e}"))?;
-
-    let signature = if sig_bytes.first() == Some(&0x30) {
-        P256Signature::from_der(&sig_bytes)
-    } else {
-        P256Signature::from_slice(&sig_bytes)
+    match key_info.curve_oid.as_deref() {
+        Some(OID_P384) => {
+            let verifying_key =
+                p384::ecdsa::VerifyingKey::from_sec1_bytes(&key_info.raw_bytes)
+                    .map_err(|e| format!("Invalid P384 public key: {e}"))?;
+            let signature = if sig_bytes.first() == Some(&0x30) {
+                p384::ecdsa::Signature::from_der(&sig_bytes)
+            } else {
+                p384::ecdsa::Signature::from_slice(&sig_bytes)
+            }
+            .map_err(|e| format!("Invalid signature: {e}"))?;
+            p384::ecdsa::signature::hazmat::PrehashVerifier::verify_prehash(
+                &verifying_key,
+                &digest_bytes,
+                &signature,
+            )
+            .map_err(|e| format!("Message signature verification failed: {e}"))
+        }
+        _ => {
+            // Default to P256
+            let verifying_key = VerifyingKey::from_sec1_bytes(&key_info.raw_bytes)
+                .map_err(|e| format!("Invalid public key: {e}"))?;
+            let signature = if sig_bytes.first() == Some(&0x30) {
+                P256Signature::from_der(&sig_bytes)
+            } else {
+                P256Signature::from_slice(&sig_bytes)
+            }
+            .map_err(|e| format!("Invalid signature: {e}"))?;
+            verifying_key
+                .verify_prehash(&digest_bytes, &signature)
+                .map_err(|e| format!("Message signature verification failed: {e}"))
+        }
     }
-    .map_err(|e| format!("Invalid signature: {e}"))?;
-
-    verifying_key
-        .verify_prehash(&digest_bytes, &signature)
-        .map_err(|e| format!("Message signature verification failed: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -339,45 +367,66 @@ fn verify_dsse_signature(
 
     let pae = compute_pae(payload_type, &payload);
 
-    let pubkey_bytes = get_verifying_key_bytes(bundle, cert_der, key_path)?;
-    let verifying_key = VerifyingKey::from_sec1_bytes(&pubkey_bytes)
-        .map_err(|e| format!("Invalid public key: {e}"))?;
+    let key_info = get_verifying_key_info(bundle, cert_der, key_path)?;
 
-    let signature = if sig_bytes.first() == Some(&0x30) {
-        P256Signature::from_der(&sig_bytes)
-    } else {
-        P256Signature::from_slice(&sig_bytes)
+    match key_info.curve_oid.as_deref() {
+        Some(OID_P384) => {
+            let verifying_key =
+                p384::ecdsa::VerifyingKey::from_sec1_bytes(&key_info.raw_bytes)
+                    .map_err(|e| format!("Invalid P384 public key: {e}"))?;
+            let signature = if sig_bytes.first() == Some(&0x30) {
+                p384::ecdsa::Signature::from_der(&sig_bytes)
+            } else {
+                p384::ecdsa::Signature::from_slice(&sig_bytes)
+            }
+            .map_err(|e| format!("Invalid DSSE signature: {e}"))?;
+            p384::ecdsa::signature::Verifier::verify(&verifying_key, &pae, &signature)
+                .map_err(|e| format!("DSSE signature verification failed: {e}"))
+        }
+        _ => {
+            // Default to P256
+            let verifying_key = VerifyingKey::from_sec1_bytes(&key_info.raw_bytes)
+                .map_err(|e| format!("Invalid public key: {e}"))?;
+            let signature = if sig_bytes.first() == Some(&0x30) {
+                P256Signature::from_der(&sig_bytes)
+            } else {
+                P256Signature::from_slice(&sig_bytes)
+            }
+            .map_err(|e| format!("Invalid DSSE signature: {e}"))?;
+            verifying_key
+                .verify(&pae, &signature)
+                .map_err(|e| format!("DSSE signature verification failed: {e}"))
+        }
     }
-    .map_err(|e| format!("Invalid DSSE signature: {e}"))?;
-
-    verifying_key
-        .verify(&pae, &signature)
-        .map_err(|e| format!("DSSE signature verification failed: {e}"))
 }
 
 // ---------------------------------------------------------------------------
 // Public key extraction
 // ---------------------------------------------------------------------------
 
-fn get_verifying_key_bytes(
+fn get_verifying_key_info(
     bundle: &serde_json::Value,
     cert_der: Option<&[u8]>,
     key_path: Option<&str>,
-) -> Result<Vec<u8>, String> {
+) -> Result<PubKeyInfo, String> {
     if let Some(cert_bytes) = cert_der {
         let cert =
             Certificate::from_der(cert_bytes).map_err(|e| format!("Parse certificate: {e}"))?;
-        Ok(cert
-            .tbs_certificate
-            .subject_public_key_info
-            .subject_public_key
-            .raw_bytes()
-            .to_vec())
+        let spki = &cert.tbs_certificate.subject_public_key_info;
+        let curve_oid = spki
+            .algorithm
+            .parameters
+            .as_ref()
+            .and_then(|p| p.decode_as::<der::asn1::ObjectIdentifier>().ok())
+            .map(|oid| oid.to_string());
+        Ok(PubKeyInfo {
+            raw_bytes: spki.subject_public_key.raw_bytes().to_vec(),
+            curve_oid,
+        })
     } else if let Some(path) = key_path {
         let pem_str = fs::read_to_string(path).map_err(|e| format!("Read key file: {e}"))?;
         let parsed = pem::parse(&pem_str).map_err(|e| format!("Parse PEM key: {e}"))?;
-        // SPKI-encoded public key - extract the raw key bytes
-        extract_ec_pubkey_from_spki(&parsed.into_contents())
+        extract_ec_pubkey_info_from_spki(&parsed.into_contents())
     } else if let Some(_hint) = bundle
         .get("verificationMaterial")
         .and_then(|vm| vm.get("publicKey"))
@@ -390,10 +439,19 @@ fn get_verifying_key_bytes(
     }
 }
 
-fn extract_ec_pubkey_from_spki(spki_der: &[u8]) -> Result<Vec<u8>, String> {
+fn extract_ec_pubkey_info_from_spki(spki_der: &[u8]) -> Result<PubKeyInfo, String> {
     let spki = x509_cert::spki::SubjectPublicKeyInfoRef::from_der(spki_der)
         .map_err(|e| format!("Parse SPKI: {e}"))?;
-    Ok(spki.subject_public_key.raw_bytes().to_vec())
+    let curve_oid = spki
+        .algorithm
+        .parameters
+        .as_ref()
+        .and_then(|p| p.decode_as::<der::asn1::ObjectIdentifier>().ok())
+        .map(|oid| oid.to_string());
+    Ok(PubKeyInfo {
+        raw_bytes: spki.subject_public_key.raw_bytes().to_vec(),
+        curve_oid,
+    })
 }
 
 // ---------------------------------------------------------------------------
