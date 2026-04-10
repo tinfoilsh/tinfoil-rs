@@ -39,12 +39,10 @@ jobs:
           entrypoint: ${{ github.workspace }}/target/debug/conformance
           skip-signing: true
           # Tests expected to fail due to unimplemented features:
-          # - invalid-ct-key_fail: SCT verification not implemented
           # - integrated-time-in-future_fail: SET (signed entry timestamp) verification not implemented
           # - checkpoint-bad-keyhint_fail: checkpoint key hint validation not implemented
           # - rekor2-timestamp-*_fail: TSA certificate chain validation not implemented
           xfail: >-
-            *invalid-ct-key_fail*
             *integrated-time-in-future_fail*
             *checkpoint-bad-keyhint_fail*
             *rekor2-timestamp-payload-mismatch_fail*
