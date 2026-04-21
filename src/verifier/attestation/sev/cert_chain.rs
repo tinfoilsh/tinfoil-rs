@@ -19,6 +19,43 @@ fn vcek_cache_path(product: &str, chip_id_hex: &str, reported_tcb: u64) -> Optio
     Some(cache_dir.join(filename))
 }
 
+/// Create the cache directory with user-only permissions on Unix.
+fn create_cache_dir(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
+/// Write a file with user-only permissions on Unix.
+fn write_user_only(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(data)?;
+        f.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, data)
+    }
+}
+
 /// Fetch VCEK certificate from AMD KDS via Tinfoil's proxy, with disk caching.
 pub(super) async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
     use crate::verifier::util::fetch_with_retry;
@@ -66,13 +103,15 @@ pub(super) async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
         .map_err(|e| Error::AttestationVerification(format!("Failed to read VCEK: {}", e)))?
         .to_vec();
 
-    // Write to cache (atomic: write tmp then rename)
+    // Write to cache (atomic: write tmp then rename) with user-only permissions.
     if let Some(ref path) = cache_path {
         if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+            let _ = create_cache_dir(parent);
             let tmp = path.with_extension("tmp");
-            if fs::write(&tmp, &vcek_der).is_ok() {
-                let _ = fs::rename(&tmp, path);
+            if write_user_only(&tmp, &vcek_der).is_ok() {
+                if fs::rename(&tmp, path).is_err() {
+                    let _ = fs::remove_file(&tmp);
+                }
             }
         }
     }
