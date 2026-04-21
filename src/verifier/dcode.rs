@@ -14,30 +14,52 @@ use data_encoding::BASE32_NOPAD;
 
 /// Decode a dcode-encoded value from DNS SAN entries.
 ///
-/// Filters SANs containing `.<prefix>.`, extracts the indexed base32 chunks
-/// from the leftmost label, sorts by index, concatenates, and base32-decodes.
+/// Only SANs whose **second** DNS label is exactly `<prefix>` are considered a
+/// match (e.g. `00ABCD.hpke.example.com` matches prefix `hpke`, but
+/// `ok.hpkex.example.com` or `foo.a.hpke.bar.example.com` do not). The leftmost
+/// label must be `NN<base32-chunk>` where `NN` is a two-digit zero-padded index
+/// and the chunk is non-empty base32.
 ///
-/// Returns `None` if no matching SANs are found or decoding fails.
+/// Malformed SANs that look like they were meant to match (right prefix label
+/// but wrong chunk shape) are skipped silently so that a single stray entry
+/// does not poison decoding of valid entries.
+///
+/// Returns `None` if no matching SANs are found or the concatenated chunks
+/// fail base32 decoding.
 pub fn decode_from_sans(sans: &[&str], prefix: &str) -> Option<Vec<u8>> {
-    let pattern = format!(".{}.", prefix);
-
-    // Collect (index, base32_chunk) pairs from matching SANs
     let mut chunks: Vec<(u32, String)> = Vec::new();
 
     for san in sans {
-        if !san.contains(&pattern) {
+        let mut labels = san.split('.');
+        let first_label = match labels.next() {
+            Some(l) => l,
+            None => continue,
+        };
+        let second_label = match labels.next() {
+            Some(l) => l,
+            None => continue,
+        };
+
+        if second_label != prefix {
             continue;
         }
 
-        // The leftmost DNS label contains: NN<base32-chunk>
-        let first_label = san.split('.').next()?;
+        // Leftmost label must be NN<base32-chunk> with non-empty chunk.
         if first_label.len() < 3 {
-            // Need at least 2 chars for index + 1 char of data
+            continue;
+        }
+        let (index_str, chunk) = first_label.split_at(2);
+        if !index_str.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let index: u32 = match index_str.parse() {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+        if chunk.is_empty() {
             continue;
         }
 
-        let index: u32 = first_label[..2].parse().ok()?;
-        let chunk = &first_label[2..];
         chunks.push((index, chunk.to_uppercase()));
     }
 
@@ -45,11 +67,13 @@ pub fn decode_from_sans(sans: &[&str], prefix: &str) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Sort by index and concatenate
+    // Reject duplicate indices to catch malformed/ambiguous SAN sets.
     chunks.sort_by_key(|(idx, _)| *idx);
-    let combined: String = chunks.into_iter().map(|(_, chunk)| chunk).collect();
+    if chunks.windows(2).any(|w| w[0].0 == w[1].0) {
+        return None;
+    }
 
-    // Base32 decode (RFC 4648, no padding)
+    let combined: String = chunks.into_iter().map(|(_, chunk)| chunk).collect();
     BASE32_NOPAD.decode(combined.as_bytes()).ok()
 }
 
@@ -102,5 +126,43 @@ mod tests {
         // Only decode hpke entries
         let result = decode_from_sans(&sans, "hpke");
         assert_eq!(result, Some(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn test_decode_rejects_prefix_substring() {
+        // "hpkex" is not an exact label match for "hpke".
+        let sans = vec!["00NBSWY3DP.hpkex.example.com"];
+        let result = decode_from_sans(&sans, "hpke");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_decode_requires_prefix_in_second_label() {
+        // Prefix label must be the SAN's second DNS label, not buried later.
+        let sans = vec!["00NBSWY3DP.foo.hpke.example.com"];
+        let result = decode_from_sans(&sans, "hpke");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_decode_rejects_duplicate_indices() {
+        let sans = vec!["00NBSWY3DP.hpke.example.com", "00O5XXE3DE.hpke.example.com"];
+        let result = decode_from_sans(&sans, "hpke");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_decode_skips_malformed_and_keeps_valid() {
+        // Malformed first label "xxABCD" should be skipped, not poison decode.
+        let sans = vec!["xxNBSWY3DP.hpke.example.com", "00NBSWY3DP.hpke.example.com"];
+        let result = decode_from_sans(&sans, "hpke");
+        assert_eq!(result, Some(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn test_decode_rejects_empty_chunk() {
+        let sans = vec!["00.hpke.example.com"];
+        let result = decode_from_sans(&sans, "hpke");
+        assert_eq!(result, None);
     }
 }
