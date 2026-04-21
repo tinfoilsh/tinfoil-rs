@@ -111,8 +111,8 @@ async fn test_fetch_routers() {
 
     assert!(!routers.is_empty(), "Should have at least one router");
     assert!(
-        routers[0].ends_with(".tinfoil.sh"),
-        "Router should end with .tinfoil.sh: {}",
+        routers[0].ends_with(".tinfoil.sh") || routers[0].ends_with(".tinfoil.dev"),
+        "Router should end with .tinfoil.sh or .tinfoil.dev: {}",
         routers[0]
     );
 }
