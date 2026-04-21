@@ -52,10 +52,12 @@ pub fn find_issuer_spki(cert: &Certificate) -> Result<Vec<u8>> {
 
 /// Verify that the signing certificate was issued by a trusted Fulcio CA.
 ///
-/// This validates:
-/// 1. The certificate's issuer matches a Fulcio CA's subject
-/// 2. The certificate's signature was created by the Fulcio CA
-/// 3. The CA was valid at the time the certificate was issued
+/// This walks the full embedded Fulcio chain, not just the nearest issuer:
+/// 1. The CA was valid at the time the signing cert was issued.
+/// 2. The signing cert's issuer matches the first chain cert's subject.
+/// 3. Each `chain[i]` is signed by `chain[i+1]` (issuer/subject + signature).
+/// 4. The last cert in the chain is a self-signed root (subject == issuer,
+///    self-signature verifies).
 pub fn verify_fulcio_chain(cert_der: &[u8], cert_not_before: u64) -> Result<()> {
     let signing_cert = Certificate::from_der(cert_der).map_err(|e| {
         Error::SigstoreVerification(format!("Failed to parse signing certificate: {}", e))
@@ -63,9 +65,7 @@ pub fn verify_fulcio_chain(cert_der: &[u8], cert_not_before: u64) -> Result<()> 
 
     let fulcio_cas = trust::load_fulcio_cas()?;
 
-    // Try each Fulcio CA
     for ca in &fulcio_cas {
-        // Check if CA was valid when the signing cert was issued
         if cert_not_before < ca.valid_from {
             continue;
         }
@@ -74,54 +74,104 @@ pub fn verify_fulcio_chain(cert_der: &[u8], cert_not_before: u64) -> Result<()> 
                 continue;
             }
         }
-
-        // The first certificate in the chain is the intermediate that signs leaf certs
         if ca.cert_chain_der.is_empty() {
             continue;
         }
 
-        let issuer_cert = Certificate::from_der(&ca.cert_chain_der[0]).map_err(|e| {
-            Error::SigstoreVerification(format!("Failed to parse Fulcio CA cert: {}", e))
-        })?;
-
-        // Verify issuer DN matches
-        if signing_cert.tbs_certificate.issuer != issuer_cert.tbs_certificate.subject {
-            continue;
-        }
-
-        // Get the TBS (to-be-signed) certificate bytes and signature
-        let tbs_bytes = signing_cert
-            .tbs_certificate
-            .to_der()
-            .map_err(|e| Error::SigstoreVerification(format!("Failed to encode TBS: {}", e)))?;
-        let sig_bytes = signing_cert.signature.raw_bytes();
-
-        // Determine the issuer's key curve from SPKI algorithm parameters
-        let issuer_spki = &issuer_cert.tbs_certificate.subject_public_key_info;
-        let issuer_pubkey_bytes = issuer_spki.subject_public_key.raw_bytes();
-
-        let curve_oid = issuer_spki
-            .algorithm
-            .parameters
-            .as_ref()
-            .and_then(|p| p.decode_as::<der::asn1::ObjectIdentifier>().ok())
-            .map(|oid| oid.to_string());
-
-        // Dispatch to the correct verifier based on curve
-        let verified = match curve_oid.as_deref() {
-            Some(OID_SECP256R1) => verify_ecdsa_p256(&tbs_bytes, sig_bytes, issuer_pubkey_bytes),
-            Some(OID_SECP384R1) => verify_ecdsa_p384(&tbs_bytes, sig_bytes, issuer_pubkey_bytes),
-            _ => continue, // Unsupported curve, try next CA
-        };
-
-        if verified {
-            return Ok(());
+        match verify_against_chain(&signing_cert, &ca.cert_chain_der) {
+            Ok(()) => return Ok(()),
+            Err(_) => continue,
         }
     }
 
     Err(Error::SigstoreVerification(
         "Certificate not issued by any trusted Fulcio CA".into(),
     ))
+}
+
+/// Verify `leaf` against a Fulcio-style chain `[intermediate(s)..., root]`.
+fn verify_against_chain(leaf: &Certificate, chain_der: &[Vec<u8>]) -> Result<()> {
+    // Parse all chain certificates up front.
+    let chain_certs: Vec<Certificate> = chain_der
+        .iter()
+        .map(|der| {
+            Certificate::from_der(der).map_err(|e| {
+                Error::SigstoreVerification(format!("Failed to parse Fulcio chain cert: {}", e))
+            })
+        })
+        .collect::<Result<_>>()?;
+
+    // Step 1: leaf signed by chain[0].
+    verify_issued_by(leaf, &chain_certs[0], "signing certificate")?;
+
+    // Step 2: walk the chain.
+    for i in 0..chain_certs.len() - 1 {
+        verify_issued_by(
+            &chain_certs[i],
+            &chain_certs[i + 1],
+            "Fulcio chain certificate",
+        )?;
+    }
+
+    // Step 3: final cert must be a self-signed root.
+    let root = chain_certs.last().unwrap();
+    if root.tbs_certificate.subject != root.tbs_certificate.issuer {
+        return Err(Error::SigstoreVerification(
+            "Fulcio chain does not end in a self-signed root".into(),
+        ));
+    }
+    verify_issued_by(root, root, "Fulcio root certificate")?;
+
+    Ok(())
+}
+
+/// Verify that `child` was signed by `issuer` (DN match + cryptographic signature).
+fn verify_issued_by(
+    child: &Certificate,
+    issuer: &Certificate,
+    context: &str,
+) -> Result<()> {
+    if child.tbs_certificate.issuer != issuer.tbs_certificate.subject {
+        return Err(Error::SigstoreVerification(format!(
+            "{} issuer DN does not match issuer subject",
+            context
+        )));
+    }
+
+    let tbs_bytes = child
+        .tbs_certificate
+        .to_der()
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to encode TBS: {}", e)))?;
+    let sig_bytes = child.signature.raw_bytes();
+
+    let issuer_spki = &issuer.tbs_certificate.subject_public_key_info;
+    let issuer_pubkey_bytes = issuer_spki.subject_public_key.raw_bytes();
+
+    let curve_oid = issuer_spki
+        .algorithm
+        .parameters
+        .as_ref()
+        .and_then(|p| p.decode_as::<der::asn1::ObjectIdentifier>().ok())
+        .map(|oid| oid.to_string());
+
+    let verified = match curve_oid.as_deref() {
+        Some(OID_SECP256R1) => verify_ecdsa_p256(&tbs_bytes, sig_bytes, issuer_pubkey_bytes),
+        Some(OID_SECP384R1) => verify_ecdsa_p384(&tbs_bytes, sig_bytes, issuer_pubkey_bytes),
+        _ => {
+            return Err(Error::SigstoreVerification(format!(
+                "{} issuer uses unsupported curve",
+                context
+            )))
+        }
+    };
+
+    if !verified {
+        return Err(Error::SigstoreVerification(format!(
+            "{} signature did not verify against issuer",
+            context
+        )));
+    }
+    Ok(())
 }
 
 /// Verify ECDSA P-256 signature over TBS certificate bytes.
