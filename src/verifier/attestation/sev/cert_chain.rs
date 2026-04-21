@@ -572,27 +572,106 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
     let ark_pubkey = extract_pubkey_from_cert(ark_der)?;
     let ark_tbs = extract_tbs_from_cert(ark_der)?;
     let ark_sig = extract_signature_from_cert(ark_der)?;
-    verify_rsa_pss_signature(&ark_tbs, &ark_sig, &ark_pubkey, "ARK self-signature")?;
+    let ark_salt = parse_rsa_pss_sha384_salt_len(&ark_cert.signature_algorithm, "ARK")?;
+    verify_rsa_pss_signature(&ark_tbs, &ark_sig, &ark_pubkey, ark_salt, "ARK self-signature")?;
 
     // === STEP 4: Verify ASK signature against ARK ===
     let ask_tbs = extract_tbs_from_cert(ask_der)?;
     let ask_sig = extract_signature_from_cert(ask_der)?;
-    verify_rsa_pss_signature(&ask_tbs, &ask_sig, &ark_pubkey, "ASK signature")?;
+    let ask_salt = parse_rsa_pss_sha384_salt_len(&ask_cert.signature_algorithm, "ASK")?;
+    verify_rsa_pss_signature(&ask_tbs, &ask_sig, &ark_pubkey, ask_salt, "ASK signature")?;
 
     // === STEP 5: Verify VCEK signature against ASK ===
     let ask_pubkey = extract_pubkey_from_cert(ask_der)?;
     let vcek_tbs = extract_tbs_from_cert(vcek_der)?;
     let vcek_sig = extract_signature_from_cert(vcek_der)?;
-    verify_rsa_pss_signature(&vcek_tbs, &vcek_sig, &ask_pubkey, "VCEK signature")?;
+    let vcek_salt = parse_rsa_pss_sha384_salt_len(&vcek_cert.signature_algorithm, "VCEK")?;
+    verify_rsa_pss_signature(&vcek_tbs, &vcek_sig, &ask_pubkey, vcek_salt, "VCEK signature")?;
 
     Ok(())
 }
 
-/// Verify an RSA-PSS SHA-384 signature.
+/// OID for `rsassa-pss` (RFC 8017 §A.2.3).
+const OID_RSASSA_PSS: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.10");
+
+/// OID for `id-mgf1` (RFC 8017 §A.2.1).
+const OID_MGF1: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.8");
+
+/// OID for `sha384` (NIST).
+const OID_SHA_384: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.2");
+
+/// Validate that an AMD certificate is signed with RSASSA-PSS using SHA-384 for
+/// both the hash and MGF1, and return the declared salt length.
+///
+/// AMD certs have historically used salt_len = hash_len (48 bytes) but we don't
+/// hard-code that here; we accept whatever the cert declares (bounded by 255,
+/// the ASN.1 `INTEGER` bound in `RsaPssParams::salt_len`).
+fn parse_rsa_pss_sha384_salt_len(
+    alg: &x509_cert::spki::AlgorithmIdentifierOwned,
+    cert_name: &str,
+) -> Result<usize> {
+    use der::{Decode, Encode};
+    use rsa::pkcs1::RsaPssParams;
+
+    if alg.oid != OID_RSASSA_PSS {
+        return Err(Error::AttestationVerification(format!(
+            "{} certificate signature algorithm is not RSASSA-PSS: {}",
+            cert_name, alg.oid
+        )));
+    }
+
+    let params_any = alg.parameters.as_ref().ok_or_else(|| {
+        Error::AttestationVerification(format!(
+            "{} RSASSA-PSS parameters are absent",
+            cert_name
+        ))
+    })?;
+
+    let params_der = params_any.to_der().map_err(|e| {
+        Error::AttestationVerification(format!(
+            "{} RSASSA-PSS parameters DER re-encode failed: {}",
+            cert_name, e
+        ))
+    })?;
+
+    let params = RsaPssParams::from_der(&params_der).map_err(|e| {
+        Error::AttestationVerification(format!(
+            "{} RSASSA-PSS parameters decode failed: {}",
+            cert_name, e
+        ))
+    })?;
+
+    if params.hash.oid != OID_SHA_384 {
+        return Err(Error::AttestationVerification(format!(
+            "{} RSASSA-PSS hash algorithm is not SHA-384: {}",
+            cert_name, params.hash.oid
+        )));
+    }
+    if params.mask_gen.oid != OID_MGF1 {
+        return Err(Error::AttestationVerification(format!(
+            "{} RSASSA-PSS mask generation function is not MGF1: {}",
+            cert_name, params.mask_gen.oid
+        )));
+    }
+    if params.mask_gen.parameters.as_ref().map(|p| p.oid) != Some(OID_SHA_384) {
+        return Err(Error::AttestationVerification(format!(
+            "{} RSASSA-PSS MGF1 hash algorithm is not SHA-384",
+            cert_name
+        )));
+    }
+
+    Ok(params.salt_len as usize)
+}
+
+/// Verify an RSA-PSS SHA-384 signature with a caller-supplied salt length.
 fn verify_rsa_pss_signature(
     tbs_der: &[u8],
     signature: &[u8],
     signer_spki_der: &[u8],
+    salt_len: usize,
     context: &str,
 ) -> Result<()> {
     use rsa::RsaPublicKey;
@@ -600,18 +679,15 @@ fn verify_rsa_pss_signature(
     use rsa::signature::Verifier;
     use rsa::pkcs8::DecodePublicKey;
 
-    // Parse RSA public key from SPKI DER
     let rsa_pubkey = RsaPublicKey::from_public_key_der(signer_spki_der)
         .map_err(|e| Error::AttestationVerification(format!("Invalid RSA public key for {}: {}", context, e)))?;
 
-    // Create PSS verifier with SHA-384
-    let verifying_key: VerifyingKey<Sha384> = VerifyingKey::new(rsa_pubkey);
+    let verifying_key: VerifyingKey<Sha384> =
+        VerifyingKey::new_with_salt_len(rsa_pubkey, salt_len);
 
-    // Parse signature
     let sig = Signature::try_from(signature)
         .map_err(|e| Error::AttestationVerification(format!("Invalid signature format for {}: {}", context, e)))?;
 
-    // Verify
     verifying_key.verify(tbs_der, &sig)
         .map_err(|e| Error::AttestationVerification(format!("{} verification failed: {}", context, e)))?;
 
