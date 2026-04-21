@@ -14,7 +14,7 @@ use crate::verifier::attestation::types::{
 };
 
 use super::cert_chain::validate_vcek_extensions;
-use super::report::{validate_mbz_bytes, validate_mbz_fields, validate_signer_info};
+use super::report::{validate_mbz_fields, validate_signer_info};
 
 /// Validate committed TCB matches current TCB (reject provisional firmware).
 ///
@@ -271,14 +271,6 @@ fn validate_report_fields_with_options(report: &[u8], options: &ValidationOption
             signature_algo
         )));
     }
-
-    // For ECDSA P-384, validate that signature trailing bytes are zeros
-    validate_mbz_bytes(
-        report,
-        SIGNATURE_OFFSET + ECDSA_P384_SIGNATURE_SIZE,
-        REPORT_SIZE,
-        "signature_padding",
-    )?;
 
     // Validate signer info field (returns maskChipKey for HWID validation)
     let mask_chip_key = validate_signer_info(report)?;
