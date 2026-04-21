@@ -90,3 +90,4 @@ path = "src/bin/conformance.rs"
 tokio-test = "0.4"
 hex-literal = "0.4"
 p256 = { version = "0.13", features = ["ecdsa"] }
+futures-util = "0.3"

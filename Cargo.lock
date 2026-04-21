@@ -2090,6 +2090,7 @@ dependencies = [
  "ecdsa",
  "ed25519-dalek",
  "flate2",
+ "futures-util",
  "hex",
  "hex-literal",
  "p256",
