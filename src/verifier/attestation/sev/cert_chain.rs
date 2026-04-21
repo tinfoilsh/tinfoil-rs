@@ -579,6 +579,81 @@ fn verify_rsa_pss_signature(
     Ok(())
 }
 
+/// Decode an X.509 `DirectoryString`-like attribute value into a Rust string.
+///
+/// Per RFC 5280 §4.1.2.4 the string attributes we care about (C, ST, L, O, OU, CN)
+/// are encoded as one of the ASN.1 string types below. We decode them explicitly
+/// by tag rather than relying on the raw value bytes, so we never confuse the
+/// ASN.1 length prefix or a stray leading byte with the actual content.
+fn decode_directory_string(value: &der::Any) -> Result<String> {
+    use der::asn1::{Ia5StringRef, PrintableStringRef, TeletexStringRef, Utf8StringRef};
+    use der::{Tag, Tagged};
+
+    match value.tag() {
+        Tag::Utf8String => Utf8StringRef::try_from(value)
+            .map(|s| s.as_str().to_string())
+            .map_err(|e| Error::AttestationVerification(format!("Invalid UTF8String: {}", e))),
+        Tag::PrintableString => PrintableStringRef::try_from(value)
+            .map(|s| s.as_str().to_string())
+            .map_err(|e| Error::AttestationVerification(format!("Invalid PrintableString: {}", e))),
+        Tag::Ia5String => Ia5StringRef::try_from(value)
+            .map(|s| s.as_str().to_string())
+            .map_err(|e| Error::AttestationVerification(format!("Invalid IA5String: {}", e))),
+        Tag::TeletexString => TeletexStringRef::try_from(value)
+            .map(|s| s.as_str().to_string())
+            .map_err(|e| Error::AttestationVerification(format!("Invalid TeletexString: {}", e))),
+        other => Err(Error::AttestationVerification(format!(
+            "Unsupported X.509 name attribute tag: {:?}",
+            other
+        ))),
+    }
+}
+
+/// Extract a single attribute value by OID from an X.509 `Name`.
+fn extract_name_attr(
+    name: &x509_cert::name::Name,
+    oid: &der::oid::ObjectIdentifier,
+) -> Option<Result<String>> {
+    for rdn in name.0.iter() {
+        for atv in rdn.0.iter() {
+            if &atv.oid == oid {
+                return Some(decode_directory_string(&atv.value));
+            }
+        }
+    }
+    None
+}
+
+fn require_name_attr(
+    name: &x509_cert::name::Name,
+    oid: &der::oid::ObjectIdentifier,
+    cert_name: &str,
+    attr_label: &str,
+    expected: &str,
+) -> Result<()> {
+    let value = extract_name_attr(name, oid)
+        .ok_or_else(|| {
+            Error::AttestationVerification(format!(
+                "{} certificate missing {} attribute",
+                cert_name, attr_label
+            ))
+        })?
+        .map_err(|e| {
+            Error::AttestationVerification(format!(
+                "{} certificate has invalid {} attribute: {}",
+                cert_name, attr_label, e
+            ))
+        })?;
+
+    if value != expected {
+        return Err(Error::AttestationVerification(format!(
+            "{} certificate {} is not {:?}: {:?}",
+            cert_name, attr_label, expected, value
+        )));
+    }
+    Ok(())
+}
+
 /// Validate that a certificate's subject/issuer has AMD's expected location fields.
 ///
 /// AMD certificates should have:
@@ -588,87 +663,20 @@ fn verify_rsa_pss_signature(
 /// - Organization: Advanced Micro Devices
 /// - Organizational Unit: Engineering
 fn validate_amd_location(name: &x509_cert::name::Name, cert_name: &str) -> Result<()> {
-    use x509_cert::der::oid::db::rfc4519::{C, ST, L, O, OU};
-    use der::asn1::Utf8StringRef;
-    use der::{Decode, Encode};
+    use x509_cert::der::oid::db::rfc4519::{C, L, O, OU, ST};
 
-    fn extract_attr(name: &x509_cert::name::Name, oid: &der::oid::ObjectIdentifier) -> Option<String> {
-        for rdn in name.0.iter() {
-            for atv in rdn.0.iter() {
-                if &atv.oid == oid {
-                    let value_bytes = atv.value.value();
-                    if let Ok(s) = Utf8StringRef::from_der(atv.value.to_der().unwrap_or_default().as_slice()) {
-                        return Some(s.as_str().to_string());
-                    }
-                    if let Ok(s) = std::str::from_utf8(value_bytes) {
-                        return Some(s.to_string());
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    let country = extract_attr(name, &C);
-    let state = extract_attr(name, &ST);
-    let locality = extract_attr(name, &L);
-    let org = extract_attr(name, &O);
-    let org_unit = extract_attr(name, &OU);
-
-    if country.as_deref() != Some("US") {
-        return Err(Error::AttestationVerification(format!(
-            "{} certificate country is not US: {:?}", cert_name, country
-        )));
-    }
-    if state.as_deref() != Some("CA") {
-        return Err(Error::AttestationVerification(format!(
-            "{} certificate state is not CA: {:?}", cert_name, state
-        )));
-    }
-    if locality.as_deref() != Some("Santa Clara") {
-        return Err(Error::AttestationVerification(format!(
-            "{} certificate locality is not Santa Clara: {:?}", cert_name, locality
-        )));
-    }
-    if org.as_deref() != Some("Advanced Micro Devices") {
-        return Err(Error::AttestationVerification(format!(
-            "{} certificate organization is not Advanced Micro Devices: {:?}", cert_name, org
-        )));
-    }
-    if org_unit.as_deref() != Some("Engineering") {
-        return Err(Error::AttestationVerification(format!(
-            "{} certificate organizational unit is not Engineering: {:?}", cert_name, org_unit
-        )));
-    }
-
+    require_name_attr(name, &C, cert_name, "country", "US")?;
+    require_name_attr(name, &ST, cert_name, "state", "CA")?;
+    require_name_attr(name, &L, cert_name, "locality", "Santa Clara")?;
+    require_name_attr(name, &O, cert_name, "organization", "Advanced Micro Devices")?;
+    require_name_attr(name, &OU, cert_name, "organizational unit", "Engineering")?;
     Ok(())
 }
 
 /// Extract Common Name from X.509 Name.
 fn extract_cn(name: &x509_cert::name::Name) -> Result<String> {
     use x509_cert::der::oid::db::rfc4519::CN;
-    use der::asn1::Utf8StringRef;
-    use der::{Decode, Encode};
 
-    for rdn in name.0.iter() {
-        for atv in rdn.0.iter() {
-            if atv.oid == CN {
-                let value_bytes = atv.value.value();
-
-                // Try to decode as UTF8String first
-                if let Ok(s) = Utf8StringRef::from_der(atv.value.to_der().unwrap_or_default().as_slice()) {
-                    return Ok(s.as_str().to_string());
-                }
-
-                // Fallback: treat the raw value as UTF-8
-                if let Ok(s) = std::str::from_utf8(value_bytes) {
-                    return Ok(s.to_string());
-                }
-
-                return Err(Error::AttestationVerification("CN value is not valid UTF-8".into()));
-            }
-        }
-    }
-
-    Err(Error::AttestationVerification("No CN found in certificate".into()))
+    extract_name_attr(name, &CN)
+        .ok_or_else(|| Error::AttestationVerification("No CN found in certificate".into()))?
 }
