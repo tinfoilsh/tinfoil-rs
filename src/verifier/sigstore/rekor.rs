@@ -159,6 +159,13 @@ pub fn verify_rekor_entry(
         .and_then(|s| s.parse::<u64>().ok())
         .ok_or_else(|| Error::SigstoreVerification("Missing treeSize in inclusion proof".into()))?;
 
+    if signed_checkpoint.note.size != tree_size {
+        return Err(Error::SigstoreVerification(format!(
+            "Inclusion proof contains invalid tree size: signed checkpoint has {}, inclusion proof has {}",
+            signed_checkpoint.note.size, tree_size
+        )));
+    }
+
     // Get Merkle proof hashes
     let proof_hashes: Vec<Vec<u8>> = inclusion_proof
         .get("hashes")
