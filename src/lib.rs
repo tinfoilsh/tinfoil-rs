@@ -34,7 +34,7 @@
 //!
 //! ```rust,ignore
 //! use tinfoil::Client;
-//! use tinfoil::async_openai::types::CreateChatCompletionRequestArgs;
+//! use tinfoil::chat::{ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -44,19 +44,25 @@
 //!         "tinfoilsh/confidential-model-router",
 //!         "api-key",
 //!     ).await?;
-//!     
+//!
 //!     // All async-openai methods are available directly via Deref.
 //!     let request = CreateChatCompletionRequestArgs::default()
-//!         .model("model-name")
-//!         .messages(vec![/* ... */])
+//!         .model("gpt-oss-120b")
+//!         .messages(vec![ChatCompletionRequestUserMessageArgs::default()
+//!             .content("Hello!")
+//!             .build()?
+//!             .into()])
 //!         .build()?;
-//!     
+//!
 //!     // Non-streaming
 //!     let response = client.chat().create(request.clone()).await?;
-//!     
+//!
 //!     // Streaming
 //!     let stream = client.chat().create_stream(request).await?;
-//!     
+//!
+//!     // Audio transcription lives one level deeper than `chat()` —
+//!     // the canonical chain is `client.audio().transcription().create(...)`.
+//!     // See [`Client::transcribe`] for a one-call shortcut.
 //!     Ok(())
 //! }
 //! ```
@@ -75,3 +81,15 @@ pub use async_openai;
 pub use client::{Client, SecureClient};
 pub use error::Error;
 pub use verifier::{GroundTruth, Measurement, PredicateType};
+
+/// Re-export of `async_openai::types::chat`.
+///
+/// Lets users write `tinfoil::chat::CreateChatCompletionRequestArgs` instead
+/// of digging through `async_openai::types::chat::...`.
+pub use async_openai::types::chat;
+
+/// Re-export of `async_openai::types::audio`.
+pub use async_openai::types::audio;
+
+/// Re-export of `async_openai::types::embeddings`.
+pub use async_openai::types::embeddings;
