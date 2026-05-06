@@ -67,6 +67,7 @@
 pub mod client;
 pub mod constants;
 pub mod error;
+pub mod math;
 pub mod multimodal;
 pub mod relaxed;
 pub mod verifier;
