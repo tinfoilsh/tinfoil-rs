@@ -161,11 +161,6 @@ fn validate_platform_info(report_info: &SnpPlatformInfo, required: &SnpPlatformI
     }
 
     // Required capabilities (report must have these if required mandates them)
-    if required.smt_enabled && !report_info.smt_enabled {
-        return Err(Error::AttestationVerification(
-            "SMT required but not enabled on platform".into(),
-        ));
-    }
     if required.tsme_enabled && !report_info.tsme_enabled {
         return Err(Error::AttestationVerification(
             "TSME required but not enabled on platform".into(),
