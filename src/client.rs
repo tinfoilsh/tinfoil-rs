@@ -448,14 +448,7 @@ impl Client {
         self.secure.http_client()
     }
 
-    /// Convenience shortcut for `client.audio().transcription().create(request)`.
-    ///
-    /// The async-openai audio handler is split into sub-handlers
-    /// (`transcription()`, `translation()`, `speech()`, ...) so the canonical
-    /// transcription call has an extra layer that's easy to miss. This wrapper
-    /// keeps the common case to a single method call without hiding the
-    /// underlying API — the typed response and error type come straight from
-    /// async-openai.
+    /// Shortcut for `client.audio().transcription().create(request)`.
     pub async fn transcribe(
         &self,
         request: async_openai::types::audio::CreateTranscriptionRequest,
@@ -464,6 +457,52 @@ impl Client {
         async_openai::error::OpenAIError,
     > {
         self.openai.audio().transcription().create(request).await
+    }
+
+    /// Embed a single string and return its vector.
+    pub async fn embed(
+        &self,
+        model: impl Into<String>,
+        input: impl Into<String>,
+    ) -> std::result::Result<Vec<f32>, async_openai::error::OpenAIError> {
+        use async_openai::types::embeddings::{CreateEmbeddingRequestArgs, EmbeddingInput};
+
+        let request = CreateEmbeddingRequestArgs::default()
+            .model(model.into())
+            .input(EmbeddingInput::String(input.into()))
+            .build()?;
+        let mut response = self.openai.embeddings().create(request).await?;
+        let embedding = response
+            .data
+            .pop()
+            .ok_or_else(|| async_openai::error::OpenAIError::InvalidArgument(
+                "embedding response had no data entries".into(),
+            ))?;
+        Ok(embedding.embedding)
+    }
+
+    /// Embed a batch of strings, preserving input order in the returned
+    /// `Vec<Vec<f32>>`.
+    pub async fn embed_batch<I, S>(
+        &self,
+        model: impl Into<String>,
+        inputs: I,
+    ) -> std::result::Result<Vec<Vec<f32>>, async_openai::error::OpenAIError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        use async_openai::types::embeddings::{CreateEmbeddingRequestArgs, EmbeddingInput};
+
+        let inputs: Vec<String> = inputs.into_iter().map(Into::into).collect();
+        let request = CreateEmbeddingRequestArgs::default()
+            .model(model.into())
+            .input(EmbeddingInput::StringArray(inputs))
+            .build()?;
+        let mut response = self.openai.embeddings().create(request).await?;
+        // Preserve input order even if a router returns retry results out of order.
+        response.data.sort_by_key(|d| d.index);
+        Ok(response.data.into_iter().map(|d| d.embedding).collect())
     }
 }
 
