@@ -78,7 +78,7 @@ pub mod discovery;
 pub use async_openai;
 pub use client::{Client, SecureClient};
 pub use error::Error;
-pub use relaxed::{RelaxedChat, RelaxedResponse};
+pub use relaxed::{RelaxedChat, RelaxedChatRequestBuilder, RelaxedResponse};
 pub use verifier::{GroundTruth, Measurement, PredicateType};
 
 /// Re-export of `async_openai::types::chat`.
