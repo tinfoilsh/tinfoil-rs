@@ -1,18 +1,21 @@
 //! Error types for the Tinfoil SDK.
 //!
-//! Users should match on three categories:
+//! Users should match on four categories — the same set surfaced by the
+//! JavaScript and Swift SDKs so the docs apply uniformly:
 //!
 //! ```text
 //! Error
 //! ├── Configuration  — Client misconfigured (fix your code, retrying won't help)
-//! ├── Attestation    — Verification failed (may be transient, can retry)
+//! ├── Fetch          — Couldn't fetch attestation materials (retry, transient)
+//! ├── Attestation    — Verification failed (security issue, do not retry)
 //! └── Api            — OpenAI API error (passthrough from async-openai)
 //! ```
 //!
 //! Use [`is_configuration()`](Error::is_configuration),
+//! [`is_fetch()`](Error::is_fetch),
 //! [`is_attestation()`](Error::is_attestation),
-//! [`is_retryable()`](Error::is_retryable), and
-//! [`is_api()`](Error::is_api) to classify errors.
+//! [`is_api()`](Error::is_api), and
+//! [`is_retryable()`](Error::is_retryable) to classify errors.
 
 use thiserror::Error;
 
@@ -93,54 +96,90 @@ pub enum Error {
 }
 
 impl Error {
-    /// Returns true if this is a configuration error (fix your code).
+    /// Returns true if this is a configuration error.
+    ///
+    /// The client was misconfigured (missing API key, invalid URL, etc).
+    /// Fix your code — retrying will not help.
     pub fn is_configuration(&self) -> bool {
         matches!(self, Error::Configuration(_))
     }
 
-    /// Returns true if this is an attestation/verification error.
+    /// Returns true if this is a fetch error.
     ///
-    /// This includes all non-configuration, non-API errors. Use
-    /// [`is_retryable()`](Error::is_retryable) to check if the error
-    /// is likely transient and worth retrying.
-    pub fn is_attestation(&self) -> bool {
+    /// Network or HTTP failure while fetching attestation materials,
+    /// Sigstore bundles, or GitHub API responses. Transient — retry,
+    /// possibly with backoff. Mirrors `FetchError` in the JavaScript SDK.
+    pub fn is_fetch(&self) -> bool {
         matches!(
             self,
             Error::AttestationFetch(_)
-                | Error::AttestationVerification(_)
-                | Error::CertificateMismatch
-                | Error::SigstoreVerification(_)
-                | Error::GitHub(_)
-                | Error::MeasurementMismatch { .. }
-                | Error::Tls(_)
                 | Error::Network(_)
-                | Error::UnsupportedFormat(_)
                 | Error::Http(_)
-                | Error::Json(_)
-                | Error::Base64(_)
+                | Error::GitHub(_)
                 | Error::Io(_)
         )
+    }
+
+    /// Returns true if this is an attestation/verification error.
+    ///
+    /// The materials were fetched successfully, but verification failed —
+    /// signatures, certificate chains, measurements, or the structure of
+    /// the attestation document itself. **Security-relevant.** Do not
+    /// retry blindly. Mirrors `AttestationError` in the JavaScript SDK.
+    pub fn is_attestation(&self) -> bool {
+        matches!(
+            self,
+            Error::AttestationVerification(_)
+                | Error::CertificateMismatch
+                | Error::SigstoreVerification(_)
+                | Error::MeasurementMismatch { .. }
+                | Error::Tls(_)
+                | Error::UnsupportedFormat(_)
+                | Error::Json(_)
+                | Error::Base64(_)
+        )
+    }
+
+    /// Returns true if this is an OpenAI API error.
+    ///
+    /// The error came from the upstream API after the secure connection
+    /// was established (authentication failure, rate limit, malformed
+    /// request, etc). Pass through unchanged from `async-openai`.
+    pub fn is_api(&self) -> bool {
+        matches!(self, Error::Api(_))
     }
 
     /// Returns true if this error is likely transient and the operation
     /// may succeed on retry.
     ///
-    /// Network-related errors (fetch failures, HTTP errors, TLS handshake
-    /// failures) are retryable. Parse errors, verification failures, and
-    /// mismatches are permanent.
+    /// In practice this means [`is_fetch()`](Error::is_fetch) errors plus
+    /// the retryable subset of API errors (5xx, 408, 429). Configuration
+    /// and attestation errors are never retryable.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Error::AttestationFetch(_)
-                | Error::Network(_)
-                | Error::Http(_)
-                | Error::Tls(_)
-        )
+        if self.is_fetch() {
+            return true;
+        }
+        if let Error::Api(api) = self {
+            return is_retryable_openai_error(api);
+        }
+        false
     }
+}
 
-    /// Returns true if this is an OpenAI API error.
-    pub fn is_api(&self) -> bool {
-        matches!(self, Error::Api(_))
+fn is_retryable_openai_error(err: &async_openai::error::OpenAIError) -> bool {
+    use async_openai::error::OpenAIError;
+    match err {
+        // Transport-level reqwest errors are always retryable.
+        OpenAIError::Reqwest(_) => true,
+        // API errors carry an OpenAI-style `code` ("server_error",
+        // "rate_limit_exceeded", ...). Only the transient codes retry.
+        OpenAIError::ApiError(api) => matches!(
+            api.code.as_deref(),
+            Some("server_error") | Some("rate_limit_exceeded")
+        ),
+        // Everything else (deserialization, invalid argument,
+        // feature-gated stream / file errors) is not retryable.
+        _ => false,
     }
 }
 
