@@ -448,39 +448,6 @@ impl Client {
         self.secure.http_client()
     }
 
-    /// Shortcut for `client.audio().transcription().create(request)`.
-    pub async fn transcribe(
-        &self,
-        request: async_openai::types::audio::CreateTranscriptionRequest,
-    ) -> std::result::Result<
-        async_openai::types::audio::CreateTranscriptionResponseJson,
-        async_openai::error::OpenAIError,
-    > {
-        self.openai.audio().transcription().create(request).await
-    }
-
-    /// Embed a single string and return its vector.
-    pub async fn embed(
-        &self,
-        model: impl Into<String>,
-        input: impl Into<String>,
-    ) -> std::result::Result<Vec<f32>, async_openai::error::OpenAIError> {
-        use async_openai::types::embeddings::{CreateEmbeddingRequestArgs, EmbeddingInput};
-
-        let request = CreateEmbeddingRequestArgs::default()
-            .model(model.into())
-            .input(EmbeddingInput::String(input.into()))
-            .build()?;
-        let mut response = self.openai.embeddings().create(request).await?;
-        let embedding = response
-            .data
-            .pop()
-            .ok_or_else(|| async_openai::error::OpenAIError::InvalidArgument(
-                "embedding response had no data entries".into(),
-            ))?;
-        Ok(embedding.embedding)
-    }
-
     /// Embed a batch of strings, preserving input order in the returned
     /// `Vec<Vec<f32>>`.
     pub async fn embed_batch<I, S>(
