@@ -447,6 +447,24 @@ impl Client {
     pub fn http_client(&self) -> Result<&reqwest::Client> {
         self.secure.http_client()
     }
+
+    /// Convenience shortcut for `client.audio().transcription().create(request)`.
+    ///
+    /// The async-openai audio handler is split into sub-handlers
+    /// (`transcription()`, `translation()`, `speech()`, ...) so the canonical
+    /// transcription call has an extra layer that's easy to miss. This wrapper
+    /// keeps the common case to a single method call without hiding the
+    /// underlying API — the typed response and error type come straight from
+    /// async-openai.
+    pub async fn transcribe(
+        &self,
+        request: async_openai::types::audio::CreateTranscriptionRequest,
+    ) -> std::result::Result<
+        async_openai::types::audio::CreateTranscriptionResponseJson,
+        async_openai::error::OpenAIError,
+    > {
+        self.openai.audio().transcription().create(request).await
+    }
 }
 
 /// Deref to the inner `async_openai::Client`, exposing all OpenAI methods directly.
