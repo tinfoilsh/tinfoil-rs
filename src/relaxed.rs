@@ -4,10 +4,14 @@
 //! `finish_reason` values, or when you need vendor extensions like
 //! `structured_outputs`, `web_search_options`, or `pii_check_options`.
 
+use async_openai::error::{ApiError, OpenAIError};
+use futures_util::Stream;
+use serde::de::DeserializeOwned;
 use serde_json::{json, Map, Value};
 
 use crate::client::Client;
 use crate::error::{Error, Result};
+use crate::sse;
 
 /// Handle returned by [`Client::chat_relaxed`].
 pub struct RelaxedChat<'a> {
@@ -28,7 +32,14 @@ impl<'a> RelaxedChat<'a> {
     ///
     /// The body is forwarded to `/v1/chat/completions` on the verified enclave
     /// using the pinned TLS client.
+    ///
+    /// Sets `stream: false` defensively so callers who accidentally include
+    /// `stream: true` in the body don't end up parsing SSE as JSON. Use
+    /// [`create_stream`](Self::create_stream) for streaming.
     pub async fn create(&self, body: impl Into<Value>) -> Result<RelaxedResponse> {
+        let mut body = body.into();
+        force_stream(&mut body, false);
+
         let secure = self.client.secure_client();
         let url = format!("{}/v1/chat/completions", secure.base_url());
 
@@ -36,26 +47,115 @@ impl<'a> RelaxedChat<'a> {
             .http_client()?
             .post(&url)
             .bearer_auth(secure.api_key())
-            .json(&body.into())
+            .json(&body)
             .send()
             .await?;
 
         let status = response.status();
-        let body: Value = response.json().await?;
+        let bytes = response.bytes().await?;
 
         if !status.is_success() {
-            let message = body
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| body.to_string());
-            return Err(Error::Network(format!(
-                "Chat completion request failed ({}): {}",
-                status, message
-            )));
+            return Err(http_error(status, &bytes));
         }
 
+        let body: Value = serde_json::from_slice(&bytes)?;
         Ok(RelaxedResponse { body })
+    }
+
+    /// Streaming counterpart of [`create`](Self::create).
+    ///
+    /// Returns a stream of [`RelaxedStreamChunk`]s decoded from the
+    /// router's Server-Sent Events response. Vendor-specific events
+    /// (for example `web_search_call`) are surfaced verbatim through
+    /// [`RelaxedStreamChunk::raw`] and the typed accessors on the chunk.
+    pub async fn create_stream(
+        &self,
+        body: impl Into<Value>,
+    ) -> Result<RelaxedStream> {
+        let mut body = body.into();
+        force_stream(&mut body, true);
+
+        let secure = self.client.secure_client();
+        let url = format!("{}/v1/chat/completions", secure.base_url());
+
+        let response = secure
+            .http_client()?
+            .post(&url)
+            .bearer_auth(secure.api_key())
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let bytes = response.bytes().await?;
+            return Err(http_error(status, &bytes));
+        }
+
+        Ok(into_chunk_stream(response.bytes_stream()))
+    }
+}
+
+/// Box-pinned stream type returned by [`RelaxedChat::create_stream`].
+pub type RelaxedStream =
+    std::pin::Pin<Box<dyn Stream<Item = Result<RelaxedStreamChunk>> + Send>>;
+
+fn into_chunk_stream<S, E>(byte_stream: S) -> RelaxedStream
+where
+    S: Stream<Item = std::result::Result<bytes::Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    use futures_util::StreamExt;
+    let mapped = sse::parse_event_stream(byte_stream)
+        .map(|event| event.map(|body| RelaxedStreamChunk { body }));
+    Box::pin(mapped)
+}
+
+fn force_stream(body: &mut Value, value: bool) {
+    if let Some(map) = body.as_object_mut() {
+        map.insert("stream".to_string(), Value::Bool(value));
+    }
+}
+
+fn http_error(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
+    let parsed: Option<Value> = serde_json::from_slice(bytes).ok();
+    let message = parsed
+        .as_ref()
+        .and_then(|v| v.pointer("/error/message").and_then(Value::as_str))
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let text = String::from_utf8_lossy(bytes);
+            if text.is_empty() {
+                format!("HTTP {}", status)
+            } else {
+                text.into_owned()
+            }
+        });
+
+    let retryable =
+        status.is_server_error() || status == 408 || status == 429;
+
+    if retryable {
+        Error::Network(format!("HTTP {}: {}", status, message))
+    } else {
+        let r#type = parsed
+            .as_ref()
+            .and_then(|v| v.pointer("/error/type").and_then(Value::as_str))
+            .map(str::to_string);
+        let param = parsed
+            .as_ref()
+            .and_then(|v| v.pointer("/error/param").and_then(Value::as_str))
+            .map(str::to_string);
+        let code = parsed
+            .as_ref()
+            .and_then(|v| v.pointer("/error/code").and_then(Value::as_str))
+            .map(str::to_string);
+        Error::Api(OpenAIError::ApiError(ApiError {
+            message,
+            r#type,
+            param,
+            code,
+        }))
     }
 }
 
@@ -132,6 +232,134 @@ impl RelaxedResponse {
             .and_then(Value::as_array)
             .map(Vec::len)
             .unwrap_or(0)
+    }
+
+    /// Tool calls from the first choice, decoded into a typed view that
+    /// preserves access to the raw arguments string.
+    pub fn typed_tool_calls(&self) -> Vec<RelaxedToolCall> {
+        self.tool_calls()
+            .iter()
+            .map(RelaxedToolCall::from_value)
+            .collect()
+    }
+}
+
+/// One chunk of a streamed chat-completion response.
+///
+/// The router emits two flavours of event over the same stream:
+///   - standard chat-completion deltas (text content, tool-call deltas,
+///     finish reasons),
+///   - Tinfoil-specific vendor events such as `web_search_call`.
+///
+/// Both shapes are exposed through the same struct; use the typed
+/// accessors for the common cases and fall back to [`raw`](Self::raw)
+/// for anything the SDK doesn't model yet.
+#[derive(Debug, Clone)]
+pub struct RelaxedStreamChunk {
+    body: Value,
+}
+
+impl RelaxedStreamChunk {
+    /// Construct from a pre-parsed JSON value (test helper).
+    pub fn from_value(body: Value) -> Self {
+        Self { body }
+    }
+
+    /// Underlying JSON event, exactly as emitted by the server.
+    pub fn raw(&self) -> &Value {
+        &self.body
+    }
+
+    /// Take ownership of the underlying JSON.
+    pub fn into_raw(self) -> Value {
+        self.body
+    }
+
+    /// Vendor event type (`"web_search_call"`, `"image_generation_call"`,
+    /// ...) when the chunk is a vendor event rather than a delta.
+    pub fn event_type(&self) -> Option<&str> {
+        self.body.get("type").and_then(Value::as_str)
+    }
+
+    /// `true` if this chunk is a Tinfoil/vLLM vendor event rather than a
+    /// chat-completion delta.
+    pub fn is_vendor_event(&self) -> bool {
+        self.event_type().is_some()
+    }
+
+    /// Convenience for the most common delta: the assistant's content
+    /// fragment.
+    pub fn delta_content(&self) -> Option<&str> {
+        self.body
+            .pointer("/choices/0/delta/content")
+            .and_then(Value::as_str)
+    }
+
+    /// Tool-call delta entries from the first choice. Empty when this
+    /// chunk doesn't carry tool deltas.
+    pub fn tool_call_deltas(&self) -> &[Value] {
+        self.body
+            .pointer("/choices/0/delta/tool_calls")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Annotation deltas from the first choice (URL citations etc.).
+    pub fn annotation_deltas(&self) -> &[Value] {
+        self.body
+            .pointer("/choices/0/delta/annotations")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Raw `finish_reason` for the first choice, when this chunk
+    /// terminates a generation.
+    pub fn finish_reason(&self) -> Option<&str> {
+        self.body
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+    }
+}
+
+/// Tool call extracted from a [`RelaxedResponse`].
+///
+/// Holds the verbatim arguments string so callers can deserialise into
+/// their own type via [`arguments`](Self::arguments) without going back
+/// through `serde_json::Value`.
+#[derive(Debug, Clone)]
+pub struct RelaxedToolCall {
+    pub id: Option<String>,
+    pub function_name: Option<String>,
+    pub arguments_raw: String,
+}
+
+impl RelaxedToolCall {
+    fn from_value(value: &Value) -> Self {
+        let id = value
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let function_name = value
+            .pointer("/function/name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let arguments_raw = value
+            .pointer("/function/arguments")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_default();
+        Self {
+            id,
+            function_name,
+            arguments_raw,
+        }
+    }
+
+    /// Deserialise the arguments string into the caller's type.
+    pub fn arguments<T: DeserializeOwned>(&self) -> Result<T> {
+        Ok(serde_json::from_str(&self.arguments_raw)?)
     }
 }
 
@@ -358,5 +586,96 @@ mod tests {
         let arr = body["messages"].as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[1]["content"], "second");
+    }
+
+    #[test]
+    fn http_error_classifies_4xx_as_api_and_5xx_as_network() {
+        let api = http_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            br#"{"error": {"message": "bad", "type": "invalid_request_error"}}"#,
+        );
+        assert!(api.is_api(), "{} should be API error", api);
+        assert!(!api.is_retryable());
+
+        let network = http_error(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            br#"{"error": {"message": "boom"}}"#,
+        );
+        assert!(!network.is_api());
+        assert!(network.is_retryable());
+
+        let rate_limit = http_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            b"rate-limited",
+        );
+        assert!(rate_limit.is_retryable());
+    }
+
+    #[test]
+    fn http_error_falls_back_to_text_when_body_is_not_json() {
+        let err = http_error(reqwest::StatusCode::UNAUTHORIZED, b"Unauthorized");
+        assert!(err.is_api());
+        assert!(format!("{}", err).contains("Unauthorized"));
+    }
+
+    #[test]
+    fn force_stream_overrides_caller_provided_value() {
+        let mut body = json!({"stream": true});
+        force_stream(&mut body, false);
+        assert_eq!(body["stream"], false);
+
+        let mut body = json!({});
+        force_stream(&mut body, true);
+        assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn relaxed_stream_chunk_distinguishes_deltas_from_vendor_events() {
+        let delta = RelaxedStreamChunk::from_value(json!({
+            "choices": [{"delta": {"content": "hel"}}]
+        }));
+        assert_eq!(delta.delta_content(), Some("hel"));
+        assert!(!delta.is_vendor_event());
+
+        let vendor = RelaxedStreamChunk::from_value(json!({
+            "type": "web_search_call",
+            "status": "in_progress",
+            "action": {"query": "rust"}
+        }));
+        assert_eq!(vendor.event_type(), Some("web_search_call"));
+        assert!(vendor.is_vendor_event());
+        assert!(vendor.delta_content().is_none());
+    }
+
+    #[test]
+    fn relaxed_tool_call_deserialises_typed_arguments() {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            city: String,
+            unit: String,
+        }
+
+        let body = json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"city\":\"Paris\",\"unit\":\"celsius\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let resp = RelaxedResponse::from_value(body);
+        let calls = resp.typed_tool_calls();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.id.as_deref(), Some("call_1"));
+        assert_eq!(call.function_name.as_deref(), Some("get_weather"));
+        let args: Args = call.arguments().unwrap();
+        assert_eq!(args.city, "Paris");
+        assert_eq!(args.unit, "celsius");
     }
 }
