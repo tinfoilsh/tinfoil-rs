@@ -1,20 +1,10 @@
 //! Permissive chat-completion helper.
 //!
-//! `async-openai`'s response types are exhaustive: a single unrecognised value
-//! (for example `"finish_reason": "repetition"` from a vLLM-backed router)
-//! fails deserialisation of the entire payload, even when the message content
-//! itself is fine. The server-side response shape also changes faster than
-//! the typed bindings can keep up.
-//!
-//! [`RelaxedChat`] sends the request through the enclave's pinned HTTP client
-//! and parses the response as raw JSON. Typed accessors cover the common
-//! fields, and [`RelaxedResponse::raw`] is available for anything else.
-//!
-//! Use this when you need to read fields the typed API rejects, or when you
-//! want to send vendor extensions (vLLM `structured_outputs`,
-//! Tinfoil-specific `web_search_options` / `pii_check_options`, ...).
+//! Use this when `async-openai` rejects router fields such as custom
+//! `finish_reason` values, or when you need vendor extensions like
+//! `structured_outputs`, `web_search_options`, or `pii_check_options`.
 
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
 use crate::client::Client;
 use crate::error::{Error, Result};
@@ -27,6 +17,11 @@ pub struct RelaxedChat<'a> {
 impl<'a> RelaxedChat<'a> {
     pub(crate) fn new(client: &'a Client) -> Self {
         Self { client }
+    }
+
+    /// Start a request builder.
+    pub fn request(&self) -> RelaxedChatRequestBuilder {
+        RelaxedChatRequestBuilder::new()
     }
 
     /// Send a chat-completion request expressed as raw JSON.
@@ -65,10 +60,6 @@ impl<'a> RelaxedChat<'a> {
 }
 
 /// Permissive view of a chat-completion response.
-///
-/// Wraps the raw [`serde_json::Value`]. Each accessor returns `Option`/empty-
-/// slice rather than panicking on missing fields, so partial / experimental
-/// router responses degrade gracefully.
 #[derive(Debug, Clone)]
 pub struct RelaxedResponse {
     body: Value,
@@ -134,7 +125,7 @@ impl RelaxedResponse {
         self.body.get("id").and_then(Value::as_str)
     }
 
-    /// Number of choices returned. Most callers only need the first.
+    /// Number of choices returned.
     pub fn choices_len(&self) -> usize {
         self.body
             .get("choices")
@@ -144,36 +135,137 @@ impl RelaxedResponse {
     }
 }
 
+/// Builder that produces a JSON body for [`RelaxedChat::create`].
+#[derive(Debug, Clone, Default)]
+pub struct RelaxedChatRequestBuilder {
+    body: Map<String, Value>,
+}
+
+impl RelaxedChatRequestBuilder {
+    /// Empty builder with no fields set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the `model` field.
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.body
+            .insert("model".to_string(), Value::String(model.into()));
+        self
+    }
+
+    /// Replace the `messages` array with the supplied JSON values.
+    pub fn messages<I, V>(mut self, messages: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<Value>,
+    {
+        let arr: Vec<Value> = messages.into_iter().map(Into::into).collect();
+        self.body.insert("messages".to_string(), Value::Array(arr));
+        self
+    }
+
+    /// Append a single message to the `messages` array.
+    pub fn push_message(mut self, message: impl Into<Value>) -> Self {
+        let entry = self
+            .body
+            .entry("messages".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(arr) = entry.as_array_mut() {
+            arr.push(message.into());
+        }
+        self
+    }
+
+    /// Enable Tinfoil-side web search by sending an empty
+    /// `web_search_options` object. Pass [`web_search_with_options`] for
+    /// a non-empty payload.
+    ///
+    /// [`web_search_with_options`]: Self::web_search_with_options
+    pub fn web_search(self) -> Self {
+        self.web_search_with_options(json!({}))
+    }
+
+    /// Send a populated `web_search_options` object.
+    pub fn web_search_with_options(mut self, options: impl Into<Value>) -> Self {
+        self.body
+            .insert("web_search_options".to_string(), options.into());
+        self
+    }
+
+    /// Enable Tinfoil-side PII checking with default options.
+    pub fn pii_check(self) -> Self {
+        self.pii_check_with_options(json!({}))
+    }
+
+    /// Send a populated `pii_check_options` object.
+    pub fn pii_check_with_options(mut self, options: impl Into<Value>) -> Self {
+        self.body
+            .insert("pii_check_options".to_string(), options.into());
+        self
+    }
+
+    /// Constrain the model output to one of the supplied choices using
+    /// vLLM's `structured_outputs.choice` extension.
+    pub fn structured_outputs_choice<I, S>(self, choices: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let arr: Vec<Value> = choices
+            .into_iter()
+            .map(|s| Value::String(s.into()))
+            .collect();
+        self.set("structured_outputs", json!({ "choice": Value::Array(arr) }))
+    }
+
+    /// Constrain the model output to match a regular expression using
+    /// vLLM's `structured_outputs.regex` extension.
+    pub fn structured_outputs_regex(self, pattern: impl Into<String>) -> Self {
+        self.set("structured_outputs", json!({ "regex": pattern.into() }))
+    }
+
+    /// Constrain the model output to a JSON Schema (OpenAI-compatible
+    /// `response_format.json_schema`).
+    pub fn response_format_json_schema(
+        self,
+        name: impl Into<String>,
+        schema: impl Into<Value>,
+    ) -> Self {
+        self.set(
+            "response_format",
+            json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": name.into(),
+                    "schema": schema.into(),
+                }
+            }),
+        )
+    }
+
+    /// Set an arbitrary top-level field. Use this for parameters that
+    /// don't have dedicated builder methods yet.
+    pub fn set(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.body.insert(key.into(), value.into());
+        self
+    }
+
+    /// Finalise the builder into the JSON body that
+    /// [`RelaxedChat::create`] expects.
+    pub fn build(self) -> Value {
+        Value::Object(self.body)
+    }
+}
+
+impl From<RelaxedChatRequestBuilder> for Value {
+    fn from(builder: RelaxedChatRequestBuilder) -> Self {
+        builder.build()
+    }
+}
+
 impl Client {
-    /// Permissive chat-completion handle that bypasses async-openai's
-    /// strict response types.
-    ///
-    /// Use this when you need fields the typed API doesn't model, when the
-    /// router emits values async-openai's enums don't recognise, or when you
-    /// want to forward vendor extensions like `web_search_options` or
-    /// `structured_outputs` without composing typed builders.
-    ///
-    /// All requests still flow through the enclave's verified, TLS-pinned
-    /// transport.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// use serde_json::json;
-    /// use tinfoil::Client;
-    ///
-    /// # async fn run() -> tinfoil::error::Result<()> {
-    /// let client = Client::new_default("api-key").await?;
-    /// let response = client.chat_relaxed().create(json!({
-    ///     "model": "gpt-oss-120b",
-    ///     "messages": [{"role": "user", "content": "Hi"}],
-    /// })).await?;
-    ///
-    /// if let Some(text) = response.content() {
-    ///     println!("{}", text);
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Permissive chat-completion handle for raw JSON requests and responses.
     pub fn chat_relaxed(&self) -> RelaxedChat<'_> {
         RelaxedChat::new(self)
     }
@@ -218,5 +310,53 @@ mod tests {
         assert!(resp.tool_calls().is_empty());
         assert!(resp.annotations().is_empty());
         assert_eq!(resp.choices_len(), 0);
+    }
+
+    #[test]
+    fn builder_serialises_chat_fields_and_extensions() {
+        let body: Value = RelaxedChatRequestBuilder::new()
+            .model("gpt-oss-120b")
+            .messages([json!({"role": "user", "content": "hi"})])
+            .web_search()
+            .pii_check_with_options(json!({"redact": true}))
+            .into();
+
+        assert_eq!(body["model"], "gpt-oss-120b");
+        assert_eq!(body["messages"][0]["content"], "hi");
+        assert_eq!(body["web_search_options"], json!({}));
+        assert_eq!(body["pii_check_options"]["redact"], true);
+    }
+
+    #[test]
+    fn builder_supports_structured_outputs_helpers() {
+        let choice = RelaxedChatRequestBuilder::new()
+            .structured_outputs_choice(["positive", "negative"])
+            .build();
+        assert_eq!(
+            choice["structured_outputs"]["choice"],
+            json!(["positive", "negative"])
+        );
+
+        let regex = RelaxedChatRequestBuilder::new()
+            .structured_outputs_regex(r"\w+@\w+\.com")
+            .build();
+        assert_eq!(regex["structured_outputs"]["regex"], r"\w+@\w+\.com");
+
+        let schema = RelaxedChatRequestBuilder::new()
+            .response_format_json_schema("person", json!({"type": "object"}))
+            .build();
+        assert_eq!(schema["response_format"]["type"], "json_schema");
+        assert_eq!(schema["response_format"]["json_schema"]["name"], "person");
+    }
+
+    #[test]
+    fn builder_push_message_appends_to_existing_array() {
+        let body: Value = RelaxedChatRequestBuilder::new()
+            .messages([json!({"role": "user", "content": "first"})])
+            .push_message(json!({"role": "assistant", "content": "second"}))
+            .build();
+        let arr = body["messages"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[1]["content"], "second");
     }
 }
