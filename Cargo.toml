@@ -10,7 +10,12 @@ license = "AGPL-3.0"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# Streaming (chat_relaxed::create_stream and SSE parser)
+futures-util = "0.3"
+async-stream = "0.3"
+bytes = "1"
 
 # OpenAI-compatible API client (injected with our pinned reqwest client)
 async-openai = { version = "0.34", features = ["chat-completion", "embedding", "audio", "responses"] }
