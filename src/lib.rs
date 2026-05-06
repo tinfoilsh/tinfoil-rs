@@ -67,6 +67,7 @@
 pub mod client;
 pub mod constants;
 pub mod error;
+pub mod relaxed;
 pub mod verifier;
 
 // Reachable for in-tree integration tests; hidden from rustdoc so it isn't
@@ -77,6 +78,7 @@ pub mod discovery;
 pub use async_openai;
 pub use client::{Client, SecureClient};
 pub use error::Error;
+pub use relaxed::{RelaxedChat, RelaxedResponse};
 pub use verifier::{GroundTruth, Measurement, PredicateType};
 
 /// Re-export of `async_openai::types::chat`.
