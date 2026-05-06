@@ -132,31 +132,40 @@ fn http_error(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
             }
         });
 
-    let retryable =
-        status.is_server_error() || status == 408 || status == 429;
+    let r#type = parsed
+        .as_ref()
+        .and_then(|v| v.pointer("/error/type").and_then(Value::as_str))
+        .map(str::to_string);
+    let param = parsed
+        .as_ref()
+        .and_then(|v| v.pointer("/error/param").and_then(Value::as_str))
+        .map(str::to_string);
+    let parsed_code = parsed
+        .as_ref()
+        .and_then(|v| v.pointer("/error/code").and_then(Value::as_str))
+        .map(str::to_string);
 
-    if retryable {
-        Error::Network(format!("HTTP {}: {}", status, message))
-    } else {
-        let r#type = parsed
-            .as_ref()
-            .and_then(|v| v.pointer("/error/type").and_then(Value::as_str))
-            .map(str::to_string);
-        let param = parsed
-            .as_ref()
-            .and_then(|v| v.pointer("/error/param").and_then(Value::as_str))
-            .map(str::to_string);
-        let code = parsed
-            .as_ref()
-            .and_then(|v| v.pointer("/error/code").and_then(Value::as_str))
-            .map(str::to_string);
-        Error::Api(OpenAIError::ApiError(ApiError {
-            message,
-            r#type,
-            param,
-            code,
-        }))
-    }
+    // Synthesise the canonical OpenAI error code so `is_retryable()` can
+    // tell server faults / rate limits apart from client mistakes when
+    // the upstream body didn't include one.
+    let code = parsed_code.or_else(|| {
+        if status.is_server_error() {
+            Some("server_error".to_string())
+        } else if status == 429 {
+            Some("rate_limit_exceeded".to_string())
+        } else if status == 408 {
+            Some("server_error".to_string())
+        } else {
+            None
+        }
+    });
+
+    Error::Api(OpenAIError::ApiError(ApiError {
+        message,
+        r#type,
+        param,
+        code,
+    }))
 }
 
 /// Permissive view of a chat-completion response.
@@ -589,25 +598,26 @@ mod tests {
     }
 
     #[test]
-    fn http_error_classifies_4xx_as_api_and_5xx_as_network() {
-        let api = http_error(
+    fn http_error_classifies_status_codes() {
+        let bad_request = http_error(
             reqwest::StatusCode::BAD_REQUEST,
             br#"{"error": {"message": "bad", "type": "invalid_request_error"}}"#,
         );
-        assert!(api.is_api(), "{} should be API error", api);
-        assert!(!api.is_retryable());
+        assert!(bad_request.is_api(), "4xx should be API error");
+        assert!(!bad_request.is_retryable(), "4xx should not retry");
 
-        let network = http_error(
+        let server_error = http_error(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             br#"{"error": {"message": "boom"}}"#,
         );
-        assert!(!network.is_api());
-        assert!(network.is_retryable());
+        assert!(server_error.is_api(), "5xx is still an API error");
+        assert!(server_error.is_retryable(), "5xx should retry");
 
         let rate_limit = http_error(
             reqwest::StatusCode::TOO_MANY_REQUESTS,
             b"rate-limited",
         );
+        assert!(rate_limit.is_api());
         assert!(rate_limit.is_retryable());
     }
 
