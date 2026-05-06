@@ -24,7 +24,7 @@ The Tinfoil Rust client is a wrapper around [async-openai](https://github.com/64
 
 ```rust
 use tinfoil::Client;
-use tinfoil::async_openai::types::{
+use tinfoil::chat::{
     ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
 };
 
@@ -51,6 +51,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+```
+
+The common request/response types live under `tinfoil::chat`, `tinfoil::audio`,
+and `tinfoil::embeddings` — all of which are re-exports of the corresponding
+`async_openai::types::*` modules.
+
+### Audio
+
+The audio handler exposes sub-handlers for transcription, translation, and
+speech, so the full path is `client.audio().transcription().create(...)`.
+For the common transcription case there's also a one-call shortcut:
+
+```rust
+let transcription = client.transcribe(request).await?;
 ```
 
 ## Usage

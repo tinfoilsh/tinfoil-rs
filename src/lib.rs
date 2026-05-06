@@ -60,9 +60,6 @@
 //!     // Streaming
 //!     let stream = client.chat().create_stream(request).await?;
 //!
-//!     // Audio transcription lives one level deeper than `chat()` —
-//!     // the canonical chain is `client.audio().transcription().create(...)`.
-//!     // See [`Client::transcribe`] for a one-call shortcut.
 //!     Ok(())
 //! }
 //! ```
@@ -83,9 +80,6 @@ pub use error::Error;
 pub use verifier::{GroundTruth, Measurement, PredicateType};
 
 /// Re-export of `async_openai::types::chat`.
-///
-/// Lets users write `tinfoil::chat::CreateChatCompletionRequestArgs` instead
-/// of digging through `async_openai::types::chat::...`.
 pub use async_openai::types::chat;
 
 /// Re-export of `async_openai::types::audio`.
