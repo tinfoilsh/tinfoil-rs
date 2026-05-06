@@ -63,9 +63,13 @@
 
 pub mod client;
 pub mod constants;
-pub mod discovery;
 pub mod error;
 pub mod verifier;
+
+// Reachable for in-tree integration tests; hidden from rustdoc so it isn't
+// advertised as part of the public API contract.
+#[doc(hidden)]
+pub mod discovery;
 
 pub use async_openai;
 pub use client::{Client, SecureClient};
