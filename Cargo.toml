@@ -66,21 +66,17 @@ hex = "0.4"
 dirs = "6"
 
 # Sigstore verification
-# NOTE: sigstore-rs 0.13 cannot be used because it requires the `oauth` module
+# sigstore-rs 0.13 cannot be used because it requires the `oauth` module
 # even for verification-only use cases, and that module uses Rust edition 2024
 # let-chains which don't compile on stable Rust (see rust-lang/rust#145878).
 # We implement DSSE verification manually in src/sigstore.rs instead.
-# sigstore = { version = "0.13", default-features = false, features = ["verify", "rustls-tls"] }
 
 # Regex for certificate identity matching
 regex = "1"
 
-# Date/time parsing
-time = { version = "0.3", features = ["parsing"] }
-
-# NOTE: sigstore-rs 0.13.0 uses Rust 2024 edition with let-chains (stabilized in 1.88.0)
-# which don't compile on Rust 1.87. We implement verification manually in src/sigstore.rs.
-# sigstore = { version = "0.13", default-features = false, features = ["verify", "cert", "rekor", "rustls-tls"] }
+# Pinned to <0.3.46 because newer releases bump the MSRV to Rust 1.88, which
+# would force everyone consuming tinfoil-rs to upgrade their toolchain.
+time = { version = ">=0.3, <0.3.46", features = ["parsing"] }
 
 [[bin]]
 name = "conformance"
