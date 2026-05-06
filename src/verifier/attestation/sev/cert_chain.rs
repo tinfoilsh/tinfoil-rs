@@ -568,6 +568,12 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
     validate_amd_location(ask_subject, "ASK")?;
     validate_amd_location(vcek_subject, "VCEK")?;
 
+    // Verify outer signature_algorithm matches inner tbs.signature (RFC 5280 §4.1.1.2)
+    // This is defense-in-depth since any mismatch would break the signature check below anyway
+    validate_signature_algorithm_consistency(&ark_cert, "ARK")?;
+    validate_signature_algorithm_consistency(&ask_cert, "ASK")?;
+    validate_signature_algorithm_consistency(&vcek_cert, "VCEK")?;
+
     // === STEP 3: Verify ARK self-signature (RSA-PSS SHA-384) ===
     let ark_pubkey = extract_pubkey_from_cert(ark_der)?;
     let ark_tbs = extract_tbs_from_cert(ark_der)?;
@@ -588,6 +594,22 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
     let vcek_salt = parse_rsa_pss_sha384_salt_len(&vcek_cert.signature_algorithm, "VCEK")?;
     verify_rsa_pss_signature(&vcek_tbs, &vcek_sig, &ask_pubkey, vcek_salt, "VCEK signature")?;
 
+    Ok(())
+}
+
+/// Verify the outer `signature_algorithm` field equals the inner `tbs_certificate.signature`
+/// field, as required by RFC 5280 §4.1.1.2. AMD certificates satisfy this; rejecting mismatches
+/// is defense-in-depth that catches malformed certs before signature verification.
+fn validate_signature_algorithm_consistency(
+    cert: &x509_cert::Certificate,
+    cert_name: &str,
+) -> Result<()> {
+    if cert.signature_algorithm != cert.tbs_certificate.signature {
+        return Err(Error::AttestationVerification(format!(
+            "{} certificate outer signature_algorithm does not match inner tbs.signature",
+            cert_name
+        )));
+    }
     Ok(())
 }
 
