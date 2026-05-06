@@ -133,12 +133,8 @@ fn parse_pem_chain(chain_pem: &[u8]) -> Result<Vec<Vec<u8>>> {
 }
 
 /// Compute SPKI fingerprint of a certificate's public key.
-fn compute_spki_fingerprint(cert_der: &[u8]) -> Result<String> {
-    use x509_cert::Certificate;
-    use der::{Decode, Encode};
-
-    let cert = Certificate::from_der(cert_der)
-        .map_err(|e| Error::AttestationVerification(format!("Failed to parse cert: {}", e)))?;
+fn compute_spki_fingerprint(cert: &x509_cert::Certificate) -> Result<String> {
+    use der::Encode;
 
     let spki_der = cert.tbs_certificate
         .subject_public_key_info
@@ -149,15 +145,11 @@ fn compute_spki_fingerprint(cert_der: &[u8]) -> Result<String> {
     Ok(hex::encode(hash))
 }
 
-/// Extract public key bytes from a certificate.
-fn extract_pubkey_from_cert(cert_der: &[u8]) -> Result<Vec<u8>> {
-    use x509_cert::Certificate;
-    use der::{Decode, Encode};
+/// Extract DER-encoded SPKI (algorithm identifier + public key) from a certificate.
+/// The full SPKI is what RSA/ECDSA key parsers expect for `from_public_key_der`.
+fn extract_pubkey_from_cert(cert: &x509_cert::Certificate) -> Result<Vec<u8>> {
+    use der::Encode;
 
-    let cert = Certificate::from_der(cert_der)
-        .map_err(|e| Error::AttestationVerification(format!("Failed to parse cert: {}", e)))?;
-
-    // Return the full SPKI DER-encoded (needed for RSA key parsing)
     cert.tbs_certificate
         .subject_public_key_info
         .to_der()
@@ -165,12 +157,8 @@ fn extract_pubkey_from_cert(cert_der: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Extract TBS (To Be Signed) certificate bytes.
-fn extract_tbs_from_cert(cert_der: &[u8]) -> Result<Vec<u8>> {
-    use x509_cert::Certificate;
-    use der::{Decode, Encode};
-
-    let cert = Certificate::from_der(cert_der)
-        .map_err(|e| Error::AttestationVerification(format!("Failed to parse cert: {}", e)))?;
+fn extract_tbs_from_cert(cert: &x509_cert::Certificate) -> Result<Vec<u8>> {
+    use der::Encode;
 
     cert.tbs_certificate
         .to_der()
@@ -178,14 +166,8 @@ fn extract_tbs_from_cert(cert_der: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Extract signature bytes from a certificate.
-fn extract_signature_from_cert(cert_der: &[u8]) -> Result<Vec<u8>> {
-    use x509_cert::Certificate;
-    use der::Decode;
-
-    let cert = Certificate::from_der(cert_der)
-        .map_err(|e| Error::AttestationVerification(format!("Failed to parse cert: {}", e)))?;
-
-    Ok(cert.signature.raw_bytes().to_vec())
+fn extract_signature_from_cert(cert: &x509_cert::Certificate) -> Vec<u8> {
+    cert.signature.raw_bytes().to_vec()
 }
 
 
@@ -503,7 +485,7 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
 
     // === STEP 1: Verify ARK public key matches pinned fingerprint ===
     // This is the root of trust - if this matches, we know we have AMD's genuine ARK
-    let ark_fingerprint = compute_spki_fingerprint(ark_der)?;
+    let ark_fingerprint = compute_spki_fingerprint(&ark_cert)?;
     if ark_fingerprint != AMD_ARK_GENOA_SPKI_FINGERPRINT {
         return Err(Error::AttestationVerification(format!(
             "ARK public key fingerprint mismatch! Expected: {}, Got: {}. \
@@ -575,22 +557,22 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
     validate_signature_algorithm_consistency(&vcek_cert, "VCEK")?;
 
     // === STEP 3: Verify ARK self-signature (RSA-PSS SHA-384) ===
-    let ark_pubkey = extract_pubkey_from_cert(ark_der)?;
-    let ark_tbs = extract_tbs_from_cert(ark_der)?;
-    let ark_sig = extract_signature_from_cert(ark_der)?;
+    let ark_pubkey = extract_pubkey_from_cert(&ark_cert)?;
+    let ark_tbs = extract_tbs_from_cert(&ark_cert)?;
+    let ark_sig = extract_signature_from_cert(&ark_cert);
     let ark_salt = parse_rsa_pss_sha384_salt_len(&ark_cert.signature_algorithm, "ARK")?;
     verify_rsa_pss_signature(&ark_tbs, &ark_sig, &ark_pubkey, ark_salt, "ARK self-signature")?;
 
     // === STEP 4: Verify ASK signature against ARK ===
-    let ask_tbs = extract_tbs_from_cert(ask_der)?;
-    let ask_sig = extract_signature_from_cert(ask_der)?;
+    let ask_tbs = extract_tbs_from_cert(&ask_cert)?;
+    let ask_sig = extract_signature_from_cert(&ask_cert);
     let ask_salt = parse_rsa_pss_sha384_salt_len(&ask_cert.signature_algorithm, "ASK")?;
     verify_rsa_pss_signature(&ask_tbs, &ask_sig, &ark_pubkey, ask_salt, "ASK signature")?;
 
     // === STEP 5: Verify VCEK signature against ASK ===
-    let ask_pubkey = extract_pubkey_from_cert(ask_der)?;
-    let vcek_tbs = extract_tbs_from_cert(vcek_der)?;
-    let vcek_sig = extract_signature_from_cert(vcek_der)?;
+    let ask_pubkey = extract_pubkey_from_cert(&ask_cert)?;
+    let vcek_tbs = extract_tbs_from_cert(&vcek_cert)?;
+    let vcek_sig = extract_signature_from_cert(&vcek_cert);
     let vcek_salt = parse_rsa_pss_sha384_salt_len(&vcek_cert.signature_algorithm, "VCEK")?;
     verify_rsa_pss_signature(&vcek_tbs, &vcek_sig, &ask_pubkey, vcek_salt, "VCEK signature")?;
 
