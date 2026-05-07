@@ -77,6 +77,34 @@ pub mod verifier;
 #[doc(hidden)]
 pub mod discovery;
 
+/// Install `ring` as the process-wide rustls crypto provider.
+///
+/// `Once`-guarded so callers can invoke this from every public entry
+/// point cheaply — only the first call actually installs; subsequent
+/// calls are a single atomic load.
+///
+/// Why we need this: rustls 0.23 used to auto-install a crypto provider
+/// when its default `aws_lc_rs` feature was active. Tinfoil now compiles
+/// rustls with `default-features = false, features = ["ring"]` (so the
+/// crate links cleanly on Windows MSVC), which removes that auto-install.
+/// Without an explicit install, anything that builds a `reqwest::Client`
+/// or accepts an inbound TLS connection panics with `No process-level
+/// CryptoProvider available — call CryptoProvider::install_default()`.
+///
+/// Every public entry point in this crate calls this helper before
+/// touching anything that ends up at the rustls runtime — that way
+/// callers don't have to know or care about the crypto provider.
+pub(crate) fn ensure_crypto_provider() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        // Returns Err if a provider was already installed (e.g. by a
+        // host application that calls install_default() itself before
+        // any tinfoil entry point runs). That's fine — we just don't
+        // overwrite. The Once still completes so future calls no-op.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 pub use async_openai;
 pub use client::{Client, SecureClient};
 pub use error::Error;

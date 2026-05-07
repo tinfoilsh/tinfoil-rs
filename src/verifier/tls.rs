@@ -126,9 +126,8 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
 /// This client will reject any connection where the server's certificate
 /// public key fingerprint doesn't match the pinned value.
 pub fn create_pinned_client(pinned_fingerprint: &str) -> Result<reqwest::Client> {
-    // Ensure crypto provider is installed
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    
+    crate::ensure_crypto_provider();
+
     // Create pinned verifier
     let verifier = PinnedCertVerifier::new(pinned_fingerprint.to_string())?;
     
@@ -249,8 +248,7 @@ jaDTSFaq1NIwodHp7X9fOG48uRuJWS8GmifD969sC4Ut2FJFoklceBVUNCHR
 
     #[test]
     fn test_pinned_cert_verifier_creation() {
-        // Ensure crypto provider is installed for test
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        crate::ensure_crypto_provider();
 
         let fingerprint = "0".repeat(64); // Valid format but won't match any real cert
         let result = PinnedCertVerifier::new(fingerprint);
