@@ -448,6 +448,23 @@ impl Client {
         self.secure.http_client()
     }
 
+    /// Shortcut for `client.audio().transcription().create(request)`.
+    ///
+    /// One of the three first-class shortcuts on [`Client`], one per
+    /// flagship API surface:
+    /// chat → [`chat_relaxed`](Self::chat_relaxed),
+    /// embeddings → [`embed_batch`](Self::embed_batch),
+    /// audio → [`transcribe`](Self::transcribe).
+    pub async fn transcribe(
+        &self,
+        request: async_openai::types::audio::CreateTranscriptionRequest,
+    ) -> std::result::Result<
+        async_openai::types::audio::CreateTranscriptionResponseJson,
+        async_openai::error::OpenAIError,
+    > {
+        self.openai.audio().transcription().create(request).await
+    }
+
     /// Embed a batch of strings, preserving input order in the returned
     /// `Vec<Vec<f32>>`.
     pub async fn embed_batch<I, S>(
