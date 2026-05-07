@@ -394,7 +394,26 @@ impl Client {
     ///
     /// Discovers available routers, verifies the first one that passes
     /// attestation, and returns a ready-to-use client.
-    pub async fn new_default(api_key: impl Into<String>) -> Result<Self> {
+    ///
+    /// The API key is read from the `TINFOIL_API_KEY` environment variable.
+    /// To pass an API key explicitly, use [`Client::new_default_with_api_key`].
+    pub async fn new_default() -> Result<Self> {
+        let api_key = std::env::var("TINFOIL_API_KEY").map_err(|_| {
+            Error::Configuration(
+                "TINFOIL_API_KEY environment variable is not set. \
+                 Set it or use Client::new_default_with_api_key()."
+                    .to_string(),
+            )
+        })?;
+        Self::new_default_with_api_key(api_key).await
+    }
+
+    /// Create an attested OpenAI client using router discovery with an
+    /// explicit API key.
+    ///
+    /// Discovers available routers, verifies the first one that passes
+    /// attestation, and returns a ready-to-use client.
+    pub async fn new_default_with_api_key(api_key: impl Into<String>) -> Result<Self> {
         let api_key = api_key.into();
         let secure = SecureClient::new_default_client(&api_key).await?;
         Self::from_secure_client(secure, &api_key)

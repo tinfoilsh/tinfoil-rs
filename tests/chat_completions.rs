@@ -35,7 +35,7 @@ fn build_request() -> CreateChatCompletionRequestArgs {
 #[tokio::test]
 #[ignore]
 async fn test_chat_completion_non_streaming() {
-    let client = Client::new_default(api_key())
+    let client = Client::new_default_with_api_key(api_key())
         .await
         .expect("Failed to create verified Tinfoil client");
 
@@ -70,7 +70,7 @@ async fn test_chat_completion_non_streaming() {
 #[tokio::test]
 #[ignore]
 async fn test_chat_completion_streaming() {
-    let client = Client::new_default(api_key())
+    let client = Client::new_default_with_api_key(api_key())
         .await
         .expect("Failed to create verified Tinfoil client");
 

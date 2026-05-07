@@ -30,8 +30,8 @@ use tinfoil::chat::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a client
-    let client = Client::new_default("<YOUR_API_KEY>").await?;
+    // Create a client (reads TINFOIL_API_KEY from env)
+    let client = Client::new_default().await?;
 
     // Make requests using the OpenAI client API
     // Note: enclave verification and direct-to-enclave encryption happens automatically
@@ -60,10 +60,8 @@ and `tinfoil::embeddings` — all of which are re-exports of the corresponding
 ## Usage
 
 ```rust
-// 1. Create a client
-let client = Client::new_default(
-    std::env::var("TINFOIL_API_KEY")?
-).await?;
+// 1. Create a client (reads TINFOIL_API_KEY from env)
+let client = Client::new_default().await?;
 
 // 2. Use client as you would async_openai::Client
 // see https://docs.rs/async-openai for API documentation
