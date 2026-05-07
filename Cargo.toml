@@ -80,7 +80,7 @@ dirs = "6"
 # Regex for certificate identity matching
 regex = "1"
 
-time = { version = ">=0.3", features = ["parsing"] }
+time = { version = "0.3", features = ["parsing"] }
 
 [[bin]]
 name = "conformance"
