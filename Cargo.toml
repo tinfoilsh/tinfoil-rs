@@ -30,7 +30,7 @@ bytes = "1"
 # is the aws-lc-rs path). Our own reqwest dep above already enables
 # `rustls-no-provider`; Cargo unifies the feature sets so async-openai
 # uses tinfoil's reqwest configuration without leaking aws-lc-rs in.
-async-openai = { version = "0.36.1", default-features = false, features = ["chat-completion", "embedding", "audio", "responses"] }
+async-openai = { version = "0.37.0", default-features = false, features = ["chat-completion", "embedding", "audio", "responses"] }
 
 # TLS — pinned to the `ring` crypto backend so this crate links on
 # Windows MSVC. The default rustls 0.23 feature set is `aws_lc_rs`,
