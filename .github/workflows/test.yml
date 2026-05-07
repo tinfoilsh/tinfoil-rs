@@ -61,3 +61,33 @@ jobs:
         env:
           TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
         run: cargo test --locked --test '*' --verbose -- --ignored
+
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.88 toolchain
+        run: rustup toolchain install 1.88 --profile minimal && rustup default 1.88
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-msrv-
+
+      - name: Build on MSRV
+        run: cargo build --locked --verbose
+
+      - name: Unit tests on MSRV
+        run: cargo test --locked --lib --verbose
