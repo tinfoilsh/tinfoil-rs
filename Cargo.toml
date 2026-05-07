@@ -80,9 +80,17 @@ dirs = "6"
 # Regex for certificate identity matching
 regex = "1"
 
-# Pinned to <0.3.46 because newer releases bump the MSRV to Rust 1.88, which
-# would force everyone consuming tinfoil-rs to upgrade their toolchain.
-time = { version = ">=0.3, <0.3.46", features = ["parsing"] }
+# `time` 0.3.46+ bumps its MSRV to Rust 1.88. tinfoil-rs targets MSRV
+# 1.87, but enforcing the upper bound at the dep-graph level breaks
+# downstreams that also depend on packages requiring time 0.3.46+
+# (e.g. `serde_with 3.18.0` pins `time = "~0.3.47"`, transitively
+# pulled in by `slack-morphism`). Cargo's resolver is greedy and does
+# not backtrack to find the [0.3.36, 0.3.46) intersection, so the
+# combined dep graph fails to resolve. Move the MSRV-1.87 contract to
+# the consumer side: downstreams on rustc 1.87 pin time themselves;
+# downstreams on 1.88+ get the latest. The crate still builds on 1.87
+# when consumers pin time accordingly.
+time = { version = ">=0.3", features = ["parsing"] }
 
 [[bin]]
 name = "conformance"
