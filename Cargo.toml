@@ -11,7 +11,13 @@ license = "AGPL-3.0"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client
-reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls", "stream"] }
+# `rustls-no-provider` instead of `rustls` so reqwest doesn't pull
+# `__rustls-aws-lc-rs` — this crate's TLS deps below pin ring, and we
+# want to honor that all the way through. Without this, hyper-rustls
+# enables aws-lc-rs alongside ring, the C source still ships in the
+# link, and MSVC fails on the missing __builtin_bswap symbols even
+# though we never use aws-lc-rs at runtime.
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
 
 # Streaming (chat_relaxed::create_stream and SSE parser)
 futures-util = "0.3"
@@ -19,12 +25,28 @@ async-stream = "0.3"
 bytes = "1"
 
 # OpenAI-compatible API client (injected with our pinned reqwest client)
-async-openai = { version = "0.36.1", features = ["chat-completion", "embedding", "audio", "responses"] }
+# `default-features = false` so async-openai doesn't activate its
+# `rustls` feature (which forwards to reqwest's `rustls` feature, which
+# is the aws-lc-rs path). Our own reqwest dep above already enables
+# `rustls-no-provider`; Cargo unifies the feature sets so async-openai
+# uses tinfoil's reqwest configuration without leaking aws-lc-rs in.
+async-openai = { version = "0.36.1", default-features = false, features = ["chat-completion", "embedding", "audio", "responses"] }
 
-# TLS 
-rustls = "0.23"
+# TLS — pinned to the `ring` crypto backend so this crate links on
+# Windows MSVC. The default rustls 0.23 feature set is `aws_lc_rs`,
+# which compiles C using GCC `__builtin_bswap{16,32,64}` intrinsics
+# that cl.exe doesn't recognize. The link then fails:
+#
+#   libaws_lc_sys-...md4.o : error LNK2001: unresolved external
+#       symbol __builtin_bswap32
+#   fatal error LNK1120: 3 unresolved externals
+#
+# `ring` is supported as a first-class rustls backend and links cleanly
+# on every desktop target. `default-features = false` is required to
+# keep `aws_lc_rs` from being activated alongside `ring`.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 webpki-roots = "0.26"
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

@@ -46,6 +46,7 @@ impl SecureClient {
     /// The `repo` parameter specifies the GitHub repository used for
     /// Sigstore code provenance verification (e.g., "tinfoilsh/confidential-model-router").
     pub fn new(host: impl Into<String>, repo: impl Into<String>, api_key: impl Into<String>) -> Self {
+        crate::ensure_crypto_provider();
         Self {
             host: host.into(),
             repo: repo.into(),
@@ -55,7 +56,7 @@ impl SecureClient {
             pinned_client: None,
         }
     }
-    
+
     /// Create a client with a pinned code measurement.
     ///
     /// When a pinned measurement is provided, Sigstore verification is skipped
@@ -65,6 +66,7 @@ impl SecureClient {
         api_key: impl Into<String>,
         measurement: Measurement,
     ) -> Self {
+        crate::ensure_crypto_provider();
         Self {
             host: host.into(),
             repo: String::new(),
@@ -82,6 +84,10 @@ impl SecureClient {
     /// 2. Tries each router until one verifies successfully
     /// 3. Falls back to default router if all routers fail
     pub async fn new_default_client(api_key: impl Into<String>) -> Result<Self> {
+        // Install the rustls crypto provider before any HTTP client is
+        // built — `fetch_routers` constructs a reqwest::Client and would
+        // panic with "No process-level CryptoProvider available" otherwise.
+        crate::ensure_crypto_provider();
         let api_key = api_key.into();
 
         let repo = crate::constants::DEFAULT_REPO;
@@ -218,9 +224,9 @@ impl SecureClient {
         let stream = TcpStream::connect(&addr).await
             .map_err(|e| Error::Tls(format!("Failed to connect: {}", e)))?;
         
-        // Setup TLS with default verifier
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        
+        // Crypto provider is installed at every public entry point via
+        // `ensure_crypto_provider()`; this branch only runs from those
+        // paths, so it's already set up.
         let root_store = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };

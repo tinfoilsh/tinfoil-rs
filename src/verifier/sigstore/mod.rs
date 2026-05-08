@@ -65,6 +65,12 @@ pub struct SigstoreResult {
 /// 6. Verifies certificate was issued by trusted Fulcio CA
 /// 7. Extracts and returns the measurement
 pub async fn verify_repo(repo: &str) -> Result<SigstoreResult> {
+    // Install the rustls crypto provider before any HTTP client is built.
+    // `github::fetch_latest_digest` constructs a reqwest::Client internally,
+    // so we need the provider installed first or rustls panics with
+    // "No process-level CryptoProvider available".
+    crate::ensure_crypto_provider();
+
     // 1. Fetch latest release digest
     let release_digest = github::fetch_latest_digest(repo).await?;
 
