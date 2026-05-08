@@ -13,10 +13,22 @@ env:
 
 jobs:
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    strategy:
+      # Don't bail the whole matrix on a single OS failing — we want to
+      # see Windows-only or macOS-only regressions even if Linux is red.
+      fail-fast: false
+      matrix:
+        # ubuntu-latest = x86_64-unknown-linux-gnu
+        # macos-latest = aarch64-apple-darwin (Apple Silicon)
+        # windows-latest = x86_64-pc-windows-msvc — the platform that
+        # caught the aws-lc-rs / __builtin_bswap link regression
+        # downstream (see #21). Without this matrix entry the bug
+        # reaches consumers before any tinfoil-rs test ever notices.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -46,7 +58,11 @@ jobs:
         run: cargo test --locked --test '*' --verbose
 
       - name: Check if API key is available
+        # Bash only — Windows runner uses pwsh by default, but bash is
+        # available there too. Force it explicitly so the heredoc syntax
+        # works on every OS in the matrix.
         id: gate
+        shell: bash
         env:
           TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
         run: |
