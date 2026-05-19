@@ -192,16 +192,20 @@ pub fn extract_certificate_info(cert: &Certificate) -> Result<CertificateInfo> {
             "Certificate missing required repository extension".into(),
         ));
     }
-    if subject_workflow.is_empty() {
-        return Err(Error::SigstoreVerification(
-            "Certificate missing required workflow extension".into(),
-        ));
-    }
     if workflow_ref.is_empty() {
+        // SPEC §5.3: the workflow-ref policy is checked against the
+        // GitHubWorkflowRef extension (.1.6). Without it the policy can't
+        // be evaluated; reject with the workflow-ref-prefix code prefix so
+        // the conformance classifier maps it correctly.
         return Err(Error::SigstoreVerification(
-            "Certificate missing required GitHubWorkflowRef extension".into(),
+            "WORKFLOW_REF_PREFIX_MISMATCH: Certificate missing required GitHubWorkflowRef extension (.1.6)".into(),
         ));
     }
+    // NOTE: BuildSignerURI (.1.9) is intentionally optional. After the
+    // workflow_ref-check migration to .1.6 it's informational/diagnostic
+    // only — surfaced in `subject_workflow` for log messages but not
+    // required for verification. tinfoil-conformance fixture
+    // 071-cert-missing-build-signer-uri pins this.
 
     Ok(CertificateInfo {
         issuer,
