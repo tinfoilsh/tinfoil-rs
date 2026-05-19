@@ -28,6 +28,23 @@ pub fn verify_rekor_entry(
     cert_not_before: u64,
     cert_not_after: u64,
 ) -> Result<()> {
+    verify_rekor_entry_with_trust(
+        bundle,
+        cert_not_before,
+        cert_not_after,
+        trust::embedded_trust_root_json(),
+    )
+}
+
+/// Same as [`verify_rekor_entry`], but loads Rekor keys from the supplied
+/// trust-root JSON instead of the embedded one. Used by conformance fixtures
+/// with synthetic trust roots.
+pub fn verify_rekor_entry_with_trust(
+    bundle: &serde_json::Value,
+    cert_not_before: u64,
+    cert_not_after: u64,
+    trust_root_json: &str,
+) -> Result<()> {
     // Get tlog entries from verification material
     let tlog_entries = bundle
         .get("verificationMaterial")
@@ -70,7 +87,7 @@ pub fn verify_rekor_entry(
     })?;
 
     // Load Rekor public keys from trusted root
-    let rekor_keys = trust::load_rekor_keys()?;
+    let rekor_keys = trust::load_rekor_keys_from_json(trust_root_json)?;
 
     // Get the log ID from the entry to select the right key
     let log_id = entry
