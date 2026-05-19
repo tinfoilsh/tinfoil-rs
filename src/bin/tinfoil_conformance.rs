@@ -95,7 +95,8 @@ fn cmd_capabilities() -> u8 {
             },
             "predicate_types_understood": [
                 "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1"
-            ]
+            ],
+            "legacy_bundle_format_supported": false
         },
         "platforms_supported": ["sev-snp"],
         "transport_modes_supported": ["tls-pinning"],
