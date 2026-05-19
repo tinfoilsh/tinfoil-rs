@@ -288,7 +288,13 @@ fn classify_error(msg: &str) -> (&'static str, &'static str) {
     }
     // Coarse substring matching for messages emitted by rekor/fulcio/dsse/cert/transparency.
     // Order matters — more specific patterns are tested first.
-    if msg.contains("Expected exactly 1 tlog entry") || msg.contains("No tlogEntries") {
+    if msg.contains("outside certificate validity window")
+        || msg.contains("outside of the certificate validity")
+        || msg.contains("certificate is expired")
+        || msg.contains("certificate has expired")
+    {
+        ("CERT_EXPIRED", "5.2")
+    } else if msg.contains("Expected exactly 1 tlog entry") || msg.contains("No tlogEntries") {
         ("TLOG_COUNT_OUT_OF_RANGE", "5.2")
     } else if msg.contains("No Rekor key valid")
         || msg.contains("Trusted log IDs:")
