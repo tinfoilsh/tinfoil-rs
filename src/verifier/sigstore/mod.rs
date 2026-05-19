@@ -257,23 +257,19 @@ fn verify_certificate_identity_with_policy(
         )));
     }
 
-    // BuildSignerURI is shaped `https://github.com/{repo}/.github/workflows/<file>@<ref>`.
-    // The ref portion must begin with `policy.workflow_ref_prefix`. Using `[^@]+` for
-    // the workflow filename guarantees we anchor on the *first* `@`, which prevents
-    // attacker-controlled URIs like `…@refs/heads/main@refs/tags/v1` from sneaking
-    // through via substring matching.
-    let pattern = format!(
-        r"^https://github\.com/{}/\.github/workflows/[^@]+@{}",
-        regex::escape(&policy.workflow_repository),
-        regex::escape(&policy.workflow_ref_prefix),
-    );
-    let re = regex::Regex::new(&pattern).map_err(|e| {
-        Error::SigstoreVerification(format!("Invalid workflow ref regex: {}", e))
-    })?;
-    if !re.is_match(&cert_info.subject_workflow) {
+    // SPEC §5.3 specifies the GitHubWorkflowRef extension (OID 1.3.6.1.4.1.57264.1.6)
+    // as the source of truth for the workflow_ref check. Previously this verifier
+    // regexed the BuildSignerURI extension (.1.9) — which is `<repo-url>@<ref>` —
+    // assuming the @ref suffix would always agree with the GitHubWorkflowRef
+    // extension. For legitimate Fulcio-issued certs that's true (both derive from
+    // the same OIDC `ref` claim), but a misissued or crafted cert can carry
+    // mismatched values, in which case the BuildSignerURI-only check accepts
+    // certs the SPEC says to reject. tinfoil-conformance fixture
+    // 060b-cert-ext-mismatch-ref-vs-buildsigner pins this divergence.
+    if !cert_info.workflow_ref.starts_with(&policy.workflow_ref_prefix) {
         return Err(Error::SigstoreVerification(format!(
-            "WORKFLOW_REF_PREFIX_MISMATCH: cert subject_workflow {:?} does not match prefix {:?}",
-            cert_info.subject_workflow, policy.workflow_ref_prefix
+            "WORKFLOW_REF_PREFIX_MISMATCH: cert GitHubWorkflowRef extension {:?} does not start with policy.workflow_ref_prefix {:?}",
+            cert_info.workflow_ref, policy.workflow_ref_prefix
         )));
     }
 

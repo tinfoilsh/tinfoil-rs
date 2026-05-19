@@ -31,9 +31,18 @@ use crate::error::{Error, Result};
 /// Verification certificate info extracted from bundle
 #[derive(Debug)]
 pub struct CertificateInfo {
+    /// OIDC issuer extension value (V2 preferred, V1 fallback).
     pub issuer: String,
+    /// BuildSignerURI extension value: full
+    /// `https://github.com/owner/repo/.github/workflows/<file>@<ref>` URI.
+    /// Surfaced for diagnostics; SPEC §5.3 says the canonical workflow-ref
+    /// check uses the GitHubWorkflowRef extension instead — see `workflow_ref`.
     pub subject_workflow: String,
+    /// GitHubWorkflowRepository extension value (`owner/repo`).
     pub repository: String,
+    /// GitHubWorkflowRef extension value (e.g. `refs/tags/v1.2.3`). This is
+    /// the SPEC §5.3 source of truth for the workflow_ref_prefix check.
+    pub workflow_ref: String,
 }
 
 /// Fulcio OIDC extension OIDs
@@ -45,6 +54,9 @@ mod fulcio_oids {
     pub const OIDC_ISSUER_V2: &str = "1.3.6.1.4.1.57264.1.8";
     /// GitHub Workflow Repository V1 (1.3.6.1.4.1.57264.1.5)
     pub const GITHUB_WORKFLOW_REPOSITORY: &str = "1.3.6.1.4.1.57264.1.5";
+    /// GitHub Workflow Ref V1 (1.3.6.1.4.1.57264.1.6) — the canonical SPEC §5.3 source
+    /// of truth for the workflow ref check. Not BuildSignerURI.
+    pub const GITHUB_WORKFLOW_REF: &str = "1.3.6.1.4.1.57264.1.6";
     /// Build Signer URI (1.3.6.1.4.1.57264.1.9)
     pub const BUILD_SIGNER_URI: &str = "1.3.6.1.4.1.57264.1.9";
     /// Source Repository URI (1.3.6.1.4.1.57264.1.12)
@@ -127,6 +139,7 @@ pub fn extract_certificate_info(cert: &Certificate) -> Result<CertificateInfo> {
     let mut issuer = String::new();
     let mut repository = String::new();
     let mut subject_workflow = String::new();
+    let mut workflow_ref = String::new();
 
     if let Some(extensions) = &cert.tbs_certificate.extensions {
         for ext in extensions.iter() {
@@ -151,6 +164,9 @@ pub fn extract_certificate_info(cert: &Certificate) -> Result<CertificateInfo> {
                 }
                 fulcio_oids::GITHUB_WORKFLOW_REPOSITORY => {
                     repository = value;
+                }
+                fulcio_oids::GITHUB_WORKFLOW_REF => {
+                    workflow_ref = value;
                 }
                 fulcio_oids::SOURCE_REPOSITORY_URI if repository.is_empty() => {
                     // V2 fallback: extract repo name from URI
@@ -181,11 +197,17 @@ pub fn extract_certificate_info(cert: &Certificate) -> Result<CertificateInfo> {
             "Certificate missing required workflow extension".into(),
         ));
     }
+    if workflow_ref.is_empty() {
+        return Err(Error::SigstoreVerification(
+            "Certificate missing required GitHubWorkflowRef extension".into(),
+        ));
+    }
 
     Ok(CertificateInfo {
         issuer,
         subject_workflow,
         repository,
+        workflow_ref,
     })
 }
 

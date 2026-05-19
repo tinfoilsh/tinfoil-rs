@@ -76,11 +76,11 @@ fn cmd_capabilities() -> u8 {
         "stages_supported": ["verify-sigstore"],
         "sigstore": {
             "trust_root_loading": "configurable",
-            // tinfoil-rs uses bundle-supplied cert NotBefore for chain-validity
-            // scoping, not the system clock. The supplied verification_time_unix
-            // is informational and not currently consulted — fixtures still
-            // run hermetically.
-            "verification_time_override": "supported",
+            // tinfoil-rs scopes cert/CA/Rekor-key validity to bundle-supplied
+            // times (cert NotBefore, Rekor integratedTime) — hermetic on the
+            // system clock by construction. The fixture-supplied
+            // verification_time_unix isn't consulted; declaring honestly.
+            "verification_time_override": "bundle-supplied-only",
             "policy_fields_configurable": {
                 "oidc_issuer": true,
                 "workflow_ref_prefix": true,
@@ -101,14 +101,10 @@ fn cmd_capabilities() -> u8 {
         "transport_modes_supported": ["tls-pinning"],
         "flow_modes_supported": ["standard"],
         "known_quirks": {
-            "sigstore.tlog_entries_exactly_one":
-                "rekor::verify_rekor_entry rejects bundles with !=1 tlog entries",
             "sigstore.in_toto_statement_type_strict":
                 "default Policy pins to in-toto v0.1/v1; can be overridden",
             "sigstore.digest_compare_lowercase_normalize":
                 "digest comparison is to_lowercase() on both sides",
-            "sigstore.verification_time_supplied_but_ignored":
-                "rust uses cert NotBefore from bundle for CA/key validity scoping",
             "sigstore.dcode_label_strict": true
         }
     });
@@ -221,7 +217,7 @@ fn cmd_verify_sigstore() -> u8 {
         &policy,
         &trust_root_json,
     ) {
-        Ok(result) => emit_accept_and_exit(result),
+        Ok(result) => emit_accept_and_exit(result, &bundle_bytes),
         Err(e) => {
             let (code, spec_ref) = classify_error(&e.to_string());
             emit_rejection_and_exit(code, spec_ref, &e.to_string(), EXIT_REJECT)
@@ -229,7 +225,14 @@ fn cmd_verify_sigstore() -> u8 {
     }
 }
 
-fn emit_accept_and_exit(r: SigstoreResult) -> u8 {
+fn emit_accept_and_exit(r: SigstoreResult, bundle_bytes: &[u8]) -> u8 {
+    // Extract bundle-observed metadata fields (rekor log id, integrated time,
+    // tlog entry count, SCT count) for the harness to compare across SDKs.
+    // These are bundle-derived, not policy-driven — same parse work both SDKs
+    // do during verification, surfaced here for diffability.
+    let (rekor_log_id_hex, rekor_integrated_time_unix, tlog_entry_count, sct_count) =
+        extract_bundle_observables(bundle_bytes);
+
     let body = json!({
         "stage": "verify-sigstore",
         "accepted": true,
@@ -253,10 +256,121 @@ fn emit_accept_and_exit(r: SigstoreResult) -> u8 {
             "cert_oidc_issuer": r.cert_oidc_issuer,
             "cert_workflow_repository": r.cert_workflow_repository,
             "cert_workflow_signer_uri": r.cert_workflow_signer_uri,
+            "rekor_log_id_hex": rekor_log_id_hex,
+            "rekor_integrated_time_unix": rekor_integrated_time_unix,
+            "tlog_entry_count": tlog_entry_count,
+            "sct_count": sct_count,
         }
     });
     println!("{}", serde_json::to_string_pretty(&body).unwrap());
     EXIT_ACCEPT
+}
+
+/// Parse the bundle and return (rekor_log_id_hex, integrated_time, tlog_entry_count, sct_count).
+/// Each field is `None` if the bundle doesn't carry it. Pure observation — no
+/// verification, since the caller has already verified.
+fn extract_bundle_observables(
+    bundle_bytes: &[u8],
+) -> (Option<String>, Option<u64>, Option<usize>, Option<usize>) {
+    let Ok(bundle) = serde_json::from_slice::<serde_json::Value>(bundle_bytes) else {
+        return (None, None, None, None);
+    };
+    let tlogs = bundle
+        .get("verificationMaterial")
+        .and_then(|vm| vm.get("tlogEntries"))
+        .and_then(|t| t.as_array());
+    let tlog_count = tlogs.map(|t| t.len());
+    let (log_id_hex, integrated) = if let Some(entries) = tlogs.and_then(|t| t.first()) {
+        let log_id_b64 = entries
+            .get("logId")
+            .and_then(|l| l.get("keyId"))
+            .and_then(|k| k.as_str());
+        let log_id = log_id_b64.and_then(|s| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(s)
+                .ok()
+                .map(|b| hex::encode(b))
+        });
+        let it = entries.get("integratedTime").and_then(|t| {
+            t.as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .or_else(|| t.as_u64())
+        });
+        (log_id, it)
+    } else {
+        (None, None)
+    };
+
+    // SCT count: parse the leaf cert, find the SCT extension, count entries.
+    let sct_count: Option<usize> = (|| -> Option<usize> {
+        use base64::Engine;
+        use der::Decode;
+        use x509_cert::Certificate;
+        let cert_b64 = bundle
+            .get("verificationMaterial")?
+            .get("certificate")?
+            .get("rawBytes")?
+            .as_str()?;
+        let cert_der = base64::engine::general_purpose::STANDARD
+            .decode(cert_b64)
+            .ok()?;
+        let cert = Certificate::from_der(&cert_der).ok()?;
+        // SCT OID 1.3.6.1.4.1.11129.2.4.2; the extension value is OCTET STRING
+        // wrapping SerializedSCTList (2-byte total len, then per-SCT 2-byte len+body).
+        let exts = cert.tbs_certificate.extensions.as_ref()?;
+        let sct_oid = "1.3.6.1.4.1.11129.2.4.2";
+        for ext in exts {
+            if ext.extn_id.to_string() != sct_oid {
+                continue;
+            }
+            let raw = ext.extn_value.as_bytes();
+            // Outer DER OCTET STRING (tag 0x04, length, contents).
+            if raw.len() < 2 || raw[0] != 0x04 {
+                return None;
+            }
+            let (inner_offset, _inner_len) = parse_der_length(&raw[1..])?;
+            let inner = &raw[1 + inner_offset..];
+            if inner.len() < 2 {
+                return None;
+            }
+            // SerializedSCTList: 2-byte big-endian total length, then SCT entries.
+            let total_len = u16::from_be_bytes([inner[0], inner[1]]) as usize;
+            let list = &inner[2..2 + total_len.min(inner.len() - 2)];
+            let mut count = 0usize;
+            let mut i = 0usize;
+            while i + 2 <= list.len() {
+                let sct_len = u16::from_be_bytes([list[i], list[i + 1]]) as usize;
+                i += 2;
+                if i + sct_len > list.len() {
+                    return None;
+                }
+                i += sct_len;
+                count += 1;
+            }
+            return Some(count);
+        }
+        None
+    })();
+
+    (log_id_hex, integrated, tlog_count, sct_count)
+}
+
+/// Parse a DER length octet pair: returns (bytes_consumed, length_value).
+fn parse_der_length(b: &[u8]) -> Option<(usize, usize)> {
+    let first = *b.first()?;
+    if first < 0x80 {
+        return Some((1, first as usize));
+    }
+    let n = (first & 0x7F) as usize;
+    if n == 0 || n > std::mem::size_of::<usize>() || b.len() < 1 + n {
+        return None;
+    }
+    let mut val: usize = 0;
+    for &byte in &b[1..1 + n] {
+        val = (val << 8) | byte as usize;
+    }
+    Some((1 + n, val))
 }
 
 fn emit_rejection_and_exit(code: &str, spec_ref: &str, message: &str, exit_code: u8) -> u8 {
@@ -340,6 +454,7 @@ fn classify_error(msg: &str) -> (&'static str, &'static str) {
 }
 
 const PREFIX_MAP: &[(&str, &str, &str)] = &[
+    ("TLOG_COUNT_OUT_OF_RANGE:", "TLOG_COUNT_OUT_OF_RANGE", "5.2"),
     ("OIDC_ISSUER_MISMATCH:", "OIDC_ISSUER_MISMATCH", "5.3"),
     ("WORKFLOW_REPOSITORY_MISMATCH:", "WORKFLOW_REPOSITORY_MISMATCH", "5.3"),
     ("WORKFLOW_REF_PREFIX_MISMATCH:", "WORKFLOW_REF_PREFIX_MISMATCH", "5.3"),
