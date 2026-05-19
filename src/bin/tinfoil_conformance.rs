@@ -287,8 +287,15 @@ fn classify_error(msg: &str) -> (&'static str, &'static str) {
         }
     }
     // Coarse substring matching for messages emitted by rekor/fulcio/dsse/cert/transparency.
+    // Order matters — more specific patterns are tested first.
     if msg.contains("Expected exactly 1 tlog entry") || msg.contains("No tlogEntries") {
         ("TLOG_COUNT_OUT_OF_RANGE", "5.2")
+    } else if msg.contains("No Rekor key valid")
+        || msg.contains("Trusted log IDs:")
+        || msg.contains("Unknown Rekor log")
+        || (msg.contains("Rekor") && msg.contains("log ID"))
+    {
+        ("REKOR_KEY_NOT_TRUSTED", "5.1")
     } else if msg.contains("Rekor entry integrated time")
         || msg.contains("inclusion proof")
         || msg.contains("Inclusion proof")
@@ -301,6 +308,7 @@ fn classify_error(msg: &str) -> (&'static str, &'static str) {
     } else if msg.contains("No valid SCT") || msg.contains("Failed to extract SCT") {
         ("SCT_INSUFFICIENT", "5.2")
     } else if msg.contains("Certificate not issued by any trusted Fulcio CA")
+        || msg.contains("Could not find issuer certificate")
         || msg.contains("Fulcio chain")
     {
         ("FULCIO_CHAIN_INVALID", "5.2")
