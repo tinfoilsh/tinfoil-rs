@@ -99,7 +99,10 @@ fn cmd_capabilities() -> u8 {
             "legacy_bundle_format_supported": false,
             "accepts_multi_tlog_entries": true,
             "oidc_issuer_v2_preferred": true,
-            "scts_count_distinguish_missing_vs_duplicate": true
+            "scts_count_distinguish_missing_vs_duplicate": true,
+            "rejects_duplicate_sct_log": true,
+            "checks_only_subject_0": true,
+            "in_toto_statement_tolerates_extra_fields": true
         },
         "platforms_supported": ["sev-snp"],
         "transport_modes_supported": ["tls-pinning"],
