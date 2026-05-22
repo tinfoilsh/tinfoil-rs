@@ -40,6 +40,7 @@ fn main() -> ExitCode {
         "capabilities" => exit(cmd_capabilities()),
         "verify-sigstore" => exit(cmd_verify_sigstore()),
         "verify-measurement" => exit(cmd_verify_measurement()),
+        "verify-hardware-measurements" => exit(cmd_verify_hardware_measurements()),
         "--help" | "-h" | "help" | "" => {
             print_help();
             ExitCode::from(0)
@@ -75,7 +76,7 @@ fn cmd_capabilities() -> u8 {
         "schema_version": "1",
         "sdk": SDK_NAME,
         "sdk_version": SDK_VERSION,
-        "stages_supported": ["verify-sigstore", "verify-measurement"],
+        "stages_supported": ["verify-sigstore", "verify-measurement", "verify-hardware-measurements"],
         "sigstore": {
             "trust_root_loading": "configurable",
             // tinfoil-rs scopes cert/CA/Rekor-key validity to bundle-supplied
@@ -625,4 +626,105 @@ fn cmd_verify_measurement() -> u8 {
     });
     println!("{}", serde_json::to_string_pretty(&body).unwrap());
     EXIT_ACCEPT
+}
+
+// -----------------------------------------------------------------------------
+// verify-hardware-measurements (SPEC §6)
+// -----------------------------------------------------------------------------
+//
+// tinfoil-rs's verifier crate doesn't expose a dedicated SPEC §6.3 hardware-
+// measurement matching function today (the algorithm is trivial enough to be
+// inlined at the application layer). The conformance binary implements §6.3
+// directly here so the SPEC behavior is testable cross-SDK; if/when a lib
+// helper lands, swap this in.
+
+#[derive(Debug, Deserialize)]
+struct HardwareMeasurementInput {
+    id: String,
+    mrtd: String,
+    rtmr0: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct VerifyHardwareInput {
+    schema_version: String,
+    enclave_measurement: MeasurementInput,
+    hardware_measurements: Vec<HardwareMeasurementInput>,
+}
+
+fn emit_hardware_rejection(code: &str, spec_ref: &str, message: &str) -> u8 {
+    let body = json!({
+        "stage": "verify-hardware-measurements",
+        "accepted": false,
+        "rejection": {
+            "code": code,
+            "spec_ref": spec_ref,
+            "message": message,
+        }
+    });
+    println!("{}", serde_json::to_string_pretty(&body).unwrap());
+    EXIT_REJECT
+}
+
+fn cmd_verify_hardware_measurements() -> u8 {
+    let mut buf = String::new();
+    if let Err(e) = io::stdin().read_to_string(&mut buf) {
+        eprintln!("error reading stdin: {e}");
+        return EXIT_INTERNAL;
+    }
+    let input: VerifyHardwareInput = match serde_json::from_str(&buf) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("input schema violation: {e}");
+            return EXIT_BAD_INPUT;
+        }
+    };
+    if input.schema_version != "1" {
+        eprintln!("schema_version must be \"1\"");
+        return EXIT_BAD_INPUT;
+    }
+
+    // SPEC §6.3 step 1: enclave_measurement MUST be TdxGuestV2 with exactly 5
+    // registers.
+    if input.enclave_measurement.type_ != TDX_URI {
+        return emit_hardware_rejection(
+            "ENCLAVE_MEASUREMENT_TYPE_INVALID",
+            "6.3",
+            "enclave measurement type is not TdxGuestV2",
+        );
+    }
+    if input.enclave_measurement.registers.len() != 5 {
+        return emit_hardware_rejection(
+            "ENCLAVE_REGISTER_COUNT_INVALID",
+            "6.3",
+            &format!(
+                "TDX enclave measurement must have 5 registers, got {}",
+                input.enclave_measurement.registers.len()
+            ),
+        );
+    }
+
+    // SPEC §7.3 lowercase normalization.
+    let enclave_mrtd = input.enclave_measurement.registers[0].to_lowercase();
+    let enclave_rtmr0 = input.enclave_measurement.registers[1].to_lowercase();
+
+    // SPEC §6.3 step 3: return the FIRST matching hardware measurement.
+    for hw in &input.hardware_measurements {
+        if hw.mrtd.to_lowercase() == enclave_mrtd
+            && hw.rtmr0.to_lowercase() == enclave_rtmr0
+        {
+            let body = json!({
+                "stage": "verify-hardware-measurements",
+                "accepted": true,
+                "outputs": {
+                    "matched_id": hw.id,
+                    "matched_mrtd": hw.mrtd.to_lowercase(),
+                    "matched_rtmr0": hw.rtmr0.to_lowercase(),
+                }
+            });
+            println!("{}", serde_json::to_string_pretty(&body).unwrap());
+            return EXIT_ACCEPT;
+        }
+    }
+    emit_hardware_rejection("HARDWARE_NO_MATCH", "6.3", "no matching hardware platform found")
 }
