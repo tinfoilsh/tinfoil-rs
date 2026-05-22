@@ -22,6 +22,7 @@ use std::process::ExitCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use tinfoil::verifier::attestation::types::{Measurement, MeasurementError, PredicateType};
 use tinfoil::verifier::sigstore::{verify_bundle_with_policy, Policy, SigstoreResult};
 
 const EXIT_ACCEPT: u8 = 0;
@@ -38,6 +39,7 @@ fn main() -> ExitCode {
     match sub {
         "capabilities" => exit(cmd_capabilities()),
         "verify-sigstore" => exit(cmd_verify_sigstore()),
+        "verify-measurement" => exit(cmd_verify_measurement()),
         "--help" | "-h" | "help" | "" => {
             print_help();
             ExitCode::from(0)
@@ -73,7 +75,7 @@ fn cmd_capabilities() -> u8 {
         "schema_version": "1",
         "sdk": SDK_NAME,
         "sdk_version": SDK_VERSION,
-        "stages_supported": ["verify-sigstore"],
+        "stages_supported": ["verify-sigstore", "verify-measurement"],
         "sigstore": {
             "trust_root_loading": "configurable",
             // tinfoil-rs scopes cert/CA/Rekor-key validity to bundle-supplied
@@ -103,6 +105,9 @@ fn cmd_capabilities() -> u8 {
             "rejects_duplicate_sct_log": true,
             "checks_only_subject_0": true,
             "in_toto_statement_tolerates_extra_fields": true
+        },
+        "measurement": {
+            "compare_multiplatform_to_tdx_supported": true
         },
         "platforms_supported": ["sev-snp"],
         "transport_modes_supported": ["tls-pinning"],
@@ -479,4 +484,145 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     base64::engine::general_purpose::STANDARD
         .decode(s)
         .map_err(|e| e.to_string())
+}
+
+// -----------------------------------------------------------------------------
+// verify-measurement (SPEC §7)
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct MeasurementInput {
+    #[serde(rename = "type")]
+    type_: String,
+    registers: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VerifyMeasurementInput {
+    schema_version: String,
+    source: MeasurementInput,
+    #[serde(default)]
+    target: Option<MeasurementInput>,
+}
+
+const SEV_URI: &str = "https://tinfoil.sh/predicate/sev-snp-guest/v2";
+const TDX_URI: &str = "https://tinfoil.sh/predicate/tdx-guest/v2";
+const MP_URI: &str = "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1";
+
+fn parse_predicate_type(uri: &str) -> Option<PredicateType> {
+    match uri {
+        SEV_URI => Some(PredicateType::SevGuestV2),
+        TDX_URI => Some(PredicateType::TdxGuestV2),
+        MP_URI => Some(PredicateType::SnpTdxMultiPlatformV1),
+        _ => None,
+    }
+}
+
+/// SPEC §7.1 register count for a predicate type.
+fn expected_register_count(t: &PredicateType) -> Option<usize> {
+    match t {
+        PredicateType::SevGuestV2 => Some(1),
+        PredicateType::TdxGuestV2 => Some(5),
+        PredicateType::SnpTdxMultiPlatformV1 => Some(3),
+        _ => None,
+    }
+}
+
+fn normalize_measurement(m: &MeasurementInput) -> Result<Measurement, (&'static str, &'static str)> {
+    let Some(t) = parse_predicate_type(&m.type_) else {
+        return Err(("MEASUREMENT_TYPE_UNKNOWN", "2.3"));
+    };
+    let Some(expected) = expected_register_count(&t) else {
+        return Err(("MEASUREMENT_TYPE_UNKNOWN", "7.1"));
+    };
+    if m.registers.len() != expected {
+        return Err(("MEASUREMENT_REGISTER_COUNT_INVALID", "7.1"));
+    }
+    Ok(Measurement {
+        type_: t,
+        // SPEC §7.3: normalize register values to lowercase before any
+        // comparison or storage.
+        registers: m.registers.iter().map(|r| r.to_lowercase()).collect(),
+    })
+}
+
+fn classify_measurement_error(e: &MeasurementError) -> (&'static str, &'static str) {
+    match e {
+        MeasurementError::FormatMismatch => ("MEASUREMENT_TYPE_COMBINATION_UNSUPPORTED", "7.3.5"),
+        MeasurementError::RegisterMismatch => ("MEASUREMENT_MISMATCH", "7.3.1"),
+        MeasurementError::TooFewRegisters => ("MEASUREMENT_REGISTER_COUNT_INVALID", "7.1"),
+        MeasurementError::SnpMismatch => ("MEASUREMENT_MISMATCH", "7.3.3"),
+        MeasurementError::Rtmr1Mismatch | MeasurementError::Rtmr2Mismatch => {
+            ("MEASUREMENT_MISMATCH", "7.3.2")
+        }
+        MeasurementError::Rtmr3Mismatch => ("MEASUREMENT_RTMR3_NONZERO", "7.3.2"),
+        _ => ("MEASUREMENT_MISMATCH", "7.3"),
+    }
+}
+
+fn emit_measurement_rejection(code: &str, spec_ref: &str, message: &str) -> u8 {
+    let body = json!({
+        "stage": "verify-measurement",
+        "accepted": false,
+        "rejection": {
+            "code": code,
+            "spec_ref": spec_ref,
+            "message": message,
+        }
+    });
+    println!("{}", serde_json::to_string_pretty(&body).unwrap());
+    EXIT_REJECT
+}
+
+fn cmd_verify_measurement() -> u8 {
+    let mut buf = String::new();
+    if let Err(e) = io::stdin().read_to_string(&mut buf) {
+        eprintln!("error reading stdin: {e}");
+        return EXIT_INTERNAL;
+    }
+    let input: VerifyMeasurementInput = match serde_json::from_str(&buf) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("input schema violation: {e}");
+            return EXIT_BAD_INPUT;
+        }
+    };
+    if input.schema_version != "1" {
+        eprintln!("schema_version must be \"1\"");
+        return EXIT_BAD_INPUT;
+    }
+
+    let source = match normalize_measurement(&input.source) {
+        Ok(m) => m,
+        Err((code, spec_ref)) => {
+            return emit_measurement_rejection(code, spec_ref, "source measurement invalid")
+        }
+    };
+    let target = match input.target.as_ref().map(normalize_measurement).transpose() {
+        Ok(t) => t,
+        Err((code, spec_ref)) => {
+            return emit_measurement_rejection(code, spec_ref, "target measurement invalid")
+        }
+    };
+
+    let source_fp = source.fingerprint();
+    let target_fp = target.as_ref().map(|t| t.fingerprint());
+
+    if let Some(t) = target.as_ref() {
+        if let Err(e) = source.equals(t) {
+            let (code, spec_ref) = classify_measurement_error(&e);
+            return emit_measurement_rejection(code, spec_ref, &e.to_string());
+        }
+    }
+
+    let body = json!({
+        "stage": "verify-measurement",
+        "accepted": true,
+        "outputs": {
+            "source_fingerprint_hex": source_fp,
+            "target_fingerprint_hex": target_fp,
+        }
+    });
+    println!("{}", serde_json::to_string_pretty(&body).unwrap());
+    EXIT_ACCEPT
 }
