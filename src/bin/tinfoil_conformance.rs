@@ -110,6 +110,14 @@ fn cmd_capabilities() -> u8 {
         "measurement": {
             "compare_multiplatform_to_tdx_supported": true
         },
+        "attestation_tdx": {
+            // tinfoil-rs doesn't ship a native TDX quote verifier today
+            // (only SEV-SNP via verifier/attestation). Declared false so
+            // attestation-tdx fixtures skip cleanly. When a TDX verifier
+            // lands, flip to true and add the conformance wrapper.
+            "supported": false,
+            "injected_collateral_supported": false
+        },
         "platforms_supported": ["sev-snp"],
         "transport_modes_supported": ["tls-pinning"],
         "flow_modes_supported": ["standard"],
