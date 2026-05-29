@@ -123,7 +123,7 @@ path = "src/bin/conformance.rs"
 
 # Tinfoil-flavored conformance binary (separate from the upstream sigstore-conformance
 # binary above). Implements the CLI contract defined in
-# https://github.com/lsd-cat/tinfoil-conformance — capabilities + per-stage verifiers.
+# https://github.com/tinfoilsh/tinfoil-conformance — capabilities + per-stage verifiers.
 [[bin]]
 name = "tinfoil-conformance"
 path = "src/bin/tinfoil_conformance.rs"
