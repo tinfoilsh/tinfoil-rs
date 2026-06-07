@@ -1225,6 +1225,9 @@ fn run_verify_attestation_sev_inner(input: &VerifyAttestationSevInput) -> Result
                 return Err(("REPORT_TRUNCATED".to_string(), "3.1".to_string(),
                             format!("SEV report is {} bytes, expected >= {SEV_REPORT_LEN}", report.len())));
             }
+            if let Some((code, spec_ref, msg)) = enforce_sev_policy(&report, input.policy.as_ref()) {
+                return Err((code.to_string(), spec_ref.to_string(), msg));
+            }
             Ok(report)
         }
         Err(e) => {
