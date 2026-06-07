@@ -27,6 +27,7 @@ use tinfoil::verifier::sigstore::{verify_bundle_with_policy, Policy, SigstoreRes
 
 const EXIT_ACCEPT: u8 = 0;
 const EXIT_REJECT: u8 = 10;
+const EXIT_UNSUPPORTED: u8 = 20;
 const EXIT_BAD_INPUT: u8 = 30;
 const EXIT_INTERNAL: u8 = 1;
 
@@ -42,6 +43,7 @@ fn main() -> ExitCode {
         "verify-measurement" => exit(cmd_verify_measurement()),
         "verify-hardware-measurements" => exit(cmd_verify_hardware_measurements()),
         "verify-attestation-sev" => exit(cmd_verify_attestation_sev()),
+        "verify-attestation-tdx" => exit(cmd_verify_attestation_tdx()),
         "verify-full" => exit(cmd_verify_full()),
         "--help" | "-h" | "help" | "" => {
             print_help();
@@ -124,7 +126,17 @@ fn cmd_capabilities() -> u8 {
             // attestation-tdx fixtures skip cleanly. When a TDX verifier
             // lands, flip to true and add the conformance wrapper.
             "supported": false,
-            "injected_collateral_supported": false
+            "injected_collateral_supported": false,
+            "verification_time_override": "system-clock-only",
+            "tcb_evaluation_supported": false,
+            "public_api_hooks_supported": false,
+            "extended_td_checks_supported": false,
+            "accepts_non_terminal_tcb_statuses": false,
+            "enforces_tcb_evaluation_data_number_minimum": false,
+            "policy_fields_supported": {
+                "expected_fmspc_hex": false,
+                "accepted_qv_results": false
+            }
         },
         "attestation_sev": {
             // cmd_verify_attestation_sev wraps verifier::attestation::sev::
@@ -1275,6 +1287,11 @@ fn cmd_verify_attestation_sev() -> u8 {
     });
     println!("{}", serde_json::to_string_pretty(&body).unwrap());
     EXIT_ACCEPT
+}
+
+fn cmd_verify_attestation_tdx() -> u8 {
+    eprintln!("verify-attestation-tdx is unsupported: tinfoil-rs does not ship a native TDX quote verifier yet");
+    EXIT_UNSUPPORTED
 }
 
 // =============================================================================
