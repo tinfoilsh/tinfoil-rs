@@ -143,6 +143,10 @@ fn cmd_capabilities() -> u8 {
             // verify_with_inline_collateral with VCEK supplied inline.
             "supported": true,
             "injected_collateral_supported": true,
+            // The SEV adapter already calls the SDK's public verifier
+            // (verify_with_inline_collateral), so execution_mode=public_api
+            // fixtures exercise the public surface through the same path.
+            "public_api_hooks_supported": true,
             // The conformance binary enforces SPEC §3.7 / §3.8 / §8.2-3
             // policy pins (measurement, host_data, report_data, etc.) and
             // enforce_spec_defaults checks (DEBUG/MIGRATE/reserved bits).
@@ -830,6 +834,13 @@ struct VerifyAttestationSevInput {
     expiration_check_date_unix: Option<i64>,
     #[serde(default)]
     policy: Option<SevPolicyInput>,
+    // execution_mode=public_api: tinfoil-rs's SEV adapter already drives the
+    // SDK's public verifier (verifier::attestation::sev::verify_with_inline_
+    // collateral), so the public-api path is the same code — no separate
+    // branch needed. Field accepted (and ignored) so the variant input parses.
+    #[serde(default)]
+    #[allow(dead_code)]
+    execution_mode: Option<String>,
 }
 
 fn emit_sev_rejection(code: &str, spec_ref: &str, message: &str) -> u8 {
