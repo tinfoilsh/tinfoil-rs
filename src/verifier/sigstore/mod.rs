@@ -26,9 +26,14 @@ use crate::error::{Error, Result};
 use crate::verifier::util::decode_b64;
 use serde::Deserialize;
 
-/// In-toto statement from the decoded payload
+/// In-toto statement from the decoded payload.
+///
+/// SPEC §5.4: the statement MUST contain only the recognized top-level fields;
+/// deny_unknown_fields rejects any extra ones at parse time (matching
+/// tinfoil-go's strict protojson parser and tinfoil-py/-js). Tinfoil produces
+/// canonical statements, so an unknown top-level field is non-canonical.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct InTotoStatement {
     #[serde(rename = "_type")]
     _type_: String,
