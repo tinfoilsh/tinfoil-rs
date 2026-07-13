@@ -72,6 +72,14 @@ pub mod relaxed;
 pub mod sse;
 pub mod verifier;
 
+// Internal: per-user prompt-cache scoping (`user_cache_secret`). The public
+// surface is `Client::with_user_cache_secret` and the automatic injection.
+mod user_cache_secret;
+
+// Unit-test helpers shared across in-crate test modules.
+#[cfg(test)]
+mod test_support;
+
 // Reachable for in-tree integration tests; hidden from rustdoc so it isn't
 // advertised as part of the public API contract.
 #[doc(hidden)]

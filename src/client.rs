@@ -3,8 +3,14 @@
 //! After verification, ALL requests are made through a TLS connection that
 //! validates the server certificate fingerprint matches the attested value.
 
+use std::sync::Arc;
+
 use async_openai::config::OpenAIConfig;
+use async_openai::middleware::{retry::OpenAIRetryLayer, ReqwestService};
+use tower::Layer;
+
 use crate::error::{Error, Result};
+use crate::user_cache_secret::{SharedUserCacheSecret, UserCacheSecret, UserCacheSecretService};
 use crate::verifier::attestation::{self, types::{AttestationDocument, GroundTruth, Measurement}};
 use crate::verifier::sigstore;
 use crate::verifier::tls;
@@ -37,7 +43,13 @@ pub struct SecureClient {
     
     /// Pinned HTTP client (used after verification)
     /// This client validates cert fingerprint on every connection
-    pinned_client: Option<reqwest::Client>,
+    pinned_client: Option<tls::HostBoundPinnedClient>,
+
+    /// Test-only base-URL override so unit tests can point the request
+    /// paths at a local plain-HTTP server. Production always talks
+    /// `https://{host}`.
+    #[cfg(test)]
+    pub(crate) base_url_override: Option<String>,
 }
 
 impl SecureClient {
@@ -54,6 +66,8 @@ impl SecureClient {
             pinned_measurement: None,
             ground_truth: None,
             pinned_client: None,
+            #[cfg(test)]
+            base_url_override: None,
         }
     }
 
@@ -74,6 +88,8 @@ impl SecureClient {
             pinned_measurement: Some(measurement),
             ground_truth: None,
             pinned_client: None,
+            #[cfg(test)]
+            base_url_override: None,
         }
     }
     
@@ -175,7 +191,12 @@ impl SecureClient {
         ).await?;
         
         // 5. Create pinned HTTP client for all future requests
-        let pinned = tls::create_pinned_client(&verification.tls_public_key_fp)?;
+        let verified_origin = reqwest::Url::parse(&self.base_url())
+            .map_err(|e| Error::Configuration(format!("Invalid enclave origin: {e}")))?;
+        let pinned = tls::create_host_bound_pinned_client(
+            &verification.tls_public_key_fp,
+            verified_origin,
+        )?;
         self.pinned_client = Some(pinned);
         
         // 6. Store ground truth
@@ -325,20 +346,34 @@ impl SecureClient {
         Ok(())
     }
     
-    /// Returns the underlying `reqwest::Client` pinned to the attested TLS certificate.
+    /// Returns an HTTP client pinned and bound to the verified enclave origin.
     ///
-    /// All requests through this client validate the server certificate against
-    /// the attested fingerprint. This is the Rust equivalent of Go's `HTTPClient()`
-    /// and Python's `NewSecureClient()`.
-    ///
-    /// Use this to plug into any HTTP-based SDK (e.g. `async-openai`'s
-    /// `Client::with_http_client()`).
-    pub fn http_client(&self) -> Result<&reqwest::Client> {
-        self.pinned_client.as_ref().ok_or(Error::Configuration("Client not verified - call verify() first".into()))
+    /// Initial requests and redirects to any other scheme, host, or port are
+    /// rejected before transmission.
+    pub fn http_client(&self) -> Result<&tls::OriginBoundClient> {
+        self.pinned_client
+            .as_ref()
+            .map(|client| &client.exposed)
+            .ok_or(Error::Configuration(
+                "Client not verified - call verify() first".into(),
+            ))
+    }
+
+    pub(crate) fn pinned_http_client(&self) -> Result<&reqwest::Client> {
+        self.pinned_client
+            .as_ref()
+            .map(|client| &client.transport)
+            .ok_or(Error::Configuration(
+                "Client not verified - call verify() first".into(),
+            ))
     }
 
     /// Returns the base URL for API requests to this enclave.
     pub fn base_url(&self) -> String {
+        #[cfg(test)]
+        if let Some(url) = &self.base_url_override {
+            return url.clone();
+        }
         format!("https://{}", self.host)
     }
 
@@ -377,6 +412,12 @@ impl SecureClient {
 pub struct Client {
     openai: async_openai::Client<OpenAIConfig>,
     secure: SecureClient,
+    /// Shared prompt-cache-secret source: the injection stack baked into
+    /// `openai` and the relaxed chat path both read through this cell, so
+    /// [`with_user_cache_secret`](Self::with_user_cache_secret) can swap
+    /// the source without rebuilding anything — the two request paths can
+    /// never observe different secrets.
+    user_cache_secret: Arc<SharedUserCacheSecret>,
 }
 
 impl Client {
@@ -427,14 +468,41 @@ impl Client {
 
     /// Create from an already-verified `SecureClient`.
     fn from_secure_client(secure: SecureClient, api_key: &str) -> Result<Self> {
-        let http = secure.http_client()?.clone();
+        let user_cache_secret = Arc::new(SharedUserCacheSecret::new(UserCacheSecret::deferred()));
+        let openai = Self::build_openai(&secure, api_key, &user_cache_secret)?;
+
+        Ok(Self {
+            openai,
+            secure,
+            user_cache_secret,
+        })
+    }
+
+    /// Build the OpenAI client on the pinned transport.
+    ///
+    /// The execution stack mirrors async-openai's default (retry → reqwest)
+    /// with the user-cache-secret layer in between: the field is injected
+    /// into the body before the request enters the pinned TLS connection, so
+    /// the secret is only ever visible to the verified enclave, and retries
+    /// replay the injected body rather than the caller's original.
+    fn build_openai(
+        secure: &SecureClient,
+        api_key: &str,
+        user_cache_secret: &Arc<SharedUserCacheSecret>,
+    ) -> Result<async_openai::Client<OpenAIConfig>> {
+        let http = secure.pinned_http_client()?.clone();
         let config = OpenAIConfig::new()
             .with_api_key(api_key)
             .with_api_base(format!("{}/v1", secure.base_url()));
 
-        let openai = async_openai::Client::with_config(config).with_http_client(http);
+        let stack = OpenAIRetryLayer::default().layer(UserCacheSecretService::new(
+            Arc::clone(user_cache_secret),
+            ReqwestService::new(http.clone()),
+        ));
 
-        Ok(Self { openai, secure })
+        Ok(async_openai::Client::with_config(config)
+            .with_http_client(http)
+            .with_http_service(stack))
     }
 
     /// Re-verify the enclave attestation (e.g. after certificate rotation).
@@ -444,13 +512,45 @@ impl Client {
     pub async fn verify(&mut self) -> Result<&GroundTruth> {
         self.secure.verify().await?;
 
-        let http = self.secure.http_client()?.clone();
-        let config = OpenAIConfig::new()
-            .with_api_key(self.secure.api_key())
-            .with_api_base(format!("{}/v1", self.secure.base_url()));
-        self.openai = async_openai::Client::with_config(config).with_http_client(http);
+        self.openai =
+            Self::build_openai(&self.secure, self.secure.api_key(), &self.user_cache_secret)?;
 
         Ok(self.secure.ground_truth().unwrap())
+    }
+
+    /// Pin the prompt-cache secret for this client (e.g. one stable value
+    /// per end user), taking precedence over the `TINFOIL_USER_CACHE_SECRET`
+    /// environment variable and the generated secret. Use one stable value
+    /// per end user: a server holding many end users' conversations should
+    /// instead set the `user_cache_secret` field per request, which always
+    /// wins over the client-level secret:
+    ///
+    /// ```rust,ignore
+    /// let body = client.chat_relaxed().request()
+    ///     .model("model-name")
+    ///     .set("user_cache_secret", per_user_secret)
+    ///     .build();
+    /// ```
+    ///
+    /// An empty string disables injection and generation entirely, leaving
+    /// every request in the tenant-wide cache namespace.
+    pub fn with_user_cache_secret(self, secret: impl Into<String>) -> Self {
+        // Swap the source inside the shared cell. The injection stack and
+        // the relaxed path read through the same cell on every request, so
+        // the new choice — including the explicit-empty opt-out — takes
+        // effect immediately on both paths, unconditionally: no fallible
+        // stack rebuild is involved that could leave one path injecting a
+        // stale secret.
+        self.user_cache_secret
+            .replace(UserCacheSecret::explicit(secret.into()));
+        self
+    }
+
+    /// Snapshot of the client-level user-cache-secret source, shared with
+    /// the relaxed chat path (which posts through the pinned reqwest client
+    /// directly).
+    pub(crate) fn user_cache_secret(&self) -> Arc<UserCacheSecret> {
+        self.user_cache_secret.current()
     }
 
     /// Returns the underlying `SecureClient` for low-level access.
@@ -468,8 +568,11 @@ impl Client {
         &self.secure.repo
     }
 
-    /// Returns the pinned `reqwest::Client` for raw HTTP requests to the enclave.
-    pub fn http_client(&self) -> Result<&reqwest::Client> {
+    /// Returns an origin-bound pinned HTTP client for raw requests.
+    ///
+    /// Raw callers must add `user_cache_secret` to eligible request bodies
+    /// themselves when prompt-cache scoping is required.
+    pub fn http_client(&self) -> Result<&tls::OriginBoundClient> {
         self.secure.http_client()
     }
 
@@ -526,6 +629,29 @@ impl std::ops::Deref for Client {
 }
 
 #[cfg(test)]
+impl Client {
+    /// Test-only client wired to an unpinned transport and an arbitrary
+    /// base URL (e.g. a local plain-HTTP server), skipping attestation.
+    /// Exercises the production `from_secure_client` construction path.
+    pub(crate) fn test_client(base_url: impl Into<String>) -> Self {
+        crate::ensure_crypto_provider();
+        let transport = reqwest::Client::new();
+        let exposed = tls::OriginBoundClient::unbound_for_test(transport.clone());
+        let secure = SecureClient {
+            host: "enclave.test.invalid".to_string(),
+            repo: "org/repo".to_string(),
+            api_key: "test-key".to_string(),
+            pinned_measurement: None,
+            ground_truth: None,
+            pinned_client: Some(tls::HostBoundPinnedClient { transport, exposed }),
+            base_url_override: Some(base_url.into()),
+        };
+        Self::from_secure_client(secure, "test-key")
+            .expect("a verified transport must yield a client")
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     
@@ -541,4 +667,25 @@ mod tests {
         let client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", "test-key");
         assert!(client.http_client().is_err());
     }
+
+    /// The closest thing this crate has to pinning the transport stack: a
+    /// constructed client must build the injection stack (retry → user cache
+    /// secret → pinned reqwest) without error, and `with_user_cache_secret`
+    /// must replace the source — including the explicit-empty opt-out.
+    /// (End-to-end wire coverage of typed and relaxed request paths lives in
+    /// `relaxed::tests::end_to_end_through_the_tinfoil_client`.)
+    #[test]
+    fn test_with_user_cache_secret_pins_and_disables() {
+        let client = Client::test_client("http://127.0.0.1:9");
+
+        let client = client.with_user_cache_secret("s1");
+        assert_eq!(client.user_cache_secret().get(), Some("s1"));
+
+        // An explicit empty secret still counts as "set": it disables
+        // provisioning instead of falling back to the environment or the
+        // persisted file.
+        let client = client.with_user_cache_secret("");
+        assert_eq!(client.user_cache_secret().get(), None);
+    }
+
 }
