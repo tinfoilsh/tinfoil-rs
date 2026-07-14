@@ -99,22 +99,18 @@ let client = Client::new_default().await?.with_user_cache_secret(secret);
 
 // Or provision it via the environment
 //   TINFOIL_USER_CACHE_SECRET=<secret>   use this value
-//   TINFOIL_USER_CACHE_SECRET=           (set but empty) disable: tenant-wide caching
 
 // Servers that hold many end users' conversations should scope per request;
-// a field set on the body always wins over the client-level secret:
+// a non-empty field set on the body wins over the client-level secret:
 let body = client.chat_relaxed().request()
     .model("model-name")
     .push_message(serde_json::json!({"role": "user", "content": "Hello!"}))
     .set("user_cache_secret", per_user_secret)
     .build();
 let response = client.chat_relaxed().create(body).await?;
-
-// Opt out entirely (tenant-wide caching, no file written)
-let client = Client::new_default().await?.with_user_cache_secret("");
 ```
 
-If the secret cannot be persisted (no home directory, read-only filesystem), the SDK falls back to an in-memory secret and warns once: cache continuity then resets on every process restart. Requests hand-rolled through `http_client()` must provide `user_cache_secret` in eligible request bodies themselves. Containerized deployments should set `TINFOIL_USER_CACHE_SECRET` explicitly — one value per end user if requests are per-user, or empty to keep tenant-wide caching across replicas.
+Empty client or environment values are treated as unset. If the secret cannot be persisted (no home directory, read-only filesystem), the SDK falls back to an in-memory secret and warns once: cache continuity then resets on every process restart. Requests hand-rolled through `http_client()` must provide `user_cache_secret` in eligible request bodies themselves. Containerized deployments should set `TINFOIL_USER_CACHE_SECRET` to a stable non-empty value wherever cache sharing is intended.
 
 ## API Documentation
 

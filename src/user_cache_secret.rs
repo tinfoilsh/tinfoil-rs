@@ -9,8 +9,7 @@
 //!
 //! Resolution order, mirroring the other Tinfoil clients:
 //!
-//! 1. an explicit per-request `user_cache_secret` field in the body (never
-//!    overwritten here),
+//! 1. a non-empty per-request `user_cache_secret` field in the body,
 //! 2. [`Client::with_user_cache_secret`](crate::Client::with_user_cache_secret),
 //! 3. the `TINFOIL_USER_CACHE_SECRET` environment variable,
 //! 4. a generated secret persisted at `~/.tinfoil/user_cache_secret` (0600),
@@ -30,19 +29,16 @@ use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
 use async_openai::error::OpenAIError;
 use async_openai::middleware::HttpRequestFactory;
-use serde::de::IgnoredAny;
 use serde::Deserialize;
+use serde_json::value::RawValue;
 use serde_json::Value;
 
 /// Router-only request-body field. A non-empty string scopes the prompt
-/// cache to that secret; an absent or empty value leaves the request in the
-/// tenant-wide namespace.
+/// cache to that secret.
 pub(crate) const USER_CACHE_SECRET_FIELD: &str = "user_cache_secret";
 
-/// Environment variable that provisions the secret. Setting it to an empty
-/// string disables generation entirely (tenant-wide caching), which is the
-/// right call for pooled multi-user deployments that would otherwise mint a
-/// fresh namespace per container.
+/// Environment variable that provisions the secret. An empty value is
+/// treated as unset.
 pub(crate) const USER_CACHE_SECRET_ENV: &str = "TINFOIL_USER_CACHE_SECRET";
 
 /// Persisted-secret path components under the home directory. The other
@@ -63,14 +59,12 @@ const USER_CACHE_SECRET_PATHS: [&str; 3] = ["/chat/completions", "/completions",
 /// Resolution is deferred to the first request so that
 /// [`Client::with_user_cache_secret`](crate::Client::with_user_cache_secret)
 /// can replace the source before anything touches the environment or the
-/// persisted file — an explicit secret (or explicit opt-out) must never
-/// create `~/.tinfoil/user_cache_secret`.
+/// persisted file.
 pub(crate) enum UserCacheSecret {
     /// No explicit choice: environment, then the persisted (or generated)
     /// secret, resolved once and memoized.
     Deferred(OnceLock<String>),
-    /// Explicitly pinned by the caller. An empty string disables injection
-    /// and generation entirely — "set to empty" is distinct from "not set".
+    /// Explicitly pinned by the caller.
     Explicit(String),
 }
 
@@ -89,12 +83,15 @@ impl UserCacheSecret {
     }
 
     pub(crate) fn explicit(secret: String) -> Self {
-        Self::Explicit(secret)
+        if secret.is_empty() {
+            Self::deferred()
+        } else {
+            Self::Explicit(secret)
+        }
     }
 
-    /// The resolved client-level secret; `None` means injection is disabled
-    /// and requests stay in the tenant-wide cache namespace. Never fails:
-    /// every resolution problem degrades to a fallback or to `None`.
+    /// The resolved client-level secret. Never fails: every resolution
+    /// problem degrades to a fallback or to `None`.
     pub(crate) fn get(&self) -> Option<&str> {
         let secret = match self {
             Self::Explicit(secret) => secret.as_str(),
@@ -139,8 +136,8 @@ impl SharedUserCacheSecret {
     }
 }
 
-/// Default resolution: the environment if the variable is set (including
-/// set-but-empty), otherwise the persisted or generated secret.
+/// Default resolution: a non-empty environment value, otherwise the persisted
+/// or generated secret.
 fn resolve_default() -> String {
     resolve_env_or_file(
         std::env::var_os(USER_CACHE_SECRET_ENV).map(|v| v.to_string_lossy().into_owned()),
@@ -152,9 +149,7 @@ fn resolve_default() -> String {
 /// directory are parameters so the tests stay hermetic (no process-global
 /// environment mutation).
 fn resolve_env_or_file(env: Option<String>, home: Option<PathBuf>) -> String {
-    if let Some(env) = env {
-        // Set-but-empty is a deliberate opt-out: return it as-is so no
-        // secret is generated and no file is touched.
+    if let Some(env) = env.filter(|value| !value.is_empty()) {
         return env;
     }
     load_or_generate(home)
@@ -395,8 +390,6 @@ fn publish_secret_file(dir: &Path, path: &Path) -> io::Result<String> {
 /// the TLS stack uses.
 fn new_user_cache_secret() -> String {
     let mut bytes = [0u8; 32];
-    // Never fall back to a weak secret: no secret means tenant-wide caching,
-    // which is safe.
     match rustls::crypto::ring::default_provider()
         .secure_random
         .fill(&mut bytes)
@@ -405,7 +398,7 @@ fn new_user_cache_secret() -> String {
         Err(_) => {
             eprintln!(
                 "tinfoil: could not generate a user cache secret; \
-                 requests stay in the tenant-wide cache namespace"
+                 automatic prompt-cache scoping is unavailable"
             );
             String::new()
         }
@@ -438,9 +431,8 @@ fn ephemeral_user_cache_secret() -> &'static str {
 /// pinned TLS connection, and retries that rebuild the request replay the
 /// injected body — never the caller's original.
 ///
-/// A field already present in the body is never overwritten: an explicit
-/// per-request value, including an explicit empty string (= opt out for that
-/// request), always wins.
+/// A non-empty or non-string field already present in the body is never
+/// overwritten. An empty string is replaced with the resolved client secret.
 #[derive(Clone, Debug)]
 pub(crate) struct UserCacheSecretService<S> {
     secret: Arc<SharedUserCacheSecret>,
@@ -531,16 +523,12 @@ pub(crate) fn provision_request(request: &mut reqwest::Request, secret: &str) {
 /// brace. Every caller-provided byte survives untouched, so number precision
 /// (e.g. an int64-range `seed` that would not survive an f64 round trip)
 /// cannot be corrupted. Returns `None` — forward the original bytes — for
-/// non-object bodies, trailing data, or a body that already carries the
-/// field.
+/// non-object bodies, trailing data, or a body that already carries a
+/// non-empty or non-string field. An empty string is replaced with the
+/// resolved client secret.
 fn inject_user_cache_secret(raw: &[u8], secret: &str) -> Option<Vec<u8>> {
-    // Parse keys only and syntax-check the values without materializing
-    // them (`IgnoredAny` uses serde_json's skip path): a number literal
-    // outside f64 range such as `1e999` would fail a `Value` parse, but it
-    // is still a well-formed JSON object the router accepts — like the Go
-    // implementation's `UseNumber()` decoder, it must not block injection.
     let mut deserializer = serde_json::Deserializer::from_slice(raw);
-    let Ok(body) = HashMap::<String, IgnoredAny>::deserialize(&mut deserializer) else {
+    let Ok(body) = HashMap::<String, Box<RawValue>>::deserialize(&mut deserializer) else {
         return None; // not a JSON object
     };
     // Trailing whitespace after the object is legal JSON framing; trailing
@@ -549,8 +537,17 @@ fn inject_user_cache_secret(raw: &[u8], secret: &str) -> Option<Vec<u8>> {
     if deserializer.end().is_err() {
         return None;
     }
-    if body.contains_key(USER_CACHE_SECRET_FIELD) {
-        return None;
+    if let Some(existing) = body.get(USER_CACHE_SECRET_FIELD) {
+        if existing.get() != r#""""# {
+            return None;
+        }
+        let range = top_level_value_range(raw, USER_CACHE_SECRET_FIELD)?;
+        let value = serde_json::to_string(secret).ok()?;
+        let mut injected = Vec::with_capacity(raw.len() + value.len());
+        injected.extend_from_slice(&raw[..range.start]);
+        injected.extend_from_slice(value.as_bytes());
+        injected.extend_from_slice(&raw[range.end..]);
+        return Some(injected);
     }
 
     // The last non-whitespace byte is the object's closing brace.
@@ -576,20 +573,125 @@ fn inject_user_cache_secret(raw: &[u8], secret: &str) -> Option<Vec<u8>> {
     Some(injected)
 }
 
+fn top_level_value_range(raw: &[u8], field: &str) -> Option<std::ops::Range<usize>> {
+    let mut index = skip_json_whitespace(raw, 0);
+    if raw.get(index) != Some(&b'{') {
+        return None;
+    }
+    index += 1;
+    let mut found = None;
+
+    while index < raw.len() {
+        index = skip_json_whitespace(raw, index);
+        if raw.get(index) == Some(&b'}') {
+            return found;
+        }
+        let key_end = json_string_end(raw, index)?;
+        let key: String = serde_json::from_slice(&raw[index..key_end]).ok()?;
+        index = skip_json_whitespace(raw, key_end);
+        if raw.get(index) != Some(&b':') {
+            return None;
+        }
+        let value_start = skip_json_whitespace(raw, index + 1);
+        let value_end = json_value_end(raw, value_start)?;
+        if key == field {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(value_start..value_end);
+        }
+        index = skip_json_whitespace(raw, value_end);
+        match raw.get(index) {
+            Some(b',') => index += 1,
+            Some(b'}') => return found,
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn skip_json_whitespace(raw: &[u8], mut index: usize) -> usize {
+    while matches!(raw.get(index), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+        index += 1;
+    }
+    index
+}
+
+fn json_string_end(raw: &[u8], start: usize) -> Option<usize> {
+    if raw.get(start) != Some(&b'"') {
+        return None;
+    }
+    let mut escaped = false;
+    for (index, byte) in raw.iter().enumerate().skip(start + 1) {
+        if escaped {
+            escaped = false;
+        } else if *byte == b'\\' {
+            escaped = true;
+        } else if *byte == b'"' {
+            return Some(index + 1);
+        }
+    }
+    None
+}
+
+fn json_value_end(raw: &[u8], start: usize) -> Option<usize> {
+    match raw.get(start)? {
+        b'"' => json_string_end(raw, start),
+        b'{' | b'[' => {
+            let mut depth = 0usize;
+            let mut in_string = false;
+            let mut escaped = false;
+            for (index, byte) in raw.iter().enumerate().skip(start) {
+                if in_string {
+                    if escaped {
+                        escaped = false;
+                    } else if *byte == b'\\' {
+                        escaped = true;
+                    } else if *byte == b'"' {
+                        in_string = false;
+                    }
+                } else if *byte == b'"' {
+                    in_string = true;
+                } else if matches!(*byte, b'{' | b'[') {
+                    depth += 1;
+                } else if matches!(*byte, b'}' | b']') {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(index + 1);
+                    }
+                }
+            }
+            None
+        }
+        _ => {
+            let mut end = start;
+            while end < raw.len() && !matches!(raw[end], b',' | b'}') {
+                end += 1;
+            }
+            while end > start && matches!(raw[end - 1], b' ' | b'\t' | b'\n' | b'\r') {
+                end -= 1;
+            }
+            (end > start).then_some(end)
+        }
+    }
+}
+
 /// Add the client-level secret to a JSON body built by the relaxed chat path,
 /// which posts through the pinned reqwest client directly rather than through
-/// async-openai's executor. A field the caller already set — including an
-/// explicit empty string, the per-request opt-out — always wins.
+/// async-openai's executor. A non-empty or non-string field the caller already
+/// set wins; an empty string is replaced.
 pub(crate) fn provision_value(body: &mut Value, secret: &UserCacheSecret) {
     let Some(map) = body.as_object_mut() else {
         return;
     };
-    if map.contains_key(USER_CACHE_SECRET_FIELD) {
-        return;
-    }
     let Some(secret) = secret.get() else {
         return;
     };
+    if let Some(existing) = map.get(USER_CACHE_SECRET_FIELD) {
+        if existing != "" {
+            return;
+        }
+    }
     map.insert(
         USER_CACHE_SECRET_FIELD.to_string(),
         Value::String(secret.to_string()),
@@ -655,15 +757,15 @@ mod tests {
     }
 
     #[test]
-    fn explicit_secret_and_explicit_empty_both_count_as_set() {
+    fn explicit_empty_restores_default_resolution() {
         assert_eq!(
             UserCacheSecret::explicit("s1".to_string()).get(),
             Some("s1")
         );
-        // An explicit empty secret must still count as "set": it disables
-        // provisioning instead of falling through to the environment or the
-        // persisted file (neither is ever consulted on the explicit path).
-        assert_eq!(UserCacheSecret::explicit(String::new()).get(), None);
+        assert!(matches!(
+            UserCacheSecret::explicit(String::new()),
+            UserCacheSecret::Deferred(_)
+        ));
     }
 
     /// Restores an environment variable to its pre-test value on drop, so a
@@ -709,14 +811,9 @@ mod tests {
         );
         assert_eq!(
             UserCacheSecret::explicit(String::new()).get(),
-            None,
-            "an explicit empty secret must disable provisioning despite the environment"
+            Some("from-env"),
+            "an explicit empty secret must restore default resolution"
         );
-
-        // Set-but-empty through the real deferred path: disables generation.
-        // The guard still restores the ORIGINAL pre-test value afterwards.
-        std::env::set_var(USER_CACHE_SECRET_ENV, "");
-        assert_eq!(UserCacheSecret::deferred().get(), None);
     }
 
     #[test]
@@ -733,16 +830,11 @@ mod tests {
     }
 
     #[test]
-    fn environment_set_but_empty_disables_generation() {
+    fn environment_set_but_empty_falls_through() {
         let home = TempHome::new();
-        assert_eq!(
-            resolve_env_or_file(Some(String::new()), Some(home.path())),
-            ""
-        );
-        assert!(
-            !home.secret_dir().exists(),
-            "a disabled secret must not create the secret file"
-        );
+        let resolved = resolve_env_or_file(Some(String::new()), Some(home.path()));
+        assert_generated_secret(&resolved);
+        assert!(home.secret_dir().exists());
     }
 
     #[test]
@@ -782,7 +874,10 @@ mod tests {
         fs::write(home.secret_path(), "shared-secret\n").unwrap();
         fs::set_permissions(home.secret_path(), fs::Permissions::from_mode(0o666)).unwrap();
 
-        assert_eq!(resolve_env_or_file(None, Some(home.path())), "shared-secret");
+        assert_eq!(
+            resolve_env_or_file(None, Some(home.path())),
+            "shared-secret"
+        );
         assert_eq!(
             fs::metadata(home.secret_dir())
                 .unwrap()
@@ -919,14 +1014,33 @@ mod tests {
     }
 
     #[test]
-    fn never_clobbers_an_existing_field() {
+    fn never_clobbers_a_non_empty_or_non_string_field() {
         for raw in [
             r#"{"model":"m","user_cache_secret":"end-user-7"}"#, // explicit per-request secret
-            r#"{"model":"m","user_cache_secret":""}"#,           // explicit empty opt-out
+            r#"{"model":"m","user_cache_secret":null}"#,
         ] {
             assert!(
                 inject_user_cache_secret(raw.as_bytes(), "client-level").is_none(),
                 "a body that already carries the field must pass through byte-identical: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn replaces_an_empty_existing_field() {
+        for (raw, expected) in [
+            (
+                r#"{"large":9007199254740993,"user_cache_secret":"","nested":{"value":1}}  "#,
+                r#"{"large":9007199254740993,"user_cache_secret":"client-level","nested":{"value":1}}  "#,
+            ),
+            (
+                r#"{"user_cache_secre\u0074":""}"#,
+                r#"{"user_cache_secre\u0074":"client-level"}"#,
+            ),
+        ] {
+            assert_eq!(
+                inject_user_cache_secret(raw.as_bytes(), "client-level").unwrap(),
+                expected.as_bytes()
             );
         }
     }
@@ -1023,28 +1137,21 @@ mod tests {
     }
 
     #[test]
-    fn provision_value_never_clobbers_and_skips_when_disabled() {
+    fn provision_value_replaces_empty_and_never_clobbers_other_values() {
         let secret = UserCacheSecret::explicit("client-level".to_string());
 
         let mut body = json!({"model":"m","user_cache_secret":"end-user-7"});
         provision_value(&mut body, &secret);
         assert_eq!(body[USER_CACHE_SECRET_FIELD], "end-user-7");
 
-        // An explicit empty string is a per-request opt-out.
         let mut body = json!({"model":"m","user_cache_secret":""});
         provision_value(&mut body, &secret);
-        assert_eq!(body[USER_CACHE_SECRET_FIELD], "");
+        assert_eq!(body[USER_CACHE_SECRET_FIELD], "client-level");
 
         // Non-object bodies are forwarded as-is.
         let mut body = json!([1, 2, 3]);
         provision_value(&mut body, &secret);
         assert_eq!(body, json!([1, 2, 3]));
-
-        // A disabled client-level secret injects nothing.
-        let disabled = UserCacheSecret::explicit(String::new());
-        let mut body = json!({"model":"m"});
-        provision_value(&mut body, &disabled);
-        assert_eq!(body, json!({"model":"m"}));
     }
 
     // =====================================================================
@@ -1200,18 +1307,18 @@ mod tests {
         let _ = service.call(factory).await;
         assert!(seen.lock().unwrap()[0].body.is_none());
 
-        // An empty (disabled) client-level secret injects nothing.
+        // An empty client-level secret restores default resolution.
         let (mut service, seen) = capture_service("");
-        let raw = r#"{"model":"m"}"#;
         let factory = post_json_factory(
             "https://enclave.example.com/v1/chat/completions".into(),
-            raw,
+            r#"{"model":"m"}"#,
         );
         let _ = service.call(factory).await;
-        assert_eq!(
-            seen.lock().unwrap()[0].body.as_deref(),
-            Some(raw.as_bytes())
-        );
+        let seen = seen.lock().unwrap();
+        let body: Value = serde_json::from_slice(seen[0].body.as_deref().unwrap()).unwrap();
+        assert!(body[USER_CACHE_SECRET_FIELD]
+            .as_str()
+            .is_some_and(|secret| !secret.is_empty()));
     }
 
     #[tokio::test]
@@ -1220,7 +1327,7 @@ mod tests {
 
         for raw in [
             r#"{"model":"m","user_cache_secret":"end-user-7"}"#,
-            r#"{"model":"m","user_cache_secret":""}"#,
+            r#"{"model":"m","user_cache_secret":null}"#,
         ] {
             let (mut service, seen) = capture_service("client-level");
             let factory = post_json_factory(
@@ -1242,6 +1349,27 @@ mod tests {
                     "an untouched body must keep its original Content-Length"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn service_replaces_an_empty_per_request_field_on_every_attempt() {
+        use tower::Service;
+
+        let (mut service, seen) = capture_service("client-level");
+        let factory = post_json_factory(
+            "https://enclave.example.com/v1/chat/completions".into(),
+            r#"{"large":9007199254740993,"user_cache_secret":""}"#,
+        );
+        let _ = service.call(factory).await;
+
+        for captured in seen.lock().unwrap().iter() {
+            assert_eq!(
+                captured.body.as_deref(),
+                Some(
+                    br#"{"large":9007199254740993,"user_cache_secret":"client-level"}"#.as_slice()
+                )
+            );
         }
     }
 

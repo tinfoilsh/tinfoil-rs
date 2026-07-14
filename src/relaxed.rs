@@ -676,8 +676,7 @@ mod tests {
     /// 2. a per-request `user_cache_secret` set through the public relaxed
     ///    builder API wins over the client-level secret,
     /// 3. `with_user_cache_secret` swaps the source observed by the
-    ///    already-built typed stack — including the explicit-empty opt-out
-    ///    (regression test: the stack must never keep a stale secret),
+    ///    already-built typed stack,
     /// 4. raw callers provide their own `user_cache_secret`.
     #[tokio::test]
     async fn end_to_end_through_the_tinfoil_client() {
@@ -756,19 +755,18 @@ mod tests {
             "a per-request field must win over the client-level secret"
         );
 
-        // 3. Swapping the secret — here the explicit-empty opt-out — must be
-        // observed by the typed stack built BEFORE the swap.
-        let client = client.with_user_cache_secret("");
+        // 3. Swapping the secret must be observed by the typed stack built
+        // BEFORE the swap.
+        let client = client.with_user_cache_secret("replacement");
         client
             .chat()
             .create(request)
             .await
-            .expect("typed chat completion after the opt-out");
-        assert!(
-            received.lock().unwrap()[3]
-                .get("user_cache_secret")
-                .is_none(),
-            "an explicit-empty secret must disable injection on the already-built stack"
+            .expect("typed chat completion after replacing the secret");
+        assert_eq!(
+            received.lock().unwrap()[3]["user_cache_secret"],
+            "replacement",
+            "the replacement secret must reach the already-built stack"
         );
 
         // 4. The ordinary raw reqwest client does not inject fields, so raw
