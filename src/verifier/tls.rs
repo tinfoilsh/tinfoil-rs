@@ -44,6 +44,7 @@ pub fn cert_pubkey_fingerprint(cert_der: &CertificateDer<'_>) -> Result<String> 
 pub struct PinnedCertVerifier {
     /// The expected SPKI fingerprint (hex-encoded SHA256)
     pinned_fingerprint: String,
+    expected_server_name: Option<rustls::pki_types::ServerName<'static>>,
     /// Standard certificate verifier for chain validation
     inner: Arc<rustls::client::WebPkiServerVerifier>,
 }
@@ -61,8 +62,17 @@ impl PinnedCertVerifier {
         
         Ok(Self {
             pinned_fingerprint,
+            expected_server_name: None,
             inner,
         })
+    }
+
+    fn with_server_name(
+        mut self,
+        expected_server_name: rustls::pki_types::ServerName<'static>,
+    ) -> Self {
+        self.expected_server_name = Some(expected_server_name);
+        self
     }
 }
 
@@ -75,6 +85,14 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
         ocsp_response: &[u8],
         now: rustls::pki_types::UnixTime,
     ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if let Some(expected) = &self.expected_server_name {
+            if server_name != expected {
+                return Err(rustls::Error::General(
+                    "request origin is not the verified enclave origin".to_string(),
+                ));
+            }
+        }
+
         // First, do standard certificate chain validation
         self.inner.verify_server_cert(
             end_entity,
@@ -126,10 +144,289 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
 /// This client will reject any connection where the server's certificate
 /// public key fingerprint doesn't match the pinned value.
 pub fn create_pinned_client(pinned_fingerprint: &str) -> Result<reqwest::Client> {
+    build_pinned_client(pinned_fingerprint, None, None)
+}
+
+#[derive(Clone)]
+pub(crate) struct HostBoundPinnedClient {
+    pub(crate) transport: reqwest::Client,
+    pub(crate) exposed: OriginBoundClient,
+}
+
+/// HTTP client that rejects requests outside one verified enclave origin.
+#[derive(Clone)]
+pub struct OriginBoundClient {
+    inner: reqwest_middleware::ClientWithMiddleware,
+}
+
+impl OriginBoundClient {
+    #[cfg(test)]
+    pub(crate) fn unbound_for_test(transport: reqwest::Client) -> Self {
+        Self {
+            inner: reqwest_middleware::ClientBuilder::new(transport).build(),
+        }
+    }
+
+    fn wrap(
+        &self,
+        inner: reqwest_middleware::RequestBuilder,
+    ) -> OriginBoundRequestBuilder {
+        OriginBoundRequestBuilder {
+            inner,
+            client: self.clone(),
+        }
+    }
+
+    pub fn get<U: reqwest::IntoUrl>(&self, url: U) -> OriginBoundRequestBuilder {
+        self.wrap(self.inner.get(url))
+    }
+
+    pub fn post<U: reqwest::IntoUrl>(&self, url: U) -> OriginBoundRequestBuilder {
+        self.wrap(self.inner.post(url))
+    }
+
+    pub fn put<U: reqwest::IntoUrl>(&self, url: U) -> OriginBoundRequestBuilder {
+        self.wrap(self.inner.put(url))
+    }
+
+    pub fn patch<U: reqwest::IntoUrl>(&self, url: U) -> OriginBoundRequestBuilder {
+        self.wrap(self.inner.patch(url))
+    }
+
+    pub fn delete<U: reqwest::IntoUrl>(&self, url: U) -> OriginBoundRequestBuilder {
+        self.wrap(self.inner.delete(url))
+    }
+
+    pub fn head<U: reqwest::IntoUrl>(&self, url: U) -> OriginBoundRequestBuilder {
+        self.wrap(self.inner.head(url))
+    }
+
+    pub fn request<U: reqwest::IntoUrl>(
+        &self,
+        method: reqwest::Method,
+        url: U,
+    ) -> OriginBoundRequestBuilder {
+        self.wrap(self.inner.request(method, url))
+    }
+
+    pub async fn execute(
+        &self,
+        request: reqwest::Request,
+    ) -> reqwest_middleware::Result<reqwest::Response> {
+        self.inner.execute(request).await
+    }
+}
+
+/// Request builder that preserves origin binding through request construction.
+#[must_use = "OriginBoundRequestBuilder does nothing until it is sent"]
+pub struct OriginBoundRequestBuilder {
+    inner: reqwest_middleware::RequestBuilder,
+    client: OriginBoundClient,
+}
+
+impl OriginBoundRequestBuilder {
+    pub fn header<K, V>(self, key: K, value: V) -> Self
+    where
+        reqwest::header::HeaderName: TryFrom<K>,
+        <reqwest::header::HeaderName as TryFrom<K>>::Error: Into<http::Error>,
+        reqwest::header::HeaderValue: TryFrom<V>,
+        <reqwest::header::HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
+    {
+        Self {
+            inner: self.inner.header(key, value),
+            ..self
+        }
+    }
+
+    pub fn headers(self, headers: reqwest::header::HeaderMap) -> Self {
+        Self {
+            inner: self.inner.headers(headers),
+            ..self
+        }
+    }
+
+    pub fn version(self, version: reqwest::Version) -> Self {
+        Self {
+            inner: self.inner.version(version),
+            ..self
+        }
+    }
+
+    pub fn basic_auth<U, P>(self, username: U, password: Option<P>) -> Self
+    where
+        U: std::fmt::Display,
+        P: std::fmt::Display,
+    {
+        Self {
+            inner: self.inner.basic_auth(username, password),
+            ..self
+        }
+    }
+
+    pub fn bearer_auth<T: std::fmt::Display>(self, token: T) -> Self {
+        Self {
+            inner: self.inner.bearer_auth(token),
+            ..self
+        }
+    }
+
+    pub fn body<T: Into<reqwest::Body>>(self, body: T) -> Self {
+        Self {
+            inner: self.inner.body(body),
+            ..self
+        }
+    }
+
+    pub fn timeout(self, timeout: std::time::Duration) -> Self {
+        Self {
+            inner: self.inner.timeout(timeout),
+            ..self
+        }
+    }
+
+    pub fn multipart(self, multipart: reqwest::multipart::Form) -> Self {
+        Self {
+            inner: self.inner.multipart(multipart),
+            ..self
+        }
+    }
+
+    pub fn query<T: serde::Serialize + ?Sized>(self, query: &T) -> Self {
+        Self {
+            inner: self.inner.query(query),
+            ..self
+        }
+    }
+
+    pub fn json<T: serde::Serialize + ?Sized>(self, json: &T) -> Self {
+        Self {
+            inner: self.inner.json(json),
+            ..self
+        }
+    }
+
+    pub fn build(self) -> reqwest::Result<reqwest::Request> {
+        self.inner.build()
+    }
+
+    pub fn build_split(self) -> (OriginBoundClient, reqwest::Result<reqwest::Request>) {
+        let (_, request) = self.inner.build_split();
+        (self.client, request)
+    }
+
+    pub fn with_extension<T: Send + Sync + Clone + 'static>(self, extension: T) -> Self {
+        Self {
+            inner: self.inner.with_extension(extension),
+            ..self
+        }
+    }
+
+    pub fn extensions(&mut self) -> &mut http::Extensions {
+        self.inner.extensions()
+    }
+
+    pub async fn send(self) -> reqwest_middleware::Result<reqwest::Response> {
+        self.inner.send().await
+    }
+
+    pub fn try_clone(&self) -> Option<Self> {
+        self.inner.try_clone().map(|inner| Self {
+            inner,
+            client: self.client.clone(),
+        })
+    }
+}
+
+impl std::fmt::Debug for OriginBoundRequestBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
+struct OriginBindingMiddleware {
+    expected_origin: String,
+}
+
+#[async_trait::async_trait]
+impl reqwest_middleware::Middleware for OriginBindingMiddleware {
+    async fn handle(
+        &self,
+        request: reqwest::Request,
+        extensions: &mut http::Extensions,
+        next: reqwest_middleware::Next<'_>,
+    ) -> reqwest_middleware::Result<reqwest::Response> {
+        if !request_origin_matches(&self.expected_origin, request.url()) {
+            return Err(reqwest_middleware::Error::middleware(
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "request origin is outside the verified enclave origin",
+                ),
+            ));
+        }
+        next.run(request, extensions).await
+    }
+}
+
+pub(crate) fn create_host_bound_pinned_client(
+    pinned_fingerprint: &str,
+    expected_origin: reqwest::Url,
+) -> Result<HostBoundPinnedClient> {
+    let expected_server_name = server_name_from_origin(&expected_origin)?;
+    let expected_origin = expected_origin.origin().ascii_serialization();
+    let redirect_origin = expected_origin.clone();
+    let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+        if request_origin_matches(&redirect_origin, attempt.url()) {
+            attempt.follow()
+        } else {
+            attempt.error("redirect target is outside the verified enclave origin")
+        }
+    });
+    let transport = build_pinned_client(
+        pinned_fingerprint,
+        Some(expected_server_name),
+        Some(redirect_policy),
+    )?;
+    let exposed_transport = transport.clone();
+    let exposed = reqwest_middleware::ClientBuilder::new(exposed_transport)
+        .with(OriginBindingMiddleware { expected_origin })
+        .build();
+    Ok(HostBoundPinnedClient {
+        transport,
+        exposed: OriginBoundClient { inner: exposed },
+    })
+}
+
+fn request_origin_matches(expected_origin: &str, request_url: &reqwest::Url) -> bool {
+    request_url.origin().ascii_serialization() == expected_origin
+}
+
+fn server_name_from_origin(
+    expected_origin: &reqwest::Url,
+) -> Result<rustls::pki_types::ServerName<'static>> {
+    let host = expected_origin
+        .host_str()
+        .ok_or_else(|| Error::Configuration("Verified enclave origin has no host".to_string()))?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|_| {
+        Error::Configuration("Verified enclave origin has an invalid host".to_string())
+    })
+}
+
+fn build_pinned_client(
+    pinned_fingerprint: &str,
+    expected_server_name: Option<rustls::pki_types::ServerName<'static>>,
+    redirect_policy: Option<reqwest::redirect::Policy>,
+) -> Result<reqwest::Client> {
     crate::ensure_crypto_provider();
 
     // Create pinned verifier
-    let verifier = PinnedCertVerifier::new(pinned_fingerprint.to_string())?;
+    let mut verifier = PinnedCertVerifier::new(pinned_fingerprint.to_string())?;
+    if let Some(expected) = expected_server_name {
+        verifier = verifier.with_server_name(expected);
+    }
     
     // Build rustls config with our custom verifier
     let config = rustls::ClientConfig::builder()
@@ -138,9 +435,13 @@ pub fn create_pinned_client(pinned_fingerprint: &str) -> Result<reqwest::Client>
         .with_no_client_auth();
     
     // Build reqwest client with this config
-    let client = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .use_preconfigured_tls(config)
-        .https_only(true)
+        .https_only(true);
+    if let Some(policy) = redirect_policy {
+        builder = builder.redirect(policy);
+    }
+    let client = builder
         .build()
         .map_err(|e| Error::Tls(format!("Failed to build HTTP client: {}", e)))?;
     
@@ -253,5 +554,98 @@ jaDTSFaq1NIwodHp7X9fOG48uRuJWS8GmifD969sC4Ut2FJFoklceBVUNCHR
         let fingerprint = "0".repeat(64); // Valid format but won't match any real cert
         let result = PinnedCertVerifier::new(fingerprint);
         assert!(result.is_ok(), "Creating PinnedCertVerifier with valid fingerprint should succeed");
+    }
+
+    #[test]
+    fn test_origin_server_name_supports_dns_and_ip_addresses() {
+        for (origin, expected) in [
+            ("https://enclave.example", "enclave.example"),
+            ("https://127.0.0.1", "127.0.0.1"),
+            ("https://[2001:db8::1]", "2001:db8::1"),
+        ] {
+            let origin = reqwest::Url::parse(origin).unwrap();
+            let expected = rustls::pki_types::ServerName::try_from(expected.to_string()).unwrap();
+            assert_eq!(server_name_from_origin(&origin).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn test_origin_binding_normalizes_default_ports() {
+        for (expected, equivalent, different_port) in [
+            (
+                "https://enclave.example",
+                "https://enclave.example:443/custom?x=1",
+                "https://enclave.example:8443",
+            ),
+            (
+                "https://127.0.0.1",
+                "https://127.0.0.1:443/custom?x=1",
+                "https://127.0.0.1:8443",
+            ),
+            (
+                "https://[2001:db8::1]",
+                "https://[2001:db8::1]:443/custom?x=1",
+                "https://[2001:db8::1]:8443",
+            ),
+        ] {
+            let expected = reqwest::Url::parse(expected)
+                .unwrap()
+                .origin()
+                .ascii_serialization();
+            assert!(request_origin_matches(
+                &expected,
+                &reqwest::Url::parse(equivalent).unwrap()
+            ));
+            assert!(!request_origin_matches(
+                &expected,
+                &reqwest::Url::parse(different_port).unwrap()
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_host_bound_client_rejects_initial_alternate_port() {
+        let fingerprint = "0".repeat(64);
+        let client = create_host_bound_pinned_client(
+            &fingerprint,
+            reqwest::Url::parse("https://127.0.0.1").unwrap(),
+        )
+        .unwrap();
+
+        let error = client
+            .exposed
+            .get("https://127.0.0.1:9/v1/models")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_middleware());
+        assert!(error
+            .to_string()
+            .contains("outside the verified enclave origin"));
+    }
+
+    #[tokio::test]
+    async fn test_request_builder_split_preserves_origin_binding() {
+        let fingerprint = "0".repeat(64);
+        let client = create_host_bound_pinned_client(
+            &fingerprint,
+            reqwest::Url::parse("https://127.0.0.1").unwrap(),
+        )
+        .unwrap();
+
+        let (client, request) = client
+            .exposed
+            .post("https://127.0.0.1/v1/chat/completions")
+            .query(&[("stream", "false")])
+            .json(&serde_json::json!({"model": "m"}))
+            .build_split();
+        let mut request = request.unwrap();
+        *request.url_mut() = reqwest::Url::parse("https://127.0.0.1:9/v1/chat/completions").unwrap();
+
+        let error = client.execute(request).await.unwrap_err();
+        assert!(error.is_middleware());
+        assert!(error
+            .to_string()
+            .contains("outside the verified enclave origin"));
     }
 }

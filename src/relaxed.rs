@@ -12,6 +12,7 @@ use serde_json::{json, Map, Value};
 use crate::client::Client;
 use crate::error::{Error, Result};
 use crate::sse;
+use crate::user_cache_secret::provision_value;
 
 /// Handle returned by [`Client::chat_relaxed`].
 pub struct RelaxedChat<'a> {
@@ -39,12 +40,15 @@ impl<'a> RelaxedChat<'a> {
     pub async fn create(&self, body: impl Into<Value>) -> Result<RelaxedResponse> {
         let mut body = body.into();
         force_stream(&mut body, false);
+        // Scope the prompt cache before the pinned client seals the body; a
+        // caller-supplied `user_cache_secret` field always wins.
+        provision_value(&mut body, &self.client.user_cache_secret());
 
         let secure = self.client.secure_client();
         let url = format!("{}/v1/chat/completions", secure.base_url());
 
         let response = secure
-            .http_client()?
+            .pinned_http_client()?
             .post(&url)
             .bearer_auth(secure.api_key())
             .json(&body)
@@ -74,12 +78,15 @@ impl<'a> RelaxedChat<'a> {
     ) -> Result<RelaxedStream> {
         let mut body = body.into();
         force_stream(&mut body, true);
+        // Scope the prompt cache before the pinned client seals the body; a
+        // caller-supplied `user_cache_secret` field always wins.
+        provision_value(&mut body, &self.client.user_cache_secret());
 
         let secure = self.client.secure_client();
         let url = format!("{}/v1/chat/completions", secure.base_url());
 
         let response = secure
-            .http_client()?
+            .pinned_http_client()?
             .post(&url)
             .bearer_auth(secure.api_key())
             .json(&body)
@@ -655,6 +662,127 @@ mod tests {
         assert_eq!(vendor.event_type(), Some("web_search_call"));
         assert!(vendor.is_vendor_event());
         assert!(vendor.delta_content().is_none());
+    }
+
+    /// Drives the REAL `tinfoil::Client` machinery (production
+    /// `from_secure_client` construction, pointed at a local server) over
+    /// the wire, pinning that:
+    ///
+    /// 1. the client-level secret arrives in the body on the typed
+    ///    async-openai path AND the relaxed path,
+    /// 2. a per-request `user_cache_secret` set through the public relaxed
+    ///    builder API wins over the client-level secret,
+    /// 3. `with_user_cache_secret` swaps the source observed by the
+    ///    already-built typed stack — including the explicit-empty opt-out
+    ///    (regression test: the stack must never keep a stale secret),
+    /// 4. raw callers provide their own `user_cache_secret`.
+    #[tokio::test]
+    async fn end_to_end_through_the_tinfoil_client() {
+        use crate::test_support::serve_chat_completions;
+        use async_openai::types::chat::{
+            ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
+        };
+        use std::sync::{Arc, Mutex};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let received: Arc<Mutex<Vec<Value>>> = Arc::default();
+        tokio::spawn(serve_chat_completions(listener, Arc::clone(&received)));
+
+        let client =
+            Client::test_client(format!("http://{addr}")).with_user_cache_secret("client-level");
+
+        // 1a. Typed path: through Deref into the real async-openai client,
+        // whose execution stack `build_openai` assembled.
+        let request = CreateChatCompletionRequestArgs::default()
+            .model("m")
+            .messages(vec![ChatCompletionRequestUserMessageArgs::default()
+                .content("hi")
+                .build()
+                .unwrap()
+                .into()])
+            .build()
+            .unwrap();
+        client
+            .chat()
+            .create(request.clone())
+            .await
+            .expect("typed chat completion");
+        assert_eq!(
+            received.lock().unwrap()[0]["user_cache_secret"],
+            "client-level",
+            "the client-level secret must ride the typed path"
+        );
+
+        // 1b. Relaxed path: posts through the pinned reqwest client directly.
+        client
+            .chat_relaxed()
+            .create(
+                client
+                    .chat_relaxed()
+                    .request()
+                    .model("m")
+                    .push_message(json!({"role": "user", "content": "hi"})),
+            )
+            .await
+            .expect("relaxed chat completion");
+        assert_eq!(
+            received.lock().unwrap()[1]["user_cache_secret"],
+            "client-level",
+            "the client-level secret must ride the relaxed path"
+        );
+
+        // 2. A per-request field set through the public builder API — how a
+        // server holding many end users' conversations scopes per request —
+        // must win over the client-level secret all the way to the wire.
+        client
+            .chat_relaxed()
+            .create(
+                client
+                    .chat_relaxed()
+                    .request()
+                    .model("m")
+                    .push_message(json!({"role": "user", "content": "hi"}))
+                    .set("user_cache_secret", "end-user-7"),
+            )
+            .await
+            .expect("relaxed chat completion with a per-request secret");
+        assert_eq!(
+            received.lock().unwrap()[2]["user_cache_secret"],
+            "end-user-7",
+            "a per-request field must win over the client-level secret"
+        );
+
+        // 3. Swapping the secret — here the explicit-empty opt-out — must be
+        // observed by the typed stack built BEFORE the swap.
+        let client = client.with_user_cache_secret("");
+        client
+            .chat()
+            .create(request)
+            .await
+            .expect("typed chat completion after the opt-out");
+        assert!(
+            received.lock().unwrap()[3]
+                .get("user_cache_secret")
+                .is_none(),
+            "an explicit-empty secret must disable injection on the already-built stack"
+        );
+
+        // 4. The ordinary raw reqwest client does not inject fields, so raw
+        // callers include their cache secret in the request body themselves.
+        let raw_url = format!("{}/v1/responses", client.secure_client().base_url());
+        client
+            .http_client()
+            .unwrap()
+            .post(raw_url)
+            .json(&json!({"model": "m", "user_cache_secret": "raw-caller"}))
+            .send()
+            .await
+            .expect("raw response request");
+        assert_eq!(
+            received.lock().unwrap()[4]["user_cache_secret"],
+            "raw-caller"
+        );
     }
 
     #[test]

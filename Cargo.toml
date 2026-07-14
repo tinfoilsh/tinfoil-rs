@@ -30,7 +30,14 @@ bytes = "1"
 # is the aws-lc-rs path). Our own reqwest dep above already enables
 # `rustls-no-provider`; Cargo unifies the feature sets so async-openai
 # uses tinfoil's reqwest configuration without leaking aws-lc-rs in.
-async-openai = { version = "0.37.0", default-features = false, features = ["chat-completion", "embedding", "audio", "responses"] }
+# `middleware` exposes the tower execution hook the user-cache-secret
+# layer plugs into (src/user_cache_secret.rs); it pulls no new crates.
+async-openai = { version = "0.37.0", default-features = false, features = ["chat-completion", "embedding", "audio", "responses", "middleware"] }
+
+# Service/Layer traits for the user-cache-secret injection layer. Already
+# in the dependency graph via reqwest and async-openai; this only makes
+# the traits nameable here.
+tower = { version = "0.5", default-features = false }
 
 # TLS — pinned to the `ring` crypto backend so this crate links on
 # Windows MSVC. The default rustls 0.23 feature set is `aws_lc_rs`,
@@ -103,6 +110,12 @@ dirs = "6"
 regex = "1"
 
 time = { version = "0.3", features = ["parsing"] }
+reqwest-middleware = { version = "0.5.1", default-features = false, features = ["json", "multipart", "query"] }
+http = "1"
+async-trait = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [[bin]]
 name = "conformance"

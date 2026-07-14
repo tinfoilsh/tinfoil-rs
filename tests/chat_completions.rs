@@ -12,6 +12,7 @@ use tinfoil::Client;
 
 const TEST_MODEL: &str = "llama3-3-70b";
 const TEST_PROMPT: &str = "Say this is a test";
+const TEST_USER_CACHE_SECRET: &str = "rust-live-integration-cache-secret";
 const MAX_TOKENS: u32 = 32;
 
 fn api_key() -> String {
@@ -34,10 +35,11 @@ fn build_request() -> CreateChatCompletionRequestArgs {
 /// Non-streaming chat completion against the verified enclave.
 #[tokio::test]
 #[ignore]
-async fn test_chat_completion_non_streaming() {
+async fn test_chat_completion_non_streaming_with_cache_secret() {
     let client = Client::new_default_with_api_key(api_key())
         .await
-        .expect("Failed to create verified Tinfoil client");
+        .expect("Failed to create verified Tinfoil client")
+        .with_user_cache_secret(TEST_USER_CACHE_SECRET);
 
     let request = build_request()
         .build()
