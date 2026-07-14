@@ -684,14 +684,14 @@ pub(crate) fn provision_value(body: &mut Value, secret: &UserCacheSecret) {
     let Some(map) = body.as_object_mut() else {
         return;
     };
-    let Some(secret) = secret.get() else {
-        return;
-    };
     if let Some(existing) = map.get(USER_CACHE_SECRET_FIELD) {
         if existing != "" {
             return;
         }
     }
+    let Some(secret) = secret.get() else {
+        return;
+    };
     map.insert(
         USER_CACHE_SECRET_FIELD.to_string(),
         Value::String(secret.to_string()),
@@ -1134,6 +1134,22 @@ mod tests {
         let mut body = json!({"model":"m"});
         provision_value(&mut body, &secret);
         assert_eq!(body[USER_CACHE_SECRET_FIELD], "client-level");
+    }
+
+    #[test]
+    fn provision_value_does_not_resolve_deferred_secret_for_caller_values() {
+        for caller_value in [json!("end-user-7"), json!(7)] {
+            let secret = UserCacheSecret::deferred();
+            let UserCacheSecret::Deferred(resolved) = &secret else {
+                unreachable!("deferred constructor must return deferred source");
+            };
+            let mut body = json!({"model":"m","user_cache_secret":caller_value});
+
+            provision_value(&mut body, &secret);
+
+            assert_eq!(body[USER_CACHE_SECRET_FIELD], caller_value);
+            assert!(resolved.get().is_none());
+        }
     }
 
     #[test]
