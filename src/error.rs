@@ -174,7 +174,7 @@ fn is_retryable_openai_error(err: &async_openai::error::OpenAIError) -> bool {
         // API errors carry an OpenAI-style `code` ("server_error",
         // "rate_limit_exceeded", ...). Only the transient codes retry.
         OpenAIError::ApiError(api) => matches!(
-            api.code.as_deref(),
+            api.api_error.code.as_deref(),
             Some("server_error") | Some("rate_limit_exceeded")
         ),
         // Everything else (deserialization, invalid argument,
