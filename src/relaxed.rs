@@ -4,7 +4,7 @@
 //! `finish_reason` values, or when you need vendor extensions like
 //! `structured_outputs`, `web_search_options`, or `pii_check_options`.
 
-use async_openai::error::{ApiError, OpenAIError};
+use async_openai::error::{ApiError, ApiErrorResponse, OpenAIError};
 use futures_util::Stream;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Map, Value};
@@ -167,11 +167,14 @@ fn http_error(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
         }
     });
 
-    Error::Api(OpenAIError::ApiError(ApiError {
-        message,
-        r#type,
-        param,
-        code,
+    Error::Api(OpenAIError::ApiError(ApiErrorResponse {
+        status_code: status,
+        api_error: ApiError {
+            message,
+            r#type,
+            param,
+            code,
+        },
     }))
 }
 
