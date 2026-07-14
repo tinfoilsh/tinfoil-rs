@@ -41,7 +41,7 @@ impl<'a> RelaxedChat<'a> {
         let mut body = body.into();
         force_stream(&mut body, false);
         // Scope the prompt cache before the pinned client seals the body; a
-        // caller-supplied `user_cache_secret` field always wins.
+        // non-empty string or non-string caller value is preserved.
         provision_value(&mut body, &self.client.user_cache_secret());
 
         let secure = self.client.secure_client();
@@ -79,7 +79,7 @@ impl<'a> RelaxedChat<'a> {
         let mut body = body.into();
         force_stream(&mut body, true);
         // Scope the prompt cache before the pinned client seals the body; a
-        // caller-supplied `user_cache_secret` field always wins.
+        // non-empty string or non-string caller value is preserved.
         provision_value(&mut body, &self.client.user_cache_secret());
 
         let secure = self.client.secure_client();
