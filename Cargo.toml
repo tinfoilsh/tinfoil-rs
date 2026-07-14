@@ -60,7 +60,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # AMD SEV-SNP attestation with crypto verification (no OpenSSL)
-sev = { version = "7", default-features = false, features = ["snp", "crypto_nossl"] }
+sev = { version = "8", default-features = false, features = ["snp", "crypto_nossl"] }
 
 # Crypto primitives
 digest = "0.10"
@@ -74,7 +74,7 @@ const-oid = { version = "0.9", features = ["db"] }
 p384 = "0.13"
 p256 = "0.13"  # For Fulcio certificate ECDSA (P-256/secp256r1)
 ecdsa = { version = "0.16", features = ["verifying"] }
-ed25519-dalek = "2"  # For Rekor log2025-1 Ed25519 signatures
+ed25519-dalek = "3"  # For Rekor log2025-1 Ed25519 signatures
 
 # RSA for certificate chain verification (AMD certs use RSA-PSS)
 rsa = "0.9"
