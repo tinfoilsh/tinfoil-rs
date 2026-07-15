@@ -532,12 +532,11 @@ impl Client {
     ///     .build();
     /// ```
     ///
-    /// An empty string disables injection and generation entirely, leaving
-    /// every request in the tenant-wide cache namespace.
+    /// An empty string is treated as unset and restores default resolution.
     pub fn with_user_cache_secret(self, secret: impl Into<String>) -> Self {
         // Swap the source inside the shared cell. The injection stack and
         // the relaxed path read through the same cell on every request, so
-        // the new choice — including the explicit-empty opt-out — takes
+        // the new choice — including an empty reset to defaults — takes
         // effect immediately on both paths, unconditionally: no fallible
         // stack rebuild is involved that could leave one path injecting a
         // stale secret.
@@ -671,21 +670,22 @@ mod tests {
     /// The closest thing this crate has to pinning the transport stack: a
     /// constructed client must build the injection stack (retry → user cache
     /// secret → pinned reqwest) without error, and `with_user_cache_secret`
-    /// must replace the source — including the explicit-empty opt-out.
+    /// must replace the source — including an empty reset to defaults.
     /// (End-to-end wire coverage of typed and relaxed request paths lives in
     /// `relaxed::tests::end_to_end_through_the_tinfoil_client`.)
     #[test]
-    fn test_with_user_cache_secret_pins_and_disables() {
+    fn test_with_user_cache_secret_pins_and_resets() {
         let client = Client::test_client("http://127.0.0.1:9");
 
         let client = client.with_user_cache_secret("s1");
         assert_eq!(client.user_cache_secret().get(), Some("s1"));
 
-        // An explicit empty secret still counts as "set": it disables
-        // provisioning instead of falling back to the environment or the
-        // persisted file.
+        // An explicit empty secret restores default resolution.
         let client = client.with_user_cache_secret("");
-        assert_eq!(client.user_cache_secret().get(), None);
+        assert!(matches!(
+            &*client.user_cache_secret(),
+            UserCacheSecret::Deferred(_)
+        ));
     }
 
 }
