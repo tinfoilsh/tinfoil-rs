@@ -115,7 +115,7 @@ fn cmd_capabilities() -> u8 {
             "scts_count_distinguish_missing_vs_duplicate": true,
             "rejects_duplicate_sct_log": true,
             "checks_only_subject_0": true,
-            "in_toto_statement_tolerates_extra_fields": true
+            "in_toto_statement_tolerates_extra_fields": false
         },
         "measurement": {
             "compare_multiplatform_to_tdx_supported": true
