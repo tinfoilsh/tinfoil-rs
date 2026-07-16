@@ -38,11 +38,7 @@ impl EhbpProxy {
     ) -> Result<Self> {
         crate::ensure_crypto_provider();
         let base_url = proxy_url.trim_end_matches('/').to_string();
-        if !(base_url.starts_with("https://") || base_url.starts_with("http://")) {
-            return Err(Error::Configuration(
-                "proxy URL must start with http:// or https://".into(),
-            ));
-        }
+        require_secure_proxy_url(&base_url)?;
         let identity = Arc::new(EhbpIdentity::from_public_key_hex(hpke_public_key_hex)?);
         // Redirects are disabled so a sealed body is never replayed to an
         // origin the caller didn't name.
@@ -142,6 +138,39 @@ impl EhbpProxy {
     }
 }
 
+/// EHBP only protects request and response bodies; headers, including the
+/// proxy's bearer token, ride on the transport. Cleartext HTTP is
+/// therefore only acceptable toward a loopback development proxy.
+fn require_secure_proxy_url(base_url: &str) -> Result<()> {
+    let url = reqwest::Url::parse(base_url)
+        .map_err(|err| Error::Configuration(format!("invalid proxy URL: {err}")))?;
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            let loopback = url.host_str().is_some_and(|host| {
+                host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            });
+            if loopback {
+                Ok(())
+            } else {
+                Err(Error::Configuration(
+                    "proxy URL must use https:// so authentication headers are \
+                     not sent in cleartext (http:// is allowed only for loopback)"
+                        .into(),
+                ))
+            }
+        }
+        other => Err(Error::Configuration(format!(
+            "proxy URL must use https://, got {other}://"
+        ))),
+    }
+}
+
 fn chunked_body(body: Vec<u8>) -> reqwest::Body {
     reqwest::Body::wrap_stream(futures_util::stream::once(async move {
         Ok::<_, std::convert::Infallible>(Bytes::from(body))
@@ -207,6 +236,26 @@ mod tests {
 
     const TEST_ENCLAVE_URL: &str = "https://enclave.test.invalid";
     const RESPONSE_NONCE: [u8; 32] = [5u8; 32];
+
+    #[test]
+    fn proxy_url_policy_rejects_cleartext_except_loopback() {
+        assert!(require_secure_proxy_url("https://proxy.example.com").is_ok());
+        assert!(require_secure_proxy_url("http://127.0.0.1:8080").is_ok());
+        assert!(require_secure_proxy_url("http://[::1]:8080").is_ok());
+        assert!(require_secure_proxy_url("http://localhost:8080").is_ok());
+        assert!(matches!(
+            require_secure_proxy_url("http://proxy.example.com"),
+            Err(Error::Configuration(_))
+        ));
+        assert!(matches!(
+            require_secure_proxy_url("ftp://proxy.example.com"),
+            Err(Error::Configuration(_))
+        ));
+        assert!(matches!(
+            require_secure_proxy_url("proxy.example.com"),
+            Err(Error::Configuration(_))
+        ));
+    }
 
     fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack.windows(needle.len()).position(|w| w == needle)

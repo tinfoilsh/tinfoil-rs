@@ -14,6 +14,8 @@ use crate::error::{Error, Result};
 use crate::sse;
 use crate::user_cache_secret::provision_value;
 
+const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
+
 /// Handle returned by [`Client::chat_relaxed`].
 pub struct RelaxedChat<'a> {
     client: &'a Client,
@@ -45,7 +47,7 @@ impl<'a> RelaxedChat<'a> {
         provision_value(&mut body, &self.client.user_cache_secret());
 
         let secure = self.client.secure_client();
-        let response = secure.post_json("/v1/chat/completions", &body).await?;
+        let response = secure.post_json(CHAT_COMPLETIONS_PATH, &body).await?;
 
         let status = response.status();
         let bytes = response.bytes().await?;
@@ -75,7 +77,7 @@ impl<'a> RelaxedChat<'a> {
         provision_value(&mut body, &self.client.user_cache_secret());
 
         let secure = self.client.secure_client();
-        let response = secure.post_json("/v1/chat/completions", &body).await?;
+        let response = secure.post_json(CHAT_COMPLETIONS_PATH, &body).await?;
 
         let status = response.status();
         if !status.is_success() {

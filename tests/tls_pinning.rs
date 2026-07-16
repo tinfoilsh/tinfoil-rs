@@ -49,17 +49,15 @@ async fn test_wrong_fingerprint_rejected_repeatedly() {
 #[tokio::test]
 async fn test_correct_fingerprint_accepted() {
     // First fetch the correct fingerprint from attestation
-    let doc: serde_json::Value =
-        reqwest::get("https://inference.tinfoil.sh/.well-known/tinfoil-attestation")
-            .await
-            .expect("Failed to fetch attestation")
-            .json()
-            .await
-            .expect("Failed to parse attestation");
+    let doc = tinfoil::verifier::fetch("inference.tinfoil.sh")
+        .await
+        .expect("Failed to fetch attestation");
 
     // Decode and extract TLS fingerprint
-    let body = doc.get("body").and_then(|b| b.as_str()).expect("No body");
-    let compressed = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body)
+    let compressed = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        &doc.body,
+    )
         .expect("Base64 decode failed");
 
     let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);

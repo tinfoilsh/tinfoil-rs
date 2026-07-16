@@ -259,15 +259,19 @@ fn response_nonce(headers: &reqwest::header::HeaderMap) -> Result<Vec<u8>> {
 /// `Transfer-Encoding`) are stripped because the plaintext has a
 /// different length.
 pub(crate) fn decrypt_response(
-    response: reqwest::Response,
+    mut response: reqwest::Response,
     context: &ResponseContext,
 ) -> Result<reqwest::Response> {
+    use reqwest::ResponseBuilderExt;
+
     let nonce = response_nonce(response.headers())?;
     let key_material =
         derive_response_keys(&context.exported_secret, &context.request_enc, &nonce)?;
 
     let status = response.status();
     let version = response.version();
+    let url = response.url().clone();
+    let extensions = std::mem::take(response.extensions_mut());
     let mut headers = response.headers().clone();
     headers.remove(reqwest::header::CONTENT_LENGTH);
     headers.remove(reqwest::header::TRANSFER_ENCODING);
@@ -277,7 +281,13 @@ pub(crate) fn decrypt_response(
     if let Some(target) = builder.headers_mut() {
         *target = headers;
     }
+    // Carry over the original extensions before setting the URL, since
+    // `url()` installs the extension reqwest reads the real URL from.
+    if let Some(target) = builder.extensions_mut() {
+        *target = extensions;
+    }
     let rebuilt = builder
+        .url(url)
         .body(reqwest::Body::wrap_stream(decrypted))
         .map_err(|err| Error::Ehbp(format!("failed to rebuild decrypted response: {err}")))?;
     Ok(reqwest::Response::from(rebuilt))
@@ -621,6 +631,49 @@ mod tests {
 
         let err = stream.next().await.unwrap().unwrap_err();
         assert!(matches!(err, Error::Ehbp(msg) if msg.contains("truncated")));
+    }
+
+    /// The rebuilt response must keep the original URL and extensions
+    /// instead of reqwest's placeholder, stripping only framing headers.
+    #[tokio::test]
+    async fn decrypted_response_preserves_url_extensions_and_headers() {
+        use reqwest::ResponseBuilderExt;
+
+        #[derive(Clone, Debug, PartialEq)]
+        struct Marker(u8);
+
+        let enclave = TestEnclave::generate();
+        let identity = EhbpIdentity::from_public_key_hex(&enclave.public_key_hex()).unwrap();
+        let encrypted = identity.encrypt_request_body(b"request").unwrap().unwrap();
+        let (secret, enc) = enclave.export_secret(&encrypted.encapsulated_key_hex);
+
+        let response_nonce = [9u8; RESPONSE_NONCE_LENGTH];
+        let body = encrypt_response_chunks(&secret, &enc, &response_nonce, &[b"plaintext"]);
+
+        let url = reqwest::Url::parse("https://proxy.example.com/v1/chat/completions").unwrap();
+        let http_response = http::Response::builder()
+            .status(200)
+            .url(url.clone())
+            .header("content-type", "application/json")
+            .header(reqwest::header::CONTENT_LENGTH, body.len())
+            .header(RESPONSE_NONCE_HEADER, hex::encode(response_nonce))
+            .body(reqwest::Body::from(body))
+            .unwrap();
+        let mut response = reqwest::Response::from(http_response);
+        response.extensions_mut().insert(Marker(7));
+
+        let decrypted = decrypt_response(response, &encrypted.context).unwrap();
+        assert_eq!(decrypted.url().as_str(), url.as_str());
+        assert_eq!(decrypted.extensions().get::<Marker>(), Some(&Marker(7)));
+        assert_eq!(
+            decrypted.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        assert!(decrypted
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .is_none());
+        assert_eq!(decrypted.bytes().await.unwrap().as_ref(), b"plaintext");
     }
 
     #[test]

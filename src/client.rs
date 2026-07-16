@@ -230,12 +230,13 @@ impl SecureClient {
             &verification.tls_public_key_fp,
             verified_origin,
         )?;
-        self.pinned_client = Some(pinned);
 
         // 5b. In proxy mode, build the EHBP transport that seals request
         // bodies to the attested HPKE key. An enclave without a usable
         // HPKE key cannot receive encrypted bodies, so this fails closed.
-        if let Some(proxy_url) = &self.proxy_url {
+        // Built before any trust state is committed so a failure here
+        // leaves the client fully unverified.
+        let ehbp = if let Some(proxy_url) = &self.proxy_url {
             let hpke_key = verification
                 .hpke_public_key
                 .as_deref()
@@ -245,8 +246,13 @@ impl SecureClient {
                         "enclave attestation does not include an HPKE public key".into(),
                     )
                 })?;
-            self.ehbp = Some(EhbpProxy::new(proxy_url, self.base_url(), hpke_key)?);
-        }
+            Some(EhbpProxy::new(proxy_url, self.base_url(), hpke_key)?)
+        } else {
+            None
+        };
+
+        self.pinned_client = Some(pinned);
+        self.ehbp = ehbp;
 
         // 6. Store ground truth
         let enclave_measurement = verification.measurement;
