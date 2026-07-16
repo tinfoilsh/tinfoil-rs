@@ -70,6 +70,16 @@ pub enum Error {
     #[error("{0}")]
     Tls(String),
 
+    /// Encrypted HTTP Body Protocol (EHBP) failure. Fail-closed: an
+    /// encrypted exchange never falls back to plaintext.
+    #[error("EHBP error: {0}")]
+    Ehbp(String),
+
+    /// The enclave rejected an EHBP request because its HPKE key rotated.
+    /// Re-verify the enclave before retrying the request.
+    #[error("EHBP key configuration mismatch: {0}")]
+    EhbpKeyMismatch(String),
+
     /// Network error during attestation fetch.
     #[error("{0}")]
     Network(String),
@@ -134,6 +144,8 @@ impl Error {
                 | Error::SigstoreVerification(_)
                 | Error::MeasurementMismatch { .. }
                 | Error::Tls(_)
+                | Error::Ehbp(_)
+                | Error::EhbpKeyMismatch(_)
                 | Error::UnsupportedFormat(_)
                 | Error::Json(_)
                 | Error::Base64(_)
@@ -147,6 +159,12 @@ impl Error {
     /// request, etc). Pass through unchanged from `async-openai`.
     pub fn is_api(&self) -> bool {
         matches!(self, Error::Api(_))
+    }
+
+    /// Returns true when the enclave rejected an EHBP request because
+    /// its HPKE key configuration rotated.
+    pub fn is_ehbp_key_mismatch(&self) -> bool {
+        matches!(self, Error::EhbpKeyMismatch(_))
     }
 
     /// Returns true if this error is likely transient and the operation
@@ -184,3 +202,17 @@ fn is_retryable_openai_error(err: &async_openai::error::OpenAIError) -> bool {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    #[test]
+    fn ehbp_key_mismatch_is_an_attestation_error() {
+        let error = Error::EhbpKeyMismatch("rotated".into());
+
+        assert!(error.is_attestation());
+        assert!(error.is_ehbp_key_mismatch());
+        assert!(!error.is_retryable());
+    }
+}
