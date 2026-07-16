@@ -68,13 +68,10 @@ sha2 = { version = "0.10", features = ["oid"] }
 
 # EHBP (Encrypted HTTP Body Protocol) — HPKE request sealing to the
 # attested enclave key plus AES-256-GCM response chunks (RFC 9180 /
-# EHBP SPEC). `hpke` is pure Rust, so it keeps the ring-only TLS
+# EHBP SPEC). `rustls-no-provider` instead of the default feature so
+# reqwest doesn't pull `__rustls-aws-lc-rs`, keeping the ring-only TLS
 # constraint above intact on Windows MSVC.
-hpke = { version = "0.13", default-features = false, features = ["alloc", "x25519"] }
-aes-gcm = "0.10"
-hkdf = "0.12"
-rand = { version = "0.9", default-features = false, features = ["os_rng", "std_rng"] }
-zeroize = "1"
+tinfoil-ehbp = { version = "0.2.6", git = "https://github.com/tinfoilsh/encrypted-http-body-protocol", rev = "fee6a0f33e27792d097a38ee804fcf4370802ad9", default-features = false, features = ["rustls-no-provider"] }
 x509-cert = { version = "0.2", features = ["sct"] }
 
 # TLS encoding for SCT verification (used by x509-cert's sct feature)
@@ -136,3 +133,8 @@ tokio-test = "0.4"
 hex-literal = "1"
 p256 = { version = "0.13", features = ["ecdsa"] }
 futures-util = "0.3"
+# Independent enclave-side EHBP crypto so tests verify the SDK's use of
+# the released client against a separate implementation of the spec.
+hpke = { version = "0.13", default-features = false, features = ["alloc", "x25519"] }
+aes-gcm = "0.10"
+rand = { version = "0.9", default-features = false, features = ["os_rng", "std_rng"] }

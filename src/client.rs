@@ -12,7 +12,10 @@ use tower::Layer;
 use crate::ehbp_transport::{EhbpProxy, EhbpTransport};
 use crate::error::{Error, Result};
 use crate::user_cache_secret::{SharedUserCacheSecret, UserCacheSecret, UserCacheSecretService};
-use crate::verifier::attestation::{self, types::{AttestationDocument, GroundTruth, Measurement}};
+use crate::verifier::attestation::{
+    self,
+    types::{AttestationDocument, GroundTruth, Measurement, Verification},
+};
 use crate::verifier::sigstore;
 use crate::verifier::tls;
 
@@ -170,17 +173,23 @@ impl SecureClient {
     
     /// Check if the client has been verified
     pub fn is_verified(&self) -> bool {
-        self.ground_truth.is_some() && self.pinned_client.is_some()
+        self.ground_truth.is_some()
+            && self.pinned_client.is_some()
+            && self.ehbp.as_ref().is_none_or(EhbpProxy::is_active)
     }
     
     /// Get the ground truth after verification
     pub fn ground_truth(&self) -> Option<&GroundTruth> {
-        self.ground_truth.as_ref()
+        if self.is_verified() {
+            self.ground_truth.as_ref()
+        } else {
+            None
+        }
     }
 
     /// Get the ground truth as a JSON string
     pub fn ground_truth_json(&self) -> Result<String> {
-        let gt = self.ground_truth.as_ref().ok_or(Error::Configuration("Client not verified - call verify() first".into()))?;
+        let gt = self.ground_truth().ok_or(Error::Configuration("Client not verified - call verify() first".into()))?;
         serde_json::to_string(gt).map_err(Error::Json)
     }
 
@@ -194,34 +203,14 @@ impl SecureClient {
     pub async fn verify(&mut self) -> Result<&GroundTruth> {
         // Clear prior trust state so a failure leaves the client unverified
         self.pinned_client = None;
-        self.ehbp = None;
+        if let Some(proxy) = &self.ehbp {
+            proxy.revoke();
+        }
         self.ground_truth = None;
 
-        // 1. Obtain code measurement (Sigstore verification or pinned value)
-        let (code_measurement, digest) = if let Some(pinned) = &self.pinned_measurement {
-            (pinned.clone(), "pinned_no_digest".to_string())
-        } else {
-            let result = sigstore::verify_repo(&self.repo).await?;
-            (result.measurement, result.digest)
-        };
-        
-        // 2. Fetch and verify hardware attestation
-        let doc = attestation::fetch(&self.host).await?;
-        let verification = attestation::verify_full(&doc).await?;
-        
-        // 3. Compare code measurement against enclave measurement
-        code_measurement.equals(&verification.measurement)
-            .map_err(|_| Error::MeasurementMismatch {
-                expected: code_measurement.fingerprint(),
-                actual: verification.measurement.fingerprint(),
-            })?;
-        
-        // 4. Verify TLS certificate matches attestation (one-time check)
-        self.verify_tls_binding(
-            &verification.tls_public_key_fp,
-            verification.hpke_public_key.as_deref(),
-            &doc,
-        ).await?;
+        let (code_measurement, digest, verification) =
+            Self::verify_attestation(&self.host, &self.repo, self.pinned_measurement.as_ref())
+                .await?;
         
         // 5. Create pinned HTTP client for all future requests
         let verified_origin = reqwest::Url::parse(&self.base_url())
@@ -246,13 +235,30 @@ impl SecureClient {
                         "enclave attestation does not include an HPKE public key".into(),
                     )
                 })?;
-            Some(EhbpProxy::new(proxy_url, self.base_url(), hpke_key)?)
+            if let Some(proxy) = &self.ehbp {
+                proxy.rekey(hpke_key)?;
+                Some(proxy.clone())
+            } else {
+                Some(EhbpProxy::new(proxy_url, self.base_url(), hpke_key)?)
+            }
         } else {
             None
         };
 
         self.pinned_client = Some(pinned);
         self.ehbp = ehbp;
+        if let Some(proxy) = &self.ehbp {
+            let host = self.host.clone();
+            let repo = self.repo.clone();
+            let pinned_measurement = self.pinned_measurement.clone();
+            proxy.set_refresher(move || {
+                Self::verify_rotated_hpke_key(
+                    host.clone(),
+                    repo.clone(),
+                    pinned_measurement.clone(),
+                )
+            });
+        }
 
         // 6. Store ground truth
         let enclave_measurement = verification.measurement;
@@ -272,6 +278,58 @@ impl SecureClient {
         
         Ok(self.ground_truth.as_ref().unwrap())
     }
+
+    async fn verify_attestation(
+        host: &str,
+        repo: &str,
+        pinned_measurement: Option<&Measurement>,
+    ) -> Result<(Measurement, String, Verification)> {
+        // 1. Obtain code measurement (Sigstore verification or pinned value)
+        let (code_measurement, digest) = if let Some(pinned) = pinned_measurement {
+            (pinned.clone(), "pinned_no_digest".to_string())
+        } else {
+            let result = sigstore::verify_repo(repo).await?;
+            (result.measurement, result.digest)
+        };
+
+        // 2. Fetch and verify hardware attestation
+        let doc = attestation::fetch(host).await?;
+        let verification = attestation::verify_full(&doc).await?;
+
+        // 3. Compare code measurement against enclave measurement
+        code_measurement
+            .equals(&verification.measurement)
+            .map_err(|_| Error::MeasurementMismatch {
+                expected: code_measurement.fingerprint(),
+                actual: verification.measurement.fingerprint(),
+            })?;
+
+        // 4. Verify TLS certificate matches attestation (one-time check)
+        Self::verify_tls_binding(
+            host,
+            &verification.tls_public_key_fp,
+            verification.hpke_public_key.as_deref(),
+            &doc,
+        )
+        .await?;
+
+        Ok((code_measurement, digest, verification))
+    }
+
+    async fn verify_rotated_hpke_key(
+        host: String,
+        repo: String,
+        pinned_measurement: Option<Measurement>,
+    ) -> Result<String> {
+        let (_, _, verification) =
+            Self::verify_attestation(&host, &repo, pinned_measurement.as_ref()).await?;
+        verification
+            .hpke_public_key
+            .filter(|key| !key.chars().all(|c| c == '0'))
+            .ok_or_else(|| {
+                Error::Ehbp("enclave attestation does not include an HPKE public key".into())
+            })
+    }
     
     /// Verify TLS certificate matches the attested public key and SAN bindings.
     ///
@@ -282,7 +340,7 @@ impl SecureClient {
     ///
     /// Checks 2 and 3 match the JS and Go (VerifyFromBundle) reference implementations.
     async fn verify_tls_binding(
-        &self,
+        host: &str,
         expected_fingerprint: &str,
         expected_hpke_key: Option<&str>,
         attestation_doc: &AttestationDocument,
@@ -296,7 +354,7 @@ impl SecureClient {
         use x509_cert::ext::pkix::SubjectAltName;
         
         // Connect to the server
-        let addr = format!("{}:443", self.host);
+        let addr = format!("{host}:443");
         let stream = TcpStream::connect(&addr).await
             .map_err(|e| Error::Tls(format!("Failed to connect: {}", e)))?;
         
@@ -312,7 +370,7 @@ impl SecureClient {
             .with_no_client_auth();
         
         let connector = TlsConnector::from(Arc::new(config));
-        let server_name: ServerName<'_> = self.host.clone().try_into()
+        let server_name: ServerName<'_> = host.to_string().try_into()
             .map_err(|_| Error::Tls("Invalid server name".into()))?;
         
         let tls_stream = connector.connect(server_name, stream).await
@@ -456,13 +514,16 @@ impl SecureClient {
     ) -> Result<reqwest::Response> {
         if let Some(proxy) = &self.ehbp {
             let url = format!("{}{}", proxy.base_url(), path);
-            let request = proxy
-                .http()
-                .post(&url)
-                .bearer_auth(&self.api_key)
-                .json(body)
-                .build()?;
-            return proxy.send(request).await;
+            return proxy
+                .send_replayable(|| {
+                    Ok(proxy
+                        .http()
+                        .post(&url)
+                        .bearer_auth(&self.api_key)
+                        .json(body)
+                        .build()?)
+                })
+                .await;
         }
 
         let url = format!("{}{}", self.base_url(), path);
