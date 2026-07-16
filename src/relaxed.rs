@@ -45,15 +45,7 @@ impl<'a> RelaxedChat<'a> {
         provision_value(&mut body, &self.client.user_cache_secret());
 
         let secure = self.client.secure_client();
-        let url = format!("{}/v1/chat/completions", secure.base_url());
-
-        let response = secure
-            .pinned_http_client()?
-            .post(&url)
-            .bearer_auth(secure.api_key())
-            .json(&body)
-            .send()
-            .await?;
+        let response = secure.post_json("/v1/chat/completions", &body).await?;
 
         let status = response.status();
         let bytes = response.bytes().await?;
@@ -83,15 +75,7 @@ impl<'a> RelaxedChat<'a> {
         provision_value(&mut body, &self.client.user_cache_secret());
 
         let secure = self.client.secure_client();
-        let url = format!("{}/v1/chat/completions", secure.base_url());
-
-        let response = secure
-            .pinned_http_client()?
-            .post(&url)
-            .bearer_auth(secure.api_key())
-            .json(&body)
-            .send()
-            .await?;
+        let response = secure.post_json("/v1/chat/completions", &body).await?;
 
         let status = response.status();
         if !status.is_success() {

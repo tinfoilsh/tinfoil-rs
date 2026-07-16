@@ -9,6 +9,7 @@ use async_openai::config::OpenAIConfig;
 use async_openai::middleware::{retry::OpenAIRetryLayer, ReqwestService};
 use tower::Layer;
 
+use crate::ehbp_transport::{EhbpProxy, EhbpTransport};
 use crate::error::{Error, Result};
 use crate::user_cache_secret::{SharedUserCacheSecret, UserCacheSecret, UserCacheSecretService};
 use crate::verifier::attestation::{self, types::{AttestationDocument, GroundTruth, Measurement}};
@@ -45,6 +46,14 @@ pub struct SecureClient {
     /// This client validates cert fingerprint on every connection
     pinned_client: Option<tls::HostBoundPinnedClient>,
 
+    /// EHBP proxy base URL (set at construction for proxy mode)
+    proxy_url: Option<String>,
+
+    /// EHBP proxy transport, built by `verify()` when `proxy_url` is set.
+    /// Seals request bodies to the attested HPKE key so the proxy only
+    /// ever sees ciphertext.
+    ehbp: Option<EhbpProxy>,
+
     /// Test-only base-URL override so unit tests can point the request
     /// paths at a local plain-HTTP server. Production always talks
     /// `https://{host}`.
@@ -66,9 +75,30 @@ impl SecureClient {
             pinned_measurement: None,
             ground_truth: None,
             pinned_client: None,
+            proxy_url: None,
+            ehbp: None,
             #[cfg(test)]
             base_url_override: None,
         }
+    }
+
+    /// Create a client that routes requests through an EHBP proxy.
+    ///
+    /// Attestation is still verified directly against the enclave, but API
+    /// requests are sent to `proxy_url` with their bodies sealed to the
+    /// enclave's attested HPKE key. The proxy can read headers (to add its
+    /// own Tinfoil API key, authenticate users, or collect usage metrics)
+    /// but can never decrypt the payload. The `api_key` is sent to the
+    /// proxy as a bearer token for the proxy's own authentication.
+    pub fn new_with_proxy(
+        host: impl Into<String>,
+        repo: impl Into<String>,
+        api_key: impl Into<String>,
+        proxy_url: impl Into<String>,
+    ) -> Self {
+        let mut client = Self::new(host, repo, api_key);
+        client.proxy_url = Some(proxy_url.into());
+        client
     }
 
     /// Create a client with a pinned code measurement.
@@ -88,6 +118,8 @@ impl SecureClient {
             pinned_measurement: Some(measurement),
             ground_truth: None,
             pinned_client: None,
+            proxy_url: None,
+            ehbp: None,
             #[cfg(test)]
             base_url_override: None,
         }
@@ -162,6 +194,7 @@ impl SecureClient {
     pub async fn verify(&mut self) -> Result<&GroundTruth> {
         // Clear prior trust state so a failure leaves the client unverified
         self.pinned_client = None;
+        self.ehbp = None;
         self.ground_truth = None;
 
         // 1. Obtain code measurement (Sigstore verification or pinned value)
@@ -198,7 +231,23 @@ impl SecureClient {
             verified_origin,
         )?;
         self.pinned_client = Some(pinned);
-        
+
+        // 5b. In proxy mode, build the EHBP transport that seals request
+        // bodies to the attested HPKE key. An enclave without a usable
+        // HPKE key cannot receive encrypted bodies, so this fails closed.
+        if let Some(proxy_url) = &self.proxy_url {
+            let hpke_key = verification
+                .hpke_public_key
+                .as_deref()
+                .filter(|key| !key.chars().all(|c| c == '0'))
+                .ok_or_else(|| {
+                    Error::Ehbp(
+                        "enclave attestation does not include an HPKE public key".into(),
+                    )
+                })?;
+            self.ehbp = Some(EhbpProxy::new(proxy_url, self.base_url(), hpke_key)?);
+        }
+
         // 6. Store ground truth
         let enclave_measurement = verification.measurement;
         let target_type = &enclave_measurement.type_;
@@ -377,6 +426,49 @@ impl SecureClient {
         format!("https://{}", self.host)
     }
 
+    /// Returns the base URL requests are actually sent to: the proxy in
+    /// EHBP proxy mode, the enclave otherwise.
+    pub fn request_base_url(&self) -> String {
+        match &self.ehbp {
+            Some(proxy) => proxy.base_url().to_string(),
+            None => self.base_url(),
+        }
+    }
+
+    /// Returns the verified EHBP proxy transport, when in proxy mode.
+    pub(crate) fn ehbp_proxy(&self) -> Option<&EhbpProxy> {
+        self.ehbp.as_ref()
+    }
+
+    /// POST a JSON body to an API path over the verified transport:
+    /// sealed through the EHBP proxy in proxy mode, or the pinned TLS
+    /// connection otherwise.
+    pub(crate) async fn post_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        if let Some(proxy) = &self.ehbp {
+            let url = format!("{}{}", proxy.base_url(), path);
+            let request = proxy
+                .http()
+                .post(&url)
+                .bearer_auth(&self.api_key)
+                .json(body)
+                .build()?;
+            return proxy.send(request).await;
+        }
+
+        let url = format!("{}{}", self.base_url(), path);
+        Ok(self
+            .pinned_http_client()?
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(body)
+            .send()
+            .await?)
+    }
+
     /// Returns the API key used for authentication.
     pub fn api_key(&self) -> &str {
         &self.api_key
@@ -466,6 +558,29 @@ impl Client {
         Self::from_secure_client(secure, &api_key)
     }
 
+    /// Create an attested OpenAI client that routes requests through an
+    /// EHBP proxy.
+    ///
+    /// The enclave is verified directly (Sigstore, hardware attestation,
+    /// measurement comparison, TLS binding), then all API requests are
+    /// sent to `proxy_url` with bodies encrypted end-to-end to the
+    /// enclave's attested HPKE key. The proxy forwards ciphertext to the
+    /// enclave named in the `X-Tinfoil-Enclave-Url` header and can add
+    /// its own Tinfoil API key without ever seeing plaintext. `api_key`
+    /// is sent to the proxy as a bearer token for the proxy's own
+    /// authentication and may be empty when the proxy does not need one.
+    pub async fn new_with_proxy(
+        enclave: impl Into<String>,
+        repo: impl Into<String>,
+        api_key: impl Into<String>,
+        proxy_url: impl Into<String>,
+    ) -> Result<Self> {
+        let api_key = api_key.into();
+        let mut secure = SecureClient::new_with_proxy(enclave, repo, &api_key, proxy_url);
+        secure.verify().await?;
+        Self::from_secure_client(secure, &api_key)
+    }
+
     /// Create from an already-verified `SecureClient`.
     fn from_secure_client(secure: SecureClient, api_key: &str) -> Result<Self> {
         let user_cache_secret = Arc::new(SharedUserCacheSecret::new(UserCacheSecret::deferred()));
@@ -490,11 +605,25 @@ impl Client {
         api_key: &str,
         user_cache_secret: &Arc<SharedUserCacheSecret>,
     ) -> Result<async_openai::Client<OpenAIConfig>> {
-        let http = secure.pinned_http_client()?.clone();
         let config = OpenAIConfig::new()
             .with_api_key(api_key)
-            .with_api_base(format!("{}/v1", secure.base_url()));
+            .with_api_base(format!("{}/v1", secure.request_base_url()));
 
+        // Proxy mode swaps the pinned reqwest transport for the EHBP
+        // transport: bodies are sealed to the attested enclave key after
+        // the user-cache-secret layer injects into the plaintext, and
+        // every retry reseals with a fresh HPKE context.
+        if let Some(proxy) = secure.ehbp_proxy() {
+            let stack = OpenAIRetryLayer::default().layer(UserCacheSecretService::new(
+                Arc::clone(user_cache_secret),
+                EhbpTransport::new(proxy.clone()),
+            ));
+            return Ok(async_openai::Client::with_config(config)
+                .with_http_client(proxy.http().clone())
+                .with_http_service(stack));
+        }
+
+        let http = secure.pinned_http_client()?.clone();
         let stack = OpenAIRetryLayer::default().layer(UserCacheSecretService::new(
             Arc::clone(user_cache_secret),
             ReqwestService::new(http.clone()),
@@ -643,7 +772,39 @@ impl Client {
             pinned_measurement: None,
             ground_truth: None,
             pinned_client: Some(tls::HostBoundPinnedClient { transport, exposed }),
+            proxy_url: None,
+            ehbp: None,
             base_url_override: Some(base_url.into()),
+        };
+        Self::from_secure_client(secure, "test-key")
+            .expect("a verified transport must yield a client")
+    }
+
+    /// Test-only proxy-mode client wired to a local EHBP proxy/enclave
+    /// pair, skipping attestation. Exercises the production
+    /// `from_secure_client` construction path with the EHBP transport.
+    pub(crate) fn test_client_with_ehbp(
+        proxy_url: impl Into<String>,
+        enclave_url: impl Into<String>,
+        hpke_public_key_hex: &str,
+    ) -> Self {
+        crate::ensure_crypto_provider();
+        let proxy_url = proxy_url.into();
+        let transport = reqwest::Client::new();
+        let exposed = tls::OriginBoundClient::unbound_for_test(transport.clone());
+        let secure = SecureClient {
+            host: "enclave.test.invalid".to_string(),
+            repo: "org/repo".to_string(),
+            api_key: "test-key".to_string(),
+            pinned_measurement: None,
+            ground_truth: None,
+            pinned_client: Some(tls::HostBoundPinnedClient { transport, exposed }),
+            proxy_url: Some(proxy_url.clone()),
+            ehbp: Some(
+                EhbpProxy::new(&proxy_url, enclave_url.into(), hpke_public_key_hex)
+                    .expect("test proxy config must be valid"),
+            ),
+            base_url_override: None,
         };
         Self::from_secure_client(secure, "test-key")
             .expect("a verified transport must yield a client")

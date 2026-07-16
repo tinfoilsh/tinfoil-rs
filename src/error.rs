@@ -70,6 +70,11 @@ pub enum Error {
     #[error("{0}")]
     Tls(String),
 
+    /// Encrypted HTTP Body Protocol (EHBP) failure. Fail-closed: an
+    /// encrypted exchange never falls back to plaintext.
+    #[error("EHBP error: {0}")]
+    Ehbp(String),
+
     /// Network error during attestation fetch.
     #[error("{0}")]
     Network(String),
@@ -134,6 +139,7 @@ impl Error {
                 | Error::SigstoreVerification(_)
                 | Error::MeasurementMismatch { .. }
                 | Error::Tls(_)
+                | Error::Ehbp(_)
                 | Error::UnsupportedFormat(_)
                 | Error::Json(_)
                 | Error::Base64(_)

@@ -65,6 +65,16 @@ sev = { version = "8", default-features = false, features = ["snp", "crypto_noss
 # Crypto primitives
 digest = "0.10"
 sha2 = { version = "0.10", features = ["oid"] }
+
+# EHBP (Encrypted HTTP Body Protocol) — HPKE request sealing to the
+# attested enclave key plus AES-256-GCM response chunks (RFC 9180 /
+# EHBP SPEC). `hpke` is pure Rust, so it keeps the ring-only TLS
+# constraint above intact on Windows MSVC.
+hpke = { version = "0.13", default-features = false, features = ["alloc", "x25519"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+rand = { version = "0.9", default-features = false, features = ["os_rng", "std_rng"] }
+zeroize = "1"
 x509-cert = { version = "0.2", features = ["sct"] }
 
 # TLS encoding for SCT verification (used by x509-cert's sct feature)
