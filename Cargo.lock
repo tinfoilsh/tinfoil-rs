@@ -2316,8 +2316,8 @@ dependencies = [
 
 [[package]]
 name = "tinfoil-ehbp"
-version = "0.2.6"
-source = "git+https://github.com/tinfoilsh/encrypted-http-body-protocol?rev=fee6a0f33e27792d097a38ee804fcf4370802ad9#fee6a0f33e27792d097a38ee804fcf4370802ad9"
+version = "0.3.0"
+source = "git+https://github.com/tinfoilsh/encrypted-http-body-protocol?rev=1bb648e9212739de454657f9a9e3eee762c86e8e#1bb648e9212739de454657f9a9e3eee762c86e8e"
 dependencies = [
  "aes-gcm",
  "async-stream",

@@ -360,6 +360,7 @@ mod tests {
     use super::*;
     use crate::client::Client;
     use crate::test_support::ehbp::{TestEnclave, encrypt_response_chunks};
+    use async_openai::error::OpenAIError;
     use futures_util::StreamExt;
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -733,11 +734,12 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// A plaintext reply on an encrypted exchange fails closed even when
-    /// it carries an error status: an unauthenticated body is never
-    /// surfaced, matching the reference EHBP clients.
+    /// A plaintext error reply on an encrypted exchange passes through
+    /// as an untrusted diagnostic (SPEC 5.3): the EHBP client surfaces
+    /// nonce-less non-2xx bodies so upstream errors stay visible,
+    /// matching the reference EHBP clients.
     #[tokio::test]
-    async fn plaintext_error_responses_fail_closed() {
+    async fn plaintext_error_responses_pass_through() {
         let enclave = TestEnclave::generate();
         let public_key_hex = enclave.public_key_hex();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -768,7 +770,13 @@ mod tests {
             .build();
 
         let err = client.chat_relaxed().create(body).await.unwrap_err();
-        assert!(matches!(&err, Error::Ehbp(msg) if msg.contains("Ehbp-Response-Nonce")));
+        match &err {
+            Error::Api(OpenAIError::ApiError(api)) => {
+                assert_eq!(api.status_code.as_u16(), 401);
+                assert_eq!(api.api_error.message, "proxy rejected credentials");
+            }
+            other => panic!("expected API error passthrough, got {other:?}"),
+        }
     }
 
     /// A success response without a nonce on an encrypted exchange is a
