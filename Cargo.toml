@@ -71,7 +71,7 @@ sha2 = { version = "0.10", features = ["oid"] }
 # EHBP SPEC). `rustls-no-provider` instead of the default feature so
 # reqwest doesn't pull `__rustls-aws-lc-rs`, keeping the ring-only TLS
 # constraint above intact on Windows MSVC.
-tinfoil-ehbp = { version = "0.2.6", git = "https://github.com/tinfoilsh/encrypted-http-body-protocol", rev = "fee6a0f33e27792d097a38ee804fcf4370802ad9", default-features = false, features = ["rustls-no-provider"] }
+tinfoil-ehbp = { version = "0.3.0", git = "https://github.com/tinfoilsh/encrypted-http-body-protocol", rev = "1bb648e9212739de454657f9a9e3eee762c86e8e", default-features = false, features = ["rustls-no-provider"] }
 x509-cert = { version = "0.2", features = ["sct"] }
 
 # TLS encoding for SCT verification (used by x509-cert's sct feature)
