@@ -25,6 +25,17 @@ jobs:
       - name: Install Rust toolchain
         run: rustup update stable && rustup default stable
 
+      - name: Verify release tag matches package version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "tinfoil") | .version')"
+          expected_tag="v${package_version}"
+          if [ "$TAG_NAME" != "$expected_tag" ]; then
+            echo "release tag $TAG_NAME does not match package version $expected_tag" >&2
+            exit 1
+          fi
+
       - name: Build release
         run: cargo build --locked --release --verbose
 
