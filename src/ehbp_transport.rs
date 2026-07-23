@@ -331,8 +331,8 @@ impl tower::Service<HttpRequestFactory> for EhbpTransport {
     fn call(&mut self, factory: HttpRequestFactory) -> Self::Future {
         let proxy = self.proxy.clone();
         Box::pin(async move {
-            let generation = proxy.generation();
             let request = factory.build().await?;
+            let generation = proxy.generation();
             let first_attempt = proxy.send(request).await;
             proxy
                 .retry_after_mismatch(generation, first_attempt, || async {
@@ -359,10 +359,11 @@ fn into_openai_error(err: Error) -> OpenAIError {
 mod tests {
     use super::*;
     use crate::client::Client;
-    use crate::test_support::ehbp::{TestEnclave, encrypt_response_chunks};
+    use crate::test_support::ehbp::{encrypt_response_chunks, TestEnclave};
     use async_openai::error::OpenAIError;
     use futures_util::StreamExt;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -574,13 +575,11 @@ mod tests {
         );
         let request = CreateChatCompletionRequestArgs::default()
             .model("gpt-oss-120b")
-            .messages(vec![
-                ChatCompletionRequestUserMessageArgs::default()
-                    .content("Say this is a test")
-                    .build()
-                    .unwrap()
-                    .into(),
-            ])
+            .messages(vec![ChatCompletionRequestUserMessageArgs::default()
+                .content("Say this is a test")
+                .build()
+                .unwrap()
+                .into()])
             .build()
             .unwrap();
 
@@ -677,6 +676,101 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn transport_refreshes_when_generation_changes_during_factory_build() {
+        use tower::Service;
+
+        let old_enclave = TestEnclave::generate();
+        let selected_enclave = TestEnclave::generate();
+        let refreshed_enclave = TestEnclave::generate();
+        let selected_public_key_hex = selected_enclave.public_key_hex();
+        let refreshed_public_key_hex = refreshed_enclave.public_key_hex();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (head, body) = read_request(&mut socket).await;
+            let enc_hex = header_value(&head, "ehbp-encapsulated-key").unwrap();
+            let (plaintext, _, _) = selected_enclave.open_request(&enc_hex, &body);
+            assert_eq!(plaintext, br#"{"attempt":"test"}"#);
+            write_response(
+                &mut socket,
+                "HTTP/1.1 422 Unprocessable Entity",
+                "Content-Type: application/problem+json\r\n",
+                format!(
+                    r#"{{"type":"{}","title":"reject selected key"}}"#,
+                    tinfoil_ehbp::KEY_CONFIG_PROBLEM_TYPE
+                )
+                .as_bytes(),
+            )
+            .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (head, body) = read_request(&mut socket).await;
+            let enc_hex = header_value(&head, "ehbp-encapsulated-key").unwrap();
+            let (plaintext, secret, enc) = refreshed_enclave.open_request(&enc_hex, &body);
+            assert_eq!(plaintext, br#"{"attempt":"test"}"#);
+            let encrypted =
+                encrypt_response_chunks(&secret, &enc, &RESPONSE_NONCE, &[b"refreshed"]);
+            write_response(
+                &mut socket,
+                "HTTP/1.1 200 OK",
+                &format!(
+                    "Content-Type: application/json\r\nEhbp-Response-Nonce: {}\r\n",
+                    hex::encode(RESPONSE_NONCE)
+                ),
+                &encrypted,
+            )
+            .await;
+        });
+
+        let proxy = EhbpProxy::new(
+            &format!("http://{addr}"),
+            TEST_ENCLAVE_URL.to_string(),
+            &old_enclave.public_key_hex(),
+        )
+        .unwrap();
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let refresher_calls = Arc::clone(&refreshes);
+        proxy.set_refresher(move || {
+            let key = refreshed_public_key_hex.clone();
+            let refresher_calls = Arc::clone(&refresher_calls);
+            async move {
+                refresher_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(key)
+            }
+        });
+
+        let factory_proxy = proxy.clone();
+        let builds = Arc::new(AtomicUsize::new(0));
+        let factory_builds = Arc::clone(&builds);
+        let factory = HttpRequestFactory::new(move || {
+            let proxy = factory_proxy.clone();
+            let selected_public_key_hex = selected_public_key_hex.clone();
+            let factory_builds = Arc::clone(&factory_builds);
+            async move {
+                if factory_builds.fetch_add(1, Ordering::Relaxed) == 0 {
+                    tokio::task::yield_now().await;
+                    proxy
+                        .rekey(&selected_public_key_hex)
+                        .map_err(into_openai_error)?;
+                }
+                reqwest::Client::new()
+                    .post(format!("http://{addr}/v1/chat/completions"))
+                    .body(r#"{"attempt":"test"}"#)
+                    .build()
+                    .map_err(OpenAIError::Reqwest)
+            }
+        });
+
+        let response = EhbpTransport::new(proxy).call(factory).await.unwrap();
+        assert_eq!(response.bytes().await.unwrap(), "refreshed");
+        assert_eq!(refreshes.load(Ordering::Relaxed), 1);
+        assert_eq!(builds.load(Ordering::Relaxed), 2);
+        server.await.unwrap();
+    }
+
     /// Streaming through the relaxed path: an encrypted SSE body split
     /// across several AEAD chunks decrypts into ordered deltas.
     #[tokio::test]
@@ -734,10 +828,8 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// A plaintext error reply on an encrypted exchange passes through
-    /// as an untrusted diagnostic (SPEC 5.3): the EHBP client surfaces
-    /// nonce-less non-2xx bodies so upstream errors stay visible,
-    /// matching the reference EHBP clients.
+    /// Plaintext non-success responses can originate from an intermediary
+    /// and pass through for ordinary HTTP API error handling.
     #[tokio::test]
     async fn plaintext_error_responses_pass_through() {
         let enclave = TestEnclave::generate();
@@ -772,7 +864,7 @@ mod tests {
         let err = client.chat_relaxed().create(body).await.unwrap_err();
         match &err {
             Error::Api(OpenAIError::ApiError(api)) => {
-                assert_eq!(api.status_code.as_u16(), 401);
+                assert_eq!(api.status_code, reqwest::StatusCode::UNAUTHORIZED);
                 assert_eq!(api.api_error.message, "proxy rejected credentials");
             }
             other => panic!("expected API error passthrough, got {other:?}"),
