@@ -171,8 +171,8 @@ impl Error {
     /// may succeed on retry.
     ///
     /// In practice this means [`is_fetch()`](Error::is_fetch) errors plus
-    /// the retryable subset of API errors (5xx, 408, 429). Configuration
-    /// and attestation errors are never retryable.
+    /// the retryable subset of API errors. Configuration and attestation
+    /// errors are never retryable.
     pub fn is_retryable(&self) -> bool {
         if self.is_fetch() {
             return true;
