@@ -1,6 +1,6 @@
 [package]
 name = "tinfoil"
-version = "0.1.0"
+version = "0.1.6"
 edition = "2021"
 rust-version = "1.88"
 description = "Rust client for Tinfoil secure enclaves with hardware attestation verification"
