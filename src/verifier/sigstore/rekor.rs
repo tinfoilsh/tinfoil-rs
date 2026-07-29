@@ -28,6 +28,23 @@ pub fn verify_rekor_entry(
     cert_not_before: u64,
     cert_not_after: u64,
 ) -> Result<()> {
+    verify_rekor_entry_with_trust(
+        bundle,
+        cert_not_before,
+        cert_not_after,
+        trust::embedded_trust_root_json(),
+    )
+}
+
+/// Same as [`verify_rekor_entry`], but loads Rekor keys from the supplied
+/// trust-root JSON instead of the embedded one. Used by conformance fixtures
+/// with synthetic trust roots.
+pub fn verify_rekor_entry_with_trust(
+    bundle: &serde_json::Value,
+    cert_not_before: u64,
+    cert_not_after: u64,
+    trust_root_json: &str,
+) -> Result<()> {
     // Get tlog entries from verification material
     let tlog_entries = bundle
         .get("verificationMaterial")
@@ -35,11 +52,15 @@ pub fn verify_rekor_entry(
         .and_then(|t| t.as_array())
         .ok_or_else(|| Error::SigstoreVerification("No tlogEntries in bundle".into()))?;
 
-    if tlog_entries.len() != 1 {
-        return Err(Error::SigstoreVerification(format!(
-            "Expected exactly 1 tlog entry, got {}",
-            tlog_entries.len()
-        )));
+    // SPEC §5.2 #3 says "at least 1 valid Rekor log entry". Real Sigstore
+    // bundles in practice carry exactly one; tolerate any non-empty list and
+    // verify the first entry (the canonical one). Previously this rejected
+    // !=1, which was over-strict relative to the spec — see
+    // tinfoil-conformance fixture 067-bundle-two-tlog-entries.
+    if tlog_entries.is_empty() {
+        return Err(Error::SigstoreVerification(
+            "TLOG_COUNT_OUT_OF_RANGE: no tlog entries in verificationMaterial".into(),
+        ));
     }
 
     let entry = &tlog_entries[0];
@@ -70,7 +91,7 @@ pub fn verify_rekor_entry(
     })?;
 
     // Load Rekor public keys from trusted root
-    let rekor_keys = trust::load_rekor_keys()?;
+    let rekor_keys = trust::load_rekor_keys_from_json(trust_root_json)?;
 
     // Get the log ID from the entry to select the right key
     let log_id = entry
@@ -715,17 +736,32 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_tlog_entries() {
+    fn test_multiple_tlog_entries_accepted() {
+        // SPEC §5.2 #3: "at least 1 valid Rekor log entry". A bundle with two
+        // entries (where the first is the canonical valid one) is accepted.
+        // The previous behaviour rejected any bundle with !=1 entries; that
+        // was over-strict and tinfoil-conformance fixture 067 surfaced it.
         let mut bundle = parse_bundle();
-        // Duplicate the tlog entry
         let entry = bundle["verificationMaterial"]["tlogEntries"][0].clone();
         bundle["verificationMaterial"]["tlogEntries"]
             .as_array_mut()
             .unwrap()
             .push(entry);
         assert!(
-            verify_rekor_entry(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_err(),
-            "multiple tlog entries should be rejected"
+            verify_rekor_entry(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_ok(),
+            "bundles with >1 tlog entries should be accepted (first verified)"
+        );
+    }
+
+    #[test]
+    fn test_empty_tlog_entries_rejected() {
+        let mut bundle = parse_bundle();
+        bundle["verificationMaterial"]["tlogEntries"] = serde_json::json!([]);
+        let err = verify_rekor_entry(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER)
+            .expect_err("empty tlog entries should be rejected");
+        assert!(
+            err.to_string().contains("TLOG_COUNT_OUT_OF_RANGE"),
+            "unexpected error: {err}",
         );
     }
 }

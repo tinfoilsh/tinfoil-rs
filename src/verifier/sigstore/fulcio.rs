@@ -19,7 +19,16 @@ const OID_SECP384R1: &str = "1.3.132.0.34";
 /// This searches through the trusted Fulcio CAs to find the one that
 /// issued the given certificate (by matching issuer/subject DNs).
 pub fn find_issuer_spki(cert: &Certificate) -> Result<Vec<u8>> {
-    let fulcio_cas = trust::load_fulcio_cas()?;
+    find_issuer_spki_with_trust(cert, trust::embedded_trust_root_json())
+}
+
+/// Same as [`find_issuer_spki`], but loads Fulcio CAs from the supplied
+/// trust-root JSON instead of the embedded one.
+pub fn find_issuer_spki_with_trust(
+    cert: &Certificate,
+    trust_root_json: &str,
+) -> Result<Vec<u8>> {
+    let fulcio_cas = trust::load_fulcio_cas_from_json(trust_root_json)?;
 
     // Try each Fulcio CA to find the matching issuer
     for ca in &fulcio_cas {
@@ -59,11 +68,21 @@ pub fn find_issuer_spki(cert: &Certificate) -> Result<Vec<u8>> {
 /// 4. The last cert in the chain is a self-signed root (subject == issuer,
 ///    self-signature verifies).
 pub fn verify_fulcio_chain(cert_der: &[u8], cert_not_before: u64) -> Result<()> {
+    verify_fulcio_chain_with_trust(cert_der, cert_not_before, trust::embedded_trust_root_json())
+}
+
+/// Same as [`verify_fulcio_chain`], but loads Fulcio CAs from the supplied
+/// trust-root JSON instead of the embedded one.
+pub fn verify_fulcio_chain_with_trust(
+    cert_der: &[u8],
+    cert_not_before: u64,
+    trust_root_json: &str,
+) -> Result<()> {
     let signing_cert = Certificate::from_der(cert_der).map_err(|e| {
         Error::SigstoreVerification(format!("Failed to parse signing certificate: {}", e))
     })?;
 
-    let fulcio_cas = trust::load_fulcio_cas()?;
+    let fulcio_cas = trust::load_fulcio_cas_from_json(trust_root_json)?;
 
     for ca in &fulcio_cas {
         if cert_not_before < ca.valid_from {

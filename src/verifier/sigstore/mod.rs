@@ -44,7 +44,6 @@ struct InTotoStatement {
 
 #[derive(Debug, Deserialize)]
 struct Subject {
-    #[allow(dead_code)]
     name: String,
     digest: std::collections::HashMap<String, String>,
 }
@@ -57,56 +56,133 @@ pub use certificate::CertificateInfo;
 pub struct SigstoreResult {
     pub measurement: Measurement,
     pub digest: String,
+    /// Predicate type URI from the verified in-toto statement.
+    pub predicate_type: String,
+    /// in-toto statement `_type` value from the verified payload.
+    pub in_toto_statement_type: String,
+    /// `subject[0].name` from the verified in-toto statement.
+    pub subject_name: String,
+    /// `subject[0].digest.sha256` from the verified statement (lowercased).
+    pub subject_digest_sha256_hex: String,
+    /// OIDC issuer extension value from the signing certificate.
+    pub cert_oidc_issuer: String,
+    /// The certificate's GitHubWorkflowRepository extension value.
+    pub cert_workflow_repository: String,
+    /// The certificate's Build-Signer-URI extension value
+    /// (`https://github.com/owner/repo/.github/workflows/<file>@<ref>`).
+    pub cert_workflow_signer_uri: String,
+}
+
+/// Policy parameters for Sigstore verification.
+///
+/// All Tinfoil-specific policy decisions are funneled through this struct.
+/// `Policy::tinfoil_default(repo)` returns the canonical settings used by the
+/// SDK's standard verification path; tests and the conformance binary build
+/// alternative policies to exercise specific clauses of SPEC §5.
+#[derive(Debug, Clone)]
+pub struct Policy {
+    /// Expected OIDC issuer extension value (exact match). SPEC §5.3.
+    pub oidc_issuer: String,
+    /// Required prefix on the cert's BuildSignerURI ref portion (e.g. `refs/tags/`). SPEC §5.3.
+    pub workflow_ref_prefix: String,
+    /// Expected GitHubWorkflowRepository extension value (exact match). SPEC §5.3.
+    pub workflow_repository: String,
+    /// Allow-list of predicate type URIs (SPEC §5.5). `None` means any.
+    pub predicate_types_allowed: Option<Vec<String>>,
+    /// Allow-list of in-toto statement `_type` values. `None` means any.
+    /// SPEC §5.4 is silent here; Tinfoil's default pins to v0.1/v1.
+    pub in_toto_statement_types_allowed: Option<Vec<String>>,
+    /// Required DSSE envelope `payload_type` (exact match). SPEC §5.4.
+    pub payload_type: String,
+}
+
+impl Policy {
+    /// Canonical Tinfoil policy: GitHub Actions OIDC, tag-triggered builds,
+    /// multiplatform predicate, in-toto v0.1/v1 statements.
+    pub fn tinfoil_default(repo: &str) -> Self {
+        Self {
+            oidc_issuer: "https://token.actions.githubusercontent.com".to_string(),
+            workflow_ref_prefix: "refs/tags/".to_string(),
+            workflow_repository: repo.to_string(),
+            predicate_types_allowed: Some(vec![
+                "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1".to_string(),
+            ]),
+            in_toto_statement_types_allowed: Some(vec![
+                "https://in-toto.io/Statement/v0.1".to_string(),
+                "https://in-toto.io/Statement/v1".to_string(),
+            ]),
+            payload_type: "application/vnd.in-toto+json".to_string(),
+        }
+    }
 }
 
 /// Verify a repository and return the expected measurement and release digest.
 ///
-/// This performs full Sigstore verification:
-/// 1. Fetches latest release digest from GitHub
-/// 2. Fetches Sigstore attestation bundle
-/// 3. Verifies the DSSE signature cryptographically
-/// 4. Validates certificate is from GitHub Actions for the repo
-/// 5. Verifies Rekor transparency log entry (mandatory)
-/// 6. Verifies certificate was issued by trusted Fulcio CA
-/// 7. Extracts and returns the measurement
+/// Thin wrapper around [`verify_bundle_with_policy`] that:
+/// 1. Fetches the latest release digest from GitHub.
+/// 2. Fetches the Sigstore attestation bundle from GitHub.
+/// 3. Calls [`verify_bundle_with_policy`] with [`Policy::tinfoil_default`] and
+///    the embedded Sigstore trust root.
 pub async fn verify_repo(repo: &str) -> Result<SigstoreResult> {
     // Install the rustls crypto provider before any HTTP client is built.
-    // `github::fetch_latest_digest` constructs a reqwest::Client internally,
-    // so we need the provider installed first or rustls panics with
-    // "No process-level CryptoProvider available".
     crate::ensure_crypto_provider();
 
-    // 1. Fetch latest release digest
     let release_digest = github::fetch_latest_digest(repo).await?;
-
-    // 2. Fetch the Sigstore attestation bundle
     let bundle_json = github::fetch_attestation_bundle(repo, &release_digest).await?;
 
-    // 3. Parse bundle
-    let bundle: serde_json::Value = serde_json::from_slice(&bundle_json)
+    let policy = Policy::tinfoil_default(repo);
+    verify_bundle_with_policy(
+        &bundle_json,
+        &release_digest,
+        &policy,
+        trust::embedded_trust_root_json(),
+    )
+}
+
+/// Verify a Sigstore bundle against an explicit policy and trust root.
+///
+/// This is the mid-level entry point that the standard SDK path
+/// ([`verify_repo`]) and the conformance binary both call. It performs no
+/// network I/O — bundle bytes, expected digest, policy and trust root are
+/// all provided by the caller.
+///
+/// Verification steps follow SPEC §5:
+/// 1. Parse bundle JSON.
+/// 2. Verify DSSE envelope signature with SCTs (uses Fulcio CAs + CT logs
+///    from `trust_root_json`).
+/// 3. Validate certificate identity against `policy` (OIDC issuer, workflow
+///    repository, workflow-ref prefix).
+/// 4. Verify Rekor transparency-log inclusion (uses Rekor keys from
+///    `trust_root_json`).
+/// 5. Verify Fulcio CA chain (uses Fulcio CAs from `trust_root_json`).
+/// 6. Validate and extract the in-toto statement: payload type, statement
+///    type, predicate type allow-list, subject-digest match, measurement
+///    registers.
+pub fn verify_bundle_with_policy(
+    bundle_bytes: &[u8],
+    expected_digest: &str,
+    policy: &Policy,
+    trust_root_json: &str,
+) -> Result<SigstoreResult> {
+    let bundle: serde_json::Value = serde_json::from_slice(bundle_bytes)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to parse bundle: {}", e)))?;
 
-    // 4. Verify DSSE signature cryptographically
-    dsse::verify_dsse_signature(&bundle)?;
+    dsse::verify_dsse_signature_with_trust(&bundle, trust_root_json)?;
 
-    // 5. Verify certificate is from GitHub Actions for this repo
     let cert_info = extract_certificate_info_from_bundle(&bundle)?;
-    verify_certificate_identity(&cert_info, repo)?;
+    verify_certificate_identity_with_policy(&cert_info, policy)?;
 
-    // 6. Verify Rekor transparency log entry (mandatory)
     let (cert_der, cert_not_before, cert_not_after) = extract_cert_with_validity(&bundle)?;
-    rekor::verify_rekor_entry(&bundle, cert_not_before, cert_not_after)?;
+    rekor::verify_rekor_entry_with_trust(
+        &bundle,
+        cert_not_before,
+        cert_not_after,
+        trust_root_json,
+    )?;
 
-    // 7. Verify certificate was issued by trusted Fulcio CA
-    fulcio::verify_fulcio_chain(&cert_der, cert_not_before)?;
+    fulcio::verify_fulcio_chain_with_trust(&cert_der, cert_not_before, trust_root_json)?;
 
-    // 8. Extract measurement from verified bundle and verify digest matches
-    let measurement = extract_measurement_from_bundle(&bundle, &release_digest)?;
-
-    Ok(SigstoreResult {
-        measurement,
-        digest: release_digest,
-    })
+    extract_measurement_with_policy(&bundle, expected_digest, policy, &cert_info)
 }
 
 /// Extract certificate DER bytes and validity window (not_before, not_after) as Unix timestamps
@@ -157,121 +233,175 @@ fn extract_certificate_info_from_bundle(bundle: &serde_json::Value) -> Result<Ce
     certificate::extract_certificate_info(&cert)
 }
 
-/// Verify that the certificate is from GitHub Actions for the expected repo
-fn verify_certificate_identity(cert_info: &CertificateInfo, expected_repo: &str) -> Result<()> {
-    // Verify OIDC issuer is GitHub Actions (exact match, not substring)
-    if cert_info.issuer != "https://token.actions.githubusercontent.com" {
+/// Validate the signing certificate against the policy.
+///
+/// Each check maps to a SPEC §5.3 clause. The error message prefix is
+/// intentionally stable — the conformance binary string-matches it to map
+/// to the spec-anchored rejection code taxonomy (until structured error
+/// variants land).
+fn verify_certificate_identity_with_policy(
+    cert_info: &CertificateInfo,
+    policy: &Policy,
+) -> Result<()> {
+    if cert_info.issuer != policy.oidc_issuer {
         return Err(Error::SigstoreVerification(format!(
-            "Certificate not from GitHub Actions. Issuer: {}",
-            cert_info.issuer
+            "OIDC_ISSUER_MISMATCH: cert OIDC issuer {:?} does not equal policy.oidc_issuer {:?}",
+            cert_info.issuer, policy.oidc_issuer
         )));
     }
 
-    // Verify repository matches the certificate's repository extension (matches Python/JS)
-    if cert_info.repository != expected_repo {
+    if cert_info.repository != policy.workflow_repository {
         return Err(Error::SigstoreVerification(format!(
-            "Certificate repository does not match. Expected: {}, Got: {}",
-            expected_repo, cert_info.repository
+            "WORKFLOW_REPOSITORY_MISMATCH: cert repository {:?} does not equal policy.workflow_repository {:?}",
+            cert_info.repository, policy.workflow_repository
         )));
     }
 
-    // Verify workflow URI matches expected pattern for this repo
-    let pattern = format!(
-        r"^https://github\.com/{}/\.github/workflows/[^@]+@refs/tags/",
-        regex::escape(expected_repo)
-    );
-    let re = regex::Regex::new(&pattern)
-        .map_err(|e| Error::SigstoreVerification(format!("Invalid regex: {}", e)))?;
-
-    if !re.is_match(&cert_info.subject_workflow) {
+    // SPEC §5.3 specifies the GitHubWorkflowRef extension (OID 1.3.6.1.4.1.57264.1.6)
+    // as the source of truth for the workflow_ref check. Previously this verifier
+    // regexed the BuildSignerURI extension (.1.9) — which is `<repo-url>@<ref>` —
+    // assuming the @ref suffix would always agree with the GitHubWorkflowRef
+    // extension. For legitimate Fulcio-issued certs that's true (both derive from
+    // the same OIDC `ref` claim), but a misissued or crafted cert can carry
+    // mismatched values, in which case the BuildSignerURI-only check accepts
+    // certs the SPEC says to reject. tinfoil-conformance fixture
+    // 060b-cert-ext-mismatch-ref-vs-buildsigner pins this divergence.
+    if !cert_info.workflow_ref.starts_with(&policy.workflow_ref_prefix) {
         return Err(Error::SigstoreVerification(format!(
-            "Certificate workflow doesn't match expected pattern. Expected repo: {}, Got: {}",
-            expected_repo, cert_info.subject_workflow
+            "WORKFLOW_REF_PREFIX_MISMATCH: cert GitHubWorkflowRef extension {:?} does not start with policy.workflow_ref_prefix {:?}",
+            cert_info.workflow_ref, policy.workflow_ref_prefix
         )));
     }
 
     Ok(())
 }
 
-/// Extract measurement from a bundle's DSSE envelope and verify digest matches
-fn extract_measurement_from_bundle(bundle: &serde_json::Value, expected_digest: &str) -> Result<Measurement> {
-    let dsse_envelope = bundle.get("dsseEnvelope")
-        .ok_or_else(|| Error::SigstoreVerification("No dsseEnvelope in bundle".into()))?;
+/// Validate the verified DSSE envelope against the policy and extract the
+/// measurement plus the full set of fields surfaced in [`SigstoreResult`].
+///
+/// Error message prefixes are stable — the conformance binary maps them to
+/// rejection codes.
+fn extract_measurement_with_policy(
+    bundle: &serde_json::Value,
+    expected_digest: &str,
+    policy: &Policy,
+    cert_info: &CertificateInfo,
+) -> Result<SigstoreResult> {
+    let dsse_envelope = bundle
+        .get("dsseEnvelope")
+        .ok_or_else(|| Error::SigstoreVerification("BUNDLE_MALFORMED: No dsseEnvelope in bundle".into()))?;
 
-    // Validate payloadType is in-toto (matches Python/JS)
-    let payload_type = dsse_envelope.get("payloadType")
+    let payload_type = dsse_envelope
+        .get("payloadType")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::SigstoreVerification("No payloadType in DSSE envelope".into()))?;
-
-    if payload_type != "application/vnd.in-toto+json" {
+        .ok_or_else(|| Error::SigstoreVerification("BUNDLE_MALFORMED: No payloadType in DSSE envelope".into()))?;
+    if payload_type != policy.payload_type {
         return Err(Error::SigstoreVerification(format!(
-            "Unsupported DSSE payload type: \"{}\". Expected \"application/vnd.in-toto+json\"",
-            payload_type
+            "PAYLOAD_TYPE_MISMATCH: DSSE payload_type {:?} does not equal policy.payload_type {:?}",
+            payload_type, policy.payload_type
         )));
     }
 
-    let payload_b64 = dsse_envelope.get("payload")
+    let payload_b64 = dsse_envelope
+        .get("payload")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::SigstoreVerification("No payload in DSSE envelope".into()))?;
-
+        .ok_or_else(|| Error::SigstoreVerification("BUNDLE_MALFORMED: No payload in DSSE envelope".into()))?;
     let payload_bytes = decode_b64(payload_b64)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to decode payload: {}", e)))?;
-
+        .map_err(|e| Error::SigstoreVerification(format!("BUNDLE_MALFORMED: Failed to decode payload: {}", e)))?;
     let statement: InTotoStatement = serde_json::from_slice(&payload_bytes)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse statement: {}", e)))?;
+        .map_err(|e| Error::SigstoreVerification(format!("BUNDLE_MALFORMED: Failed to parse statement: {}", e)))?;
 
-    // Validate in-toto statement type
-    if statement._type_ != "https://in-toto.io/Statement/v0.1"
-        && statement._type_ != "https://in-toto.io/Statement/v1"
-    {
-        return Err(Error::SigstoreVerification(format!(
-            "Unsupported in-toto statement type: \"{}\"",
-            statement._type_
-        )));
+    if let Some(allowed) = &policy.in_toto_statement_types_allowed {
+        if !allowed.iter().any(|t| t == &statement._type_) {
+            return Err(Error::SigstoreVerification(format!(
+                "IN_TOTO_STATEMENT_TYPE_NOT_ALLOWED: in-toto statement type {:?} not in policy.in_toto_statement_types_allowed",
+                statement._type_
+            )));
+        }
     }
 
-    // Verify that the provided digest matches the digest in the DSSE payload subject
-    let subject = statement.subject.first()
-        .ok_or_else(|| Error::SigstoreVerification("No subject in statement".into()))?;
+    let subject = statement
+        .subject
+        .first()
+        .ok_or_else(|| Error::SigstoreVerification("SUBJECT_MISSING: No subject in statement".into()))?;
+    let payload_digest = subject
+        .digest
+        .get("sha256")
+        .ok_or_else(|| Error::SigstoreVerification("BUNDLE_MALFORMED: No sha256 digest in subject".into()))?;
 
-    let payload_digest = subject.digest.get("sha256")
-        .ok_or_else(|| Error::SigstoreVerification("No sha256 digest in subject".into()))?;
-
+    // Lowercase normalize per SPEC §7.3.
     if payload_digest.to_lowercase() != expected_digest.to_lowercase() {
         return Err(Error::SigstoreVerification(format!(
-            "Provided digest does not match verified DSSE payload digest. Expected: {}, Got: {}",
-            expected_digest, payload_digest
+            "SUBJECT_DIGEST_MISMATCH: bundle subject digest {:?} does not equal expected {:?}",
+            payload_digest, expected_digest
         )));
     }
 
-    // Only accept multiplatform predicate (matches Python/Go behavior)
-    if statement.predicate_type != "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1" {
+    if let Some(allowed) = &policy.predicate_types_allowed {
+        if !allowed.iter().any(|t| t == &statement.predicate_type) {
+            return Err(Error::SigstoreVerification(format!(
+                "PREDICATE_TYPE_NOT_ALLOWED: predicate type {:?} not in policy.predicate_types_allowed",
+                statement.predicate_type
+            )));
+        }
+    }
+
+    // Currently only the multiplatform predicate ships with a typed Measurement;
+    // others would require additional extraction logic when added to the SDK.
+    let measurement = if statement.predicate_type
+        == "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1"
+    {
+        let snp_measurement = statement
+            .predicate
+            .get("snp_measurement")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::SigstoreVerification(
+                "PREDICATE_MEASUREMENT_INVALID: Missing snp_measurement".into(),
+            ))?;
+        let tdx = statement
+            .predicate
+            .get("tdx_measurement")
+            .ok_or_else(|| Error::SigstoreVerification(
+                "PREDICATE_MEASUREMENT_INVALID: Missing tdx_measurement".into(),
+            ))?;
+        let rtmr1 = tdx
+            .get("rtmr1")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::SigstoreVerification(
+                "PREDICATE_MEASUREMENT_INVALID: Missing tdx_measurement.rtmr1".into(),
+            ))?;
+        let rtmr2 = tdx
+            .get("rtmr2")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::SigstoreVerification(
+                "PREDICATE_MEASUREMENT_INVALID: Missing tdx_measurement.rtmr2".into(),
+            ))?;
+        Measurement {
+            type_: PredicateType::SnpTdxMultiPlatformV1,
+            registers: vec![
+                snp_measurement.to_string(),
+                rtmr1.to_string(),
+                rtmr2.to_string(),
+            ],
+        }
+    } else {
+        // Allow-listed by policy but not yet extractable by the SDK.
         return Err(Error::SigstoreVerification(format!(
-            "Unsupported predicate type: {}",
+            "PREDICATE_MEASUREMENT_INVALID: predicate type {:?} allowed by policy but extraction not implemented",
             statement.predicate_type
         )));
-    }
+    };
 
-    let snp_measurement = statement.predicate.get("snp_measurement")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::SigstoreVerification("Missing snp_measurement".into()))?;
-
-    let tdx = statement.predicate.get("tdx_measurement")
-        .ok_or_else(|| Error::SigstoreVerification("Missing tdx_measurement".into()))?;
-
-    let rtmr1 = tdx.get("rtmr1")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::SigstoreVerification("Missing rtmr1".into()))?;
-
-    let rtmr2 = tdx.get("rtmr2")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::SigstoreVerification("Missing rtmr2".into()))?;
-
-    let registers = vec![snp_measurement.to_string(), rtmr1.to_string(), rtmr2.to_string()];
-    
-    Ok(Measurement {
-        type_: PredicateType::SnpTdxMultiPlatformV1,
-        registers,
+    Ok(SigstoreResult {
+        measurement,
+        digest: expected_digest.to_lowercase(),
+        predicate_type: statement.predicate_type,
+        in_toto_statement_type: statement._type_,
+        subject_name: subject.name.clone(),
+        subject_digest_sha256_hex: payload_digest.to_lowercase(),
+        cert_oidc_issuer: cert_info.issuer.clone(),
+        cert_workflow_repository: cert_info.repository.clone(),
+        cert_workflow_signer_uri: cert_info.subject_workflow.clone(),
     })
 }
 

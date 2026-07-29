@@ -128,6 +128,13 @@ libc = "0.2"
 name = "conformance"
 path = "src/bin/conformance.rs"
 
+# Tinfoil-flavored conformance binary (separate from the upstream sigstore-conformance
+# binary above). Implements the CLI contract defined in
+# https://github.com/tinfoilsh/tinfoil-conformance — capabilities + per-stage verifiers.
+[[bin]]
+name = "tinfoil-conformance"
+path = "src/bin/tinfoil_conformance.rs"
+
 [dev-dependencies]
 tokio-test = "0.4"
 hex-literal = "1"
