@@ -67,9 +67,9 @@ impl VerificationDocument {
     pub(crate) fn from_ground_truth(
         ground_truth: GroundTruth,
         enclave_host: String,
-        tls_public_key: String,
-        hpke_public_key: String,
-    ) -> Self {
+    ) -> Option<Self> {
+        let tls_public_key = ground_truth.tls_public_key.clone()?;
+        let hpke_public_key = ground_truth.hpke_public_key.clone()?;
         let pinned = ground_truth.digest == crate::constants::PINNED_NO_DIGEST;
         let successful = VerificationStepState {
             status: VerificationStepStatus::Success,
@@ -80,7 +80,7 @@ impl VerificationDocument {
             error: None,
         };
 
-        Self {
+        Some(Self {
             schema_version: VERIFICATION_DOCUMENT_SCHEMA_VERSION,
             config_repo: ground_truth.config_repo,
             enclave_host: enclave_host.clone(),
@@ -111,6 +111,6 @@ impl VerificationDocument {
                 compare_measurements: successful.clone(),
                 verify_certificate: successful,
             },
-        }
+        })
     }
 }

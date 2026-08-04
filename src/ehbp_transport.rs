@@ -43,6 +43,7 @@ impl From<String> for RefreshedState {
 struct EhbpChannel {
     client: Option<tinfoil_ehbp::Client>,
     public_key: Option<String>,
+    rejected_public_key: Option<String>,
     ground_truth: Option<GroundTruth>,
     generation: u64,
 }
@@ -51,8 +52,15 @@ impl EhbpChannel {
     fn clear(&mut self) {
         self.client = None;
         self.public_key = None;
+        self.rejected_public_key = None;
         self.ground_truth = None;
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn reject(&mut self) {
+        let rejected_public_key = self.public_key.take();
+        self.clear();
+        self.rejected_public_key = rejected_public_key;
     }
 }
 
@@ -100,6 +108,7 @@ impl EhbpProxy {
             channel: Arc::new(RwLock::new(EhbpChannel {
                 client: None,
                 public_key: None,
+                rejected_public_key: None,
                 ground_truth: None,
                 generation: 0,
             })),
@@ -135,6 +144,7 @@ impl EhbpProxy {
         let mut state = self.channel.write().unwrap_or_else(PoisonError::into_inner);
         state.client = Some(channel);
         state.public_key = Some(refreshed.hpke_public_key);
+        state.rejected_public_key = None;
         state.ground_truth = refreshed.ground_truth;
         state.generation = state.generation.wrapping_add(1);
         Ok(())
@@ -181,14 +191,13 @@ impl EhbpProxy {
         state.clear();
     }
 
-    fn reject_if_generation(&self, generation: u64) -> bool {
+    fn reject_if_generation(&self, generation: u64) -> Option<u64> {
         let mut state = self.channel.write().unwrap_or_else(PoisonError::into_inner);
         if state.generation != generation {
-            return false;
+            return None;
         }
-        state.client = None;
-        state.ground_truth = None;
-        true
+        state.reject();
+        Some(state.generation)
     }
 
     #[cfg(test)]
@@ -209,9 +218,9 @@ impl EhbpProxy {
 
     async fn refresh_after_mismatch(&self, seen_generation: u64) -> Result<()> {
         let _guard = self.refresh_lock.lock().await;
-        if !self.reject_if_generation(seen_generation) {
-            return Ok(());
-        }
+        let Some(refresh_generation) = self.reject_if_generation(seen_generation) else {
+            return Ok(())
+        };
 
         let refresh = self
             .refresh
@@ -234,10 +243,10 @@ impl EhbpProxy {
             Err(err) => return Err(map_ehbp_error(err)),
         };
         let mut state = self.channel.write().unwrap_or_else(PoisonError::into_inner);
-        if state.generation != seen_generation {
+        if state.generation != refresh_generation {
             return Ok(());
         }
-        if state.public_key.as_deref() == Some(&refreshed.hpke_public_key) {
+        if state.rejected_public_key.as_deref() == Some(&refreshed.hpke_public_key) {
             state.clear();
             return Err(Error::EhbpKeyMismatch(
                 "attestation returned the previously rejected HPKE key".into(),
@@ -245,6 +254,7 @@ impl EhbpProxy {
         }
         state.client = Some(channel);
         state.public_key = Some(refreshed.hpke_public_key);
+        state.rejected_public_key = None;
         state.ground_truth = refreshed.ground_truth;
         state.generation = state.generation.wrapping_add(1);
         Ok(())
@@ -610,7 +620,8 @@ mod tests {
         let state = proxy.channel.read().unwrap_or_else(PoisonError::into_inner);
         assert!(state.client.is_none());
         assert!(state.ground_truth.is_none());
-        assert_eq!(state.public_key.as_deref(), Some(initial_key.as_str()));
+        assert!(state.public_key.is_none());
+        assert_eq!(state.rejected_public_key.as_deref(), Some(initial_key.as_str()));
     }
 
     #[tokio::test]

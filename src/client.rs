@@ -201,15 +201,7 @@ impl SecureClient {
     /// Build a Verification Center-compatible document from the active verified state.
     pub fn verification_document(&self) -> Option<VerificationDocument> {
         let ground_truth = self.ground_truth()?;
-        let tls_public_key = ground_truth.tls_public_key.clone()?;
-        let hpke_public_key = ground_truth.hpke_public_key.clone()?;
-
-        Some(VerificationDocument::from_ground_truth(
-            ground_truth,
-            self.host.clone(),
-            tls_public_key,
-            hpke_public_key,
-        ))
+        VerificationDocument::from_ground_truth(ground_truth, self.host.clone())
     }
 
     /// Get the active verification document as a JSON string.
@@ -307,7 +299,7 @@ impl SecureClient {
     ) -> Result<(Measurement, String, Option<String>, Verification)> {
         // 1. Obtain code measurement (Sigstore verification or pinned value)
         let (code_measurement, digest, release_tag) = if let Some(pinned) = pinned_measurement {
-            (pinned.clone(), "pinned_no_digest".to_string(), None)
+            (pinned.clone(), crate::constants::PINNED_NO_DIGEST.to_string(), None)
         } else {
             let result = sigstore::verify_repo(repo).await?;
             (result.measurement, result.digest, Some(result.release_tag))
