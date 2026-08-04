@@ -49,6 +49,14 @@ struct EhbpChannel {
 }
 
 impl EhbpChannel {
+    fn set_active(&mut self, client: tinfoil_ehbp::Client, refreshed: RefreshedState) {
+        self.client = Some(client);
+        self.public_key = Some(refreshed.hpke_public_key);
+        self.rejected_public_key = None;
+        self.ground_truth = refreshed.ground_truth;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     fn clear(&mut self) {
         self.client = None;
         self.public_key = None;
@@ -142,11 +150,7 @@ impl EhbpProxy {
         )
         .map_err(map_ehbp_error)?;
         let mut state = self.channel.write().unwrap_or_else(PoisonError::into_inner);
-        state.client = Some(channel);
-        state.public_key = Some(refreshed.hpke_public_key);
-        state.rejected_public_key = None;
-        state.ground_truth = refreshed.ground_truth;
-        state.generation = state.generation.wrapping_add(1);
+        state.set_active(channel, refreshed);
         Ok(())
     }
 
@@ -252,11 +256,7 @@ impl EhbpProxy {
                 "attestation returned the previously rejected HPKE key".into(),
             ));
         }
-        state.client = Some(channel);
-        state.public_key = Some(refreshed.hpke_public_key);
-        state.rejected_public_key = None;
-        state.ground_truth = refreshed.ground_truth;
-        state.generation = state.generation.wrapping_add(1);
+        state.set_active(channel, refreshed);
         Ok(())
     }
 
