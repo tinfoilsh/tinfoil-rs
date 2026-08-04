@@ -244,15 +244,7 @@ impl SecureClient {
         // Built before any trust state is committed so a failure here
         // leaves the client fully unverified.
         let ehbp = if let Some(proxy_url) = &self.proxy_url {
-            let hpke_key = verification
-                .hpke_public_key
-                .clone()
-                .filter(|key| !key.chars().all(|c| c == '0'))
-                .ok_or_else(|| {
-                    Error::Ehbp(
-                        "enclave attestation does not include an HPKE public key".into(),
-                    )
-                })?;
+            let hpke_key = Self::require_hpke_public_key(&verification)?;
             if let Some(proxy) = &self.ehbp {
                 proxy.install_verified_state(hpke_key, ground_truth.clone())?;
                 Some(proxy.clone())
@@ -329,13 +321,7 @@ impl SecureClient {
     ) -> Result<RefreshedState> {
         let (code_measurement, digest, release_tag, verification) =
             Self::verify_attestation(&host, &repo, pinned_measurement.as_ref()).await?;
-        let hpke_public_key = verification
-            .hpke_public_key
-            .clone()
-            .filter(|key| !key.chars().all(|c| c == '0'))
-            .ok_or_else(|| {
-                Error::Ehbp("enclave attestation does not include an HPKE public key".into())
-            })?;
+        let hpke_public_key = Self::require_hpke_public_key(&verification)?;
         let ground_truth = Self::build_ground_truth(
             repo,
             code_measurement,
@@ -374,6 +360,16 @@ impl SecureClient {
             verifier: attestation::types::verifier_identity(),
             verified_at: attestation::types::verification_timestamp(),
         }
+    }
+
+    fn require_hpke_public_key(verification: &Verification) -> Result<String> {
+        verification
+            .hpke_public_key
+            .clone()
+            .filter(|key| !key.chars().all(|c| c == '0'))
+            .ok_or_else(|| {
+                Error::Ehbp("enclave attestation does not include an HPKE public key".into())
+            })
     }
     
     /// Verify TLS certificate matches the attested public key and SAN bindings.
@@ -509,6 +505,11 @@ impl SecureClient {
     /// Initial requests and redirects to any other scheme, host, or port are
     /// rejected before transmission.
     pub fn http_client(&self) -> Result<&tls::OriginBoundClient> {
+        if self.ehbp.is_some() {
+            return Err(Error::Configuration(
+                "http_client() is unavailable in EHBP proxy mode; use the verified client methods so requests remain sealed to the active attested key".into(),
+            ));
+        }
         self.pinned_client
             .as_ref()
             .map(|client| &client.exposed)
@@ -938,6 +939,21 @@ mod tests {
     fn test_not_verified_error() {
         let client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", "test-key");
         assert!(client.http_client().is_err());
+    }
+
+    #[test]
+    fn test_proxy_mode_does_not_expose_stale_tls_client() {
+        let enclave = crate::test_support::ehbp::TestEnclave::generate();
+        let client = Client::test_client_with_ehbp(
+            "http://127.0.0.1:9",
+            "https://enclave.test.invalid",
+            &enclave.public_key_hex(),
+        );
+
+        assert!(matches!(
+            client.http_client(),
+            Err(Error::Configuration(message)) if message.contains("EHBP proxy mode")
+        ));
     }
 
     /// The closest thing this crate has to pinning the transport stack: a

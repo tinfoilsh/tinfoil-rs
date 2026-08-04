@@ -47,6 +47,15 @@ struct EhbpChannel {
     generation: u64,
 }
 
+impl EhbpChannel {
+    fn clear(&mut self) {
+        self.client = None;
+        self.public_key = None;
+        self.ground_truth = None;
+        self.generation = self.generation.wrapping_add(1);
+    }
+}
+
 /// Verified EHBP proxy configuration, shared by the typed async-openai
 /// stack and the relaxed chat path.
 ///
@@ -169,10 +178,7 @@ impl EhbpProxy {
     /// closed until [`rekey`](Self::rekey) restores trust.
     pub(crate) fn revoke(&self) {
         let mut state = self.channel.write().unwrap_or_else(PoisonError::into_inner);
-        state.client = None;
-        state.public_key = None;
-        state.ground_truth = None;
-        state.generation = state.generation.wrapping_add(1);
+        state.clear();
     }
 
     fn revoke_if_generation(&self, generation: u64) {
@@ -180,10 +186,7 @@ impl EhbpProxy {
         if state.generation != generation {
             return;
         }
-        state.client = None;
-        state.public_key = None;
-        state.ground_truth = None;
-        state.generation = state.generation.wrapping_add(1);
+        state.clear();
     }
 
     #[cfg(test)]
@@ -242,10 +245,7 @@ impl EhbpProxy {
             return Ok(());
         }
         if state.public_key.as_deref() == Some(&refreshed.hpke_public_key) {
-            state.client = None;
-            state.public_key = None;
-            state.ground_truth = None;
-            state.generation = state.generation.wrapping_add(1);
+            state.clear();
             return Err(Error::EhbpKeyMismatch(
                 "attestation returned the previously rejected HPKE key".into(),
             ));
