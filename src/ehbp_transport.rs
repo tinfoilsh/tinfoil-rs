@@ -181,12 +181,14 @@ impl EhbpProxy {
         state.clear();
     }
 
-    fn revoke_if_generation(&self, generation: u64) {
+    fn reject_if_generation(&self, generation: u64) -> bool {
         let mut state = self.channel.write().unwrap_or_else(PoisonError::into_inner);
         if state.generation != generation {
-            return;
+            return false;
         }
-        state.clear();
+        state.client = None;
+        state.ground_truth = None;
+        true
     }
 
     #[cfg(test)]
@@ -207,7 +209,7 @@ impl EhbpProxy {
 
     async fn refresh_after_mismatch(&self, seen_generation: u64) -> Result<()> {
         let _guard = self.refresh_lock.lock().await;
-        if self.generation() != seen_generation {
+        if !self.reject_if_generation(seen_generation) {
             return Ok(());
         }
 
@@ -221,13 +223,7 @@ impl EhbpProxy {
                     "EHBP key rotated; re-run verify() before retrying the request".into(),
                 )
             })?;
-        let refreshed = match refresh().await {
-            Ok(state) => state,
-            Err(err) => {
-                self.revoke_if_generation(seen_generation);
-                return Err(err);
-            }
-        };
+        let refreshed = refresh().await?;
 
         let channel = match tinfoil_ehbp::Client::with_public_key_hex_and_http_client(
             &self.base_url,
@@ -235,10 +231,7 @@ impl EhbpProxy {
             self.http.clone(),
         ) {
             Ok(channel) => channel,
-            Err(err) => {
-                self.revoke_if_generation(seen_generation);
-                return Err(map_ehbp_error(err));
-            }
+            Err(err) => return Err(map_ehbp_error(err)),
         };
         let mut state = self.channel.write().unwrap_or_else(PoisonError::into_inner);
         if state.generation != seen_generation {
@@ -332,10 +325,9 @@ impl EhbpProxy {
 }
 
 /// EHBP only protects request and response bodies; headers, including
-/// the proxy's bearer token, ride on the transport, so prefer https://
-/// proxy URLs. Cleartext http:// is accepted for caller-operated
-/// proxies, but non-HTTP schemes and URLs with embedded credentials are
-/// rejected.
+/// the proxy's bearer token, ride on the transport. Cleartext http:// is
+/// accepted only for loopback proxies; remote proxies must use HTTPS.
+/// Non-HTTP schemes and URLs with embedded credentials are rejected.
 fn validate_proxy_url(base_url: &str) -> Result<()> {
     let url = reqwest::Url::parse(base_url)
         .map_err(|err| Error::Configuration(format!("invalid proxy URL: {err}")))?;
@@ -354,6 +346,21 @@ fn validate_proxy_url(base_url: &str) -> Result<()> {
         return Err(Error::Configuration(
             "proxy URL must be an absolute HTTP URL without a query or fragment".into(),
         ));
+    }
+    if url.scheme() == "http" {
+        let host = url.host_str().expect("proxy URL host was checked above");
+        let is_loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback());
+        if !is_loopback {
+            return Err(Error::Configuration(
+                "cleartext proxy URL must use a loopback host; remote proxies require https://"
+                    .into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -467,9 +474,19 @@ mod tests {
     #[test]
     fn proxy_url_policy_rejects_malformed_and_credentialed_urls() {
         assert!(validate_proxy_url("https://proxy.example.com").is_ok());
-        assert!(validate_proxy_url("http://proxy.example.com").is_ok());
+        assert!(validate_proxy_url("https://192.0.2.1:8080").is_ok());
         assert!(validate_proxy_url("http://127.0.0.1:8080").is_ok());
+        assert!(validate_proxy_url("http://127.1.2.3:8080").is_ok());
         assert!(validate_proxy_url("http://[::1]:8080").is_ok());
+        assert!(validate_proxy_url("http://localhost:8080").is_ok());
+        assert!(matches!(
+            validate_proxy_url("http://proxy.example.com"),
+            Err(Error::Configuration(_))
+        ));
+        assert!(matches!(
+            validate_proxy_url("http://192.0.2.1:8080"),
+            Err(Error::Configuration(_))
+        ));
         assert!(matches!(
             validate_proxy_url("ftp://proxy.example.com"),
             Err(Error::Configuration(_))
@@ -502,12 +519,12 @@ mod tests {
         let refreshed_enclave = TestEnclave::generate();
         let initial_key = initial_enclave.public_key_hex();
         let refreshed_key = refreshed_enclave.public_key_hex();
-        let proxy = EhbpProxy::new(
+        let client = Client::test_client_with_ehbp(
             "http://127.0.0.1:9",
-            TEST_ENCLAVE_URL.to_string(),
+            TEST_ENCLAVE_URL,
             &initial_key,
-        )
-        .unwrap();
+        );
+        let proxy = client.secure_client().ehbp_proxy().unwrap().clone();
         proxy
             .install_verified_state(
                 initial_key.clone(),
@@ -539,6 +556,61 @@ mod tests {
         assert_eq!(channel.public_key, document.hpke_public_key);
         assert_eq!(document.digest, "new-digest");
         assert_eq!(document.verified_at, "2026-08-04T12:30:00Z");
+        drop(channel);
+
+        let verification_document = client.secure_client().verification_document().unwrap();
+        assert_eq!(verification_document.release_digest, "new-digest");
+        assert_eq!(
+            verification_document.hpke_public_key,
+            refreshed_enclave.public_key_hex()
+        );
+        assert_eq!(verification_document.verified_at, "2026-08-04T12:30:00Z");
+    }
+
+    #[tokio::test]
+    async fn aborted_refresh_leaves_rejected_state_unobservable() {
+        let initial_key = TestEnclave::generate().public_key_hex();
+        let proxy = EhbpProxy::new(
+            "http://127.0.0.1:9",
+            TEST_ENCLAVE_URL.to_string(),
+            &initial_key,
+        )
+        .unwrap();
+        proxy
+            .install_verified_state(
+                initial_key.clone(),
+                ground_truth(initial_key.clone(), "old-digest", "2026-08-04T12:00:00Z"),
+            )
+            .unwrap();
+        let seen_generation = proxy.generation();
+        let refresh_started = Arc::new(tokio::sync::Notify::new());
+        proxy.set_refresher({
+            let refresh_started = Arc::clone(&refresh_started);
+            move || {
+                let refresh_started = Arc::clone(&refresh_started);
+                async move {
+                    refresh_started.notify_one();
+                    std::future::pending::<Result<String>>().await
+                }
+            }
+        });
+
+        let refreshing_proxy = proxy.clone();
+        let refresh = tokio::spawn(async move {
+            refreshing_proxy
+                .refresh_after_mismatch(seen_generation)
+                .await
+        });
+        refresh_started.notified().await;
+        assert!(!proxy.is_active());
+        assert!(proxy.verified_ground_truth().is_none());
+        refresh.abort();
+        assert!(refresh.await.unwrap_err().is_cancelled());
+
+        let state = proxy.channel.read().unwrap_or_else(PoisonError::into_inner);
+        assert!(state.client.is_none());
+        assert!(state.ground_truth.is_none());
+        assert_eq!(state.public_key.as_deref(), Some(initial_key.as_str()));
     }
 
     #[tokio::test]

@@ -396,7 +396,8 @@ impl Default for ValidationOptions {
 /// Ground truth after full verification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroundTruth {
-    /// Repository whose signed release was verified
+    /// Repository whose signed release was verified. Empty only when the
+    /// value is unavailable in a deserialized legacy document.
     #[serde(default)]
     pub config_repo: String,
 
@@ -431,7 +432,8 @@ pub struct GroundTruth {
     #[serde(default = "unknown_verifier_identity")]
     pub verifier: SoftwareIdentity,
 
-    /// Local RFC 3339 time at which verification completed
+    /// Local RFC 3339 time at which verification completed. Empty only when
+    /// the value is unavailable in a deserialized legacy document.
     #[serde(default)]
     pub verified_at: String,
 }

@@ -92,7 +92,7 @@ pub async fn verify_repo(repo: &str) -> Result<SigstoreResult> {
 
     // 5. Verify certificate is from GitHub Actions for this repo
     let cert_info = extract_certificate_info_from_bundle(&bundle)?;
-    verify_certificate_identity(&cert_info, repo)?;
+    verify_certificate_identity(&cert_info, repo, &release.tag)?;
 
     // 6. Verify Rekor transparency log entry (mandatory)
     let (cert_der, cert_not_before, cert_not_after) = extract_cert_with_validity(&bundle)?;
@@ -160,7 +160,11 @@ fn extract_certificate_info_from_bundle(bundle: &serde_json::Value) -> Result<Ce
 }
 
 /// Verify that the certificate is from GitHub Actions for the expected repo
-fn verify_certificate_identity(cert_info: &CertificateInfo, expected_repo: &str) -> Result<()> {
+fn verify_certificate_identity(
+    cert_info: &CertificateInfo,
+    expected_repo: &str,
+    expected_tag: &str,
+) -> Result<()> {
     // Verify OIDC issuer is GitHub Actions (exact match, not substring)
     if cert_info.issuer != "https://token.actions.githubusercontent.com" {
         return Err(Error::SigstoreVerification(format!(
@@ -179,8 +183,9 @@ fn verify_certificate_identity(cert_info: &CertificateInfo, expected_repo: &str)
 
     // Verify workflow URI matches expected pattern for this repo
     let pattern = format!(
-        r"^https://github\.com/{}/\.github/workflows/[^@]+@refs/tags/",
-        regex::escape(expected_repo)
+        r"^https://github\.com/{}/\.github/workflows/[^@]+@refs/tags/{}$",
+        regex::escape(expected_repo),
+        regex::escape(expected_tag)
     );
     let re = regex::Regex::new(&pattern)
         .map_err(|e| Error::SigstoreVerification(format!("Invalid regex: {}", e)))?;
@@ -280,6 +285,35 @@ fn extract_measurement_from_bundle(bundle: &serde_json::Value, expected_digest: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn certificate_for_workflow(subject_workflow: &str) -> CertificateInfo {
+        CertificateInfo {
+            issuer: "https://token.actions.githubusercontent.com".into(),
+            subject_workflow: subject_workflow.into(),
+            repository: "owner/repo".into(),
+        }
+    }
+
+    #[test]
+    fn certificate_identity_requires_exact_release_tag() {
+        let certificate = certificate_for_workflow(
+            "https://github.com/owner/repo/.github/workflows/release.yml@refs/tags/v1.2.3",
+        );
+
+        assert!(verify_certificate_identity(&certificate, "owner/repo", "v1.2.3").is_ok());
+        assert!(verify_certificate_identity(&certificate, "owner/repo", "v1.2.4").is_err());
+        assert!(verify_certificate_identity(&certificate, "owner/repo", "v1.2").is_err());
+    }
+
+    #[test]
+    fn certificate_identity_handles_release_tags_with_regex_characters() {
+        let certificate = certificate_for_workflow(
+            "https://github.com/owner/repo/.github/workflows/release.yml@refs/tags/release/1.2+3",
+        );
+
+        assert!(verify_certificate_identity(&certificate, "owner/repo", "release/1.2+3").is_ok());
+        assert!(verify_certificate_identity(&certificate, "owner/repo", "release/1x2+3").is_err());
+    }
 
     #[tokio::test]
     async fn test_verify_repo_full() {
