@@ -18,17 +18,58 @@ use async_openai::error::OpenAIError;
 use async_openai::middleware::HttpRequestFactory;
 
 use crate::error::{Error, Result};
+use crate::verifier::attestation::GroundTruth;
 
 /// Header telling the proxy which enclave to forward the request to.
 pub(crate) const ENCLAVE_URL_HEADER: &str = "x-tinfoil-enclave-url";
 
-type RefreshFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
+type RefreshFuture = Pin<Box<dyn Future<Output = Result<RefreshedState>> + Send>>;
 type RefreshFn = dyn Fn() -> RefreshFuture + Send + Sync;
+
+pub(crate) struct RefreshedState {
+    pub(crate) hpke_public_key: String,
+    pub(crate) ground_truth: Option<GroundTruth>,
+}
+
+impl From<String> for RefreshedState {
+    fn from(hpke_public_key: String) -> Self {
+        Self {
+            hpke_public_key,
+            ground_truth: None,
+        }
+    }
+}
 
 struct EhbpChannel {
     client: Option<tinfoil_ehbp::Client>,
     public_key: Option<String>,
+    rejected_public_key: Option<String>,
+    ground_truth: Option<GroundTruth>,
     generation: u64,
+}
+
+impl EhbpChannel {
+    fn set_active(&mut self, client: tinfoil_ehbp::Client, refreshed: RefreshedState) {
+        self.client = Some(client);
+        self.public_key = Some(refreshed.hpke_public_key);
+        self.rejected_public_key = None;
+        self.ground_truth = refreshed.ground_truth;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn clear(&mut self) {
+        self.client = None;
+        self.public_key = None;
+        self.rejected_public_key = None;
+        self.ground_truth = None;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn reject(&mut self) {
+        let rejected_public_key = self.public_key.take();
+        self.clear();
+        self.rejected_public_key = rejected_public_key;
+    }
 }
 
 /// Verified EHBP proxy configuration, shared by the typed async-openai
@@ -75,6 +116,8 @@ impl EhbpProxy {
             channel: Arc::new(RwLock::new(EhbpChannel {
                 client: None,
                 public_key: None,
+                rejected_public_key: None,
+                ground_truth: None,
                 generation: 0,
             })),
             refresh: Arc::new(RwLock::new(None)),
@@ -96,37 +139,72 @@ impl EhbpProxy {
     /// HPKE key. Every clone of this handle picks the new key up on its
     /// next request.
     pub(crate) fn rekey(&self, hpke_public_key_hex: &str) -> Result<()> {
+        self.install_state(RefreshedState::from(hpke_public_key_hex.to_owned()))
+    }
+
+    fn install_state(&self, refreshed: RefreshedState) -> Result<()> {
         let channel = tinfoil_ehbp::Client::with_public_key_hex_and_http_client(
             &self.base_url,
-            hpke_public_key_hex,
+            &refreshed.hpke_public_key,
             self.http.clone(),
         )
         .map_err(map_ehbp_error)?;
         let mut state = self.channel.write().unwrap_or_else(PoisonError::into_inner);
-        state.client = Some(channel);
-        state.public_key = Some(hpke_public_key_hex.to_owned());
-        state.generation = state.generation.wrapping_add(1);
+        state.set_active(channel, refreshed);
         Ok(())
     }
 
-    pub(crate) fn set_refresher<F, Fut>(&self, refresh: F)
+    pub(crate) fn install_verified_state(
+        &self,
+        hpke_public_key: String,
+        ground_truth: GroundTruth,
+    ) -> Result<()> {
+        self.install_state(RefreshedState {
+            hpke_public_key,
+            ground_truth: Some(ground_truth),
+        })
+    }
+
+    pub(crate) fn verified_ground_truth(&self) -> Option<GroundTruth> {
+        let state = self.channel.read().unwrap_or_else(PoisonError::into_inner);
+        state.client.as_ref()?;
+        state.ground_truth.clone()
+    }
+
+    pub(crate) async fn lock_refresh(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.refresh_lock).lock_owned().await
+    }
+
+    pub(crate) fn set_refresher<F, Fut, T>(&self, refresh: F)
     where
         F: Fn() -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<String>> + Send + 'static,
+        Fut: Future<Output = Result<T>> + Send + 'static,
+        T: Into<RefreshedState> + 'static,
     {
         *self.refresh.write().unwrap_or_else(PoisonError::into_inner) =
-            Some(Arc::new(move || Box::pin(refresh())));
+            Some(Arc::new(move || {
+                let future = refresh();
+                Box::pin(async move { future.await.map(Into::into) })
+            }));
     }
 
     /// Drop the sealing channel so every clone of this handle fails
     /// closed until [`rekey`](Self::rekey) restores trust.
     pub(crate) fn revoke(&self) {
         let mut state = self.channel.write().unwrap_or_else(PoisonError::into_inner);
-        state.client = None;
-        state.public_key = None;
-        state.generation = state.generation.wrapping_add(1);
+        state.clear();
     }
 
+    fn reject_if_generation(&self, generation: u64) -> Option<u64> {
+        let mut state = self.channel.write().unwrap_or_else(PoisonError::into_inner);
+        if state.generation != generation {
+            return None;
+        }
+        state.reject();
+        Some(state.generation)
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_active(&self) -> bool {
         self.channel
             .read()
@@ -144,9 +222,9 @@ impl EhbpProxy {
 
     async fn refresh_after_mismatch(&self, seen_generation: u64) -> Result<()> {
         let _guard = self.refresh_lock.lock().await;
-        if self.generation() != seen_generation {
-            return Ok(());
-        }
+        let Some(refresh_generation) = self.reject_if_generation(seen_generation) else {
+            return Ok(())
+        };
 
         let refresh = self
             .refresh
@@ -158,33 +236,27 @@ impl EhbpProxy {
                     "EHBP key rotated; re-run verify() before retrying the request".into(),
                 )
             })?;
-        let hpke_public_key = match refresh().await {
-            Ok(key) => key,
-            Err(err) => {
-                self.revoke();
-                return Err(err);
-            }
-        };
+        let refreshed = refresh().await?;
 
-        if self.generation() == seen_generation {
-            let key_changed = self
-                .channel
-                .read()
-                .unwrap_or_else(PoisonError::into_inner)
-                .public_key
-                .as_deref()
-                != Some(&hpke_public_key);
-            if !key_changed {
-                self.revoke();
-                return Err(Error::EhbpKeyMismatch(
-                    "attestation returned the previously rejected HPKE key".into(),
-                ));
-            }
-            if let Err(err) = self.rekey(&hpke_public_key) {
-                self.revoke();
-                return Err(err);
-            }
+        let channel = match tinfoil_ehbp::Client::with_public_key_hex_and_http_client(
+            &self.base_url,
+            &refreshed.hpke_public_key,
+            self.http.clone(),
+        ) {
+            Ok(channel) => channel,
+            Err(err) => return Err(map_ehbp_error(err)),
+        };
+        let mut state = self.channel.write().unwrap_or_else(PoisonError::into_inner);
+        if state.generation != refresh_generation {
+            return Ok(());
         }
+        if state.rejected_public_key.as_deref() == Some(&refreshed.hpke_public_key) {
+            state.clear();
+            return Err(Error::EhbpKeyMismatch(
+                "attestation returned the previously rejected HPKE key".into(),
+            ));
+        }
+        state.set_active(channel, refreshed);
         Ok(())
     }
 
@@ -263,10 +335,9 @@ impl EhbpProxy {
 }
 
 /// EHBP only protects request and response bodies; headers, including
-/// the proxy's bearer token, ride on the transport, so prefer https://
-/// proxy URLs. Cleartext http:// is accepted for caller-operated
-/// proxies, but non-HTTP schemes and URLs with embedded credentials are
-/// rejected.
+/// the proxy's bearer token, ride on the transport. Cleartext http:// is
+/// accepted only for loopback proxies; remote proxies must use HTTPS.
+/// Non-HTTP schemes and URLs with embedded credentials are rejected.
 fn validate_proxy_url(base_url: &str) -> Result<()> {
     let url = reqwest::Url::parse(base_url)
         .map_err(|err| Error::Configuration(format!("invalid proxy URL: {err}")))?;
@@ -285,6 +356,21 @@ fn validate_proxy_url(base_url: &str) -> Result<()> {
         return Err(Error::Configuration(
             "proxy URL must be an absolute HTTP URL without a query or fragment".into(),
         ));
+    }
+    if url.scheme() == "http" {
+        let host = url.host_str().expect("proxy URL host was checked above");
+        let is_loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback());
+        if !is_loopback {
+            return Err(Error::Configuration(
+                "cleartext proxy URL must use a loopback host; remote proxies require https://"
+                    .into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -360,6 +446,8 @@ mod tests {
     use super::*;
     use crate::client::Client;
     use crate::test_support::ehbp::{encrypt_response_chunks, TestEnclave};
+    use crate::verifier::attestation::types::SoftwareIdentity;
+    use crate::verifier::attestation::{GroundTruth, Measurement, PredicateType};
     use async_openai::error::OpenAIError;
     use futures_util::StreamExt;
     use serde_json::json;
@@ -370,12 +458,45 @@ mod tests {
     const TEST_ENCLAVE_URL: &str = "https://enclave.test.invalid";
     const RESPONSE_NONCE: [u8; 32] = [5u8; 32];
 
+    fn ground_truth(hpke_public_key: String, digest: &str, verified_at: &str) -> GroundTruth {
+        let measurement = Measurement {
+            type_: PredicateType::SevGuestV2,
+            registers: vec!["measurement".to_string()],
+        };
+        GroundTruth {
+            config_repo: "owner/repo".to_string(),
+            release_tag: Some("v1.2.3".to_string()),
+            digest: digest.to_string(),
+            tls_public_key: Some("tls-fingerprint".to_string()),
+            hpke_public_key: Some(hpke_public_key),
+            code_measurement: measurement.clone(),
+            enclave_measurement: measurement,
+            code_fingerprint: "code-fingerprint".to_string(),
+            enclave_fingerprint: "enclave-fingerprint".to_string(),
+            verifier: SoftwareIdentity {
+                name: "tinfoil".to_string(),
+                version: "0.2.0".to_string(),
+            },
+            verified_at: verified_at.to_string(),
+        }
+    }
+
     #[test]
     fn proxy_url_policy_rejects_malformed_and_credentialed_urls() {
         assert!(validate_proxy_url("https://proxy.example.com").is_ok());
-        assert!(validate_proxy_url("http://proxy.example.com").is_ok());
+        assert!(validate_proxy_url("https://192.0.2.1:8080").is_ok());
         assert!(validate_proxy_url("http://127.0.0.1:8080").is_ok());
+        assert!(validate_proxy_url("http://127.1.2.3:8080").is_ok());
         assert!(validate_proxy_url("http://[::1]:8080").is_ok());
+        assert!(validate_proxy_url("http://localhost:8080").is_ok());
+        assert!(matches!(
+            validate_proxy_url("http://proxy.example.com"),
+            Err(Error::Configuration(_))
+        ));
+        assert!(matches!(
+            validate_proxy_url("http://192.0.2.1:8080"),
+            Err(Error::Configuration(_))
+        ));
         assert!(matches!(
             validate_proxy_url("ftp://proxy.example.com"),
             Err(Error::Configuration(_))
@@ -400,6 +521,170 @@ mod tests {
             validate_proxy_url("https://proxy.example.com/#fragment"),
             Err(Error::Configuration(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn refresh_atomically_replaces_key_and_ground_truth() {
+        let initial_enclave = TestEnclave::generate();
+        let refreshed_enclave = TestEnclave::generate();
+        let initial_key = initial_enclave.public_key_hex();
+        let refreshed_key = refreshed_enclave.public_key_hex();
+        let client = Client::test_client_with_ehbp(
+            "http://127.0.0.1:9",
+            TEST_ENCLAVE_URL,
+            &initial_key,
+        );
+        let proxy = client.secure_client().ehbp_proxy().unwrap().clone();
+        proxy
+            .install_verified_state(
+                initial_key.clone(),
+                ground_truth(initial_key, "old-digest", "2026-08-04T12:00:00Z"),
+            )
+            .unwrap();
+        let seen_generation = proxy.generation();
+        proxy.set_refresher(move || {
+            let refreshed_key = refreshed_key.clone();
+            async move {
+                Ok(RefreshedState {
+                    hpke_public_key: refreshed_key.clone(),
+                    ground_truth: Some(ground_truth(
+                        refreshed_key,
+                        "new-digest",
+                        "2026-08-04T12:30:00Z",
+                    )),
+                })
+            }
+        });
+
+        proxy.refresh_after_mismatch(seen_generation).await.unwrap();
+
+        let channel = proxy
+            .channel
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let document = channel.ground_truth.as_ref().unwrap();
+        assert_eq!(channel.public_key, document.hpke_public_key);
+        assert_eq!(document.digest, "new-digest");
+        assert_eq!(document.verified_at, "2026-08-04T12:30:00Z");
+        drop(channel);
+
+        let verification_document = client.secure_client().verification_document().unwrap();
+        assert_eq!(verification_document.release_digest, "new-digest");
+        assert_eq!(
+            verification_document.hpke_public_key,
+            refreshed_enclave.public_key_hex()
+        );
+        assert_eq!(verification_document.verified_at, "2026-08-04T12:30:00Z");
+    }
+
+    #[tokio::test]
+    async fn aborted_refresh_leaves_rejected_state_unobservable() {
+        let initial_key = TestEnclave::generate().public_key_hex();
+        let proxy = EhbpProxy::new(
+            "http://127.0.0.1:9",
+            TEST_ENCLAVE_URL.to_string(),
+            &initial_key,
+        )
+        .unwrap();
+        proxy
+            .install_verified_state(
+                initial_key.clone(),
+                ground_truth(initial_key.clone(), "old-digest", "2026-08-04T12:00:00Z"),
+            )
+            .unwrap();
+        let seen_generation = proxy.generation();
+        let refresh_started = Arc::new(tokio::sync::Notify::new());
+        proxy.set_refresher({
+            let refresh_started = Arc::clone(&refresh_started);
+            move || {
+                let refresh_started = Arc::clone(&refresh_started);
+                async move {
+                    refresh_started.notify_one();
+                    std::future::pending::<Result<String>>().await
+                }
+            }
+        });
+
+        let refreshing_proxy = proxy.clone();
+        let refresh = tokio::spawn(async move {
+            refreshing_proxy
+                .refresh_after_mismatch(seen_generation)
+                .await
+        });
+        refresh_started.notified().await;
+        assert!(!proxy.is_active());
+        assert!(proxy.verified_ground_truth().is_none());
+        refresh.abort();
+        assert!(refresh.await.unwrap_err().is_cancelled());
+
+        let state = proxy.channel.read().unwrap_or_else(PoisonError::into_inner);
+        assert!(state.client.is_none());
+        assert!(state.ground_truth.is_none());
+        assert!(state.public_key.is_none());
+        assert_eq!(state.rejected_public_key.as_deref(), Some(initial_key.as_str()));
+    }
+
+    #[tokio::test]
+    async fn stale_refresh_cannot_overwrite_newer_verified_state() {
+        let initial_key = TestEnclave::generate().public_key_hex();
+        let stale_key = TestEnclave::generate().public_key_hex();
+        let newest_key = TestEnclave::generate().public_key_hex();
+        let proxy = EhbpProxy::new(
+            "http://127.0.0.1:9",
+            TEST_ENCLAVE_URL.to_string(),
+            &initial_key,
+        )
+        .unwrap();
+        proxy
+            .install_verified_state(
+                initial_key.clone(),
+                ground_truth(initial_key, "initial-digest", "2026-08-04T12:00:00Z"),
+            )
+            .unwrap();
+        let seen_generation = proxy.generation();
+        let refresh_started = Arc::new(tokio::sync::Notify::new());
+        let finish_refresh = Arc::new(tokio::sync::Notify::new());
+        proxy.set_refresher({
+            let refresh_started = Arc::clone(&refresh_started);
+            let finish_refresh = Arc::clone(&finish_refresh);
+            move || {
+                let stale_key = stale_key.clone();
+                let refresh_started = Arc::clone(&refresh_started);
+                let finish_refresh = Arc::clone(&finish_refresh);
+                async move {
+                    refresh_started.notify_one();
+                    finish_refresh.notified().await;
+                    Ok(RefreshedState {
+                        hpke_public_key: stale_key.clone(),
+                        ground_truth: Some(ground_truth(
+                            stale_key,
+                            "stale-digest",
+                            "2026-08-04T12:15:00Z",
+                        )),
+                    })
+                }
+            }
+        });
+
+        let refreshing_proxy = proxy.clone();
+        let refresh = tokio::spawn(async move {
+            refreshing_proxy
+                .refresh_after_mismatch(seen_generation)
+                .await
+        });
+        refresh_started.notified().await;
+        proxy
+            .install_verified_state(
+                newest_key.clone(),
+                ground_truth(newest_key, "newest-digest", "2026-08-04T12:30:00Z"),
+            )
+            .unwrap();
+        finish_refresh.notify_one();
+        refresh.await.unwrap().unwrap();
+
+        let document = proxy.verified_ground_truth().unwrap();
+        assert_eq!(document.digest, "newest-digest");
+        assert_eq!(document.verified_at, "2026-08-04T12:30:00Z");
     }
 
     #[tokio::test]

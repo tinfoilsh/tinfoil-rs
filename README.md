@@ -79,13 +79,30 @@ let client = Client::new(
     "<YOUR_API_KEY>",
 ).await?;
 
-// For direct HTTP access, use the underlying http_client
+// For direct TLS clients, use the underlying http_client
 let http = client.http_client()?;
 let resp = http
     .get(format!("https://{}/health", client.enclave()))
     .send()
     .await?;
 ```
+
+`http_client()` is intentionally unavailable when the client uses an EHBP
+proxy. Proxy-mode callers must use the SDK's high-level request methods so
+request bodies remain sealed to the active attested key.
+
+After verification, the ground truth exposes the accepted repository, release
+tag and digest, expected and observed measurements, attested keys, verifier
+version, and local completion time:
+
+```rust
+let document = client.secure_client().verification_document().unwrap();
+println!("{} {:?} {}", document.config_repo, document.release_tag, document.release_digest);
+println!("{}", document.verified_at);
+```
+
+`verified_at` is a local observation recorded after successful verification,
+not an attested timestamp or evidence freshness guarantee.
 
 ## Prompt Cache Scoping
 
@@ -114,7 +131,7 @@ let response = client.chat_relaxed().create(body).await?;
 
 Resolution order is a non-empty per-request string, a non-empty client value, a non-empty `TINFOIL_USER_CACHE_SECRET`, then the generated default. Empty client or environment values are treated as unset, and an empty per-request string is replaced with the resolved client value. The SDK leaves non-string values unchanged, and applications should not use them for cache scoping.
 
-Multi-user services must provide a stable, non-empty, opaque value for each user (or group whose members may share cache-hit timing) on every eligible request. Do not use a raw user identifier, API key, or encryption key. A single client, environment, or generated value groups all requests using it under the same API identity. Requests hand-rolled through `http_client()` bypass automatic injection and must provide the field themselves. If persistence is unavailable, the SDK uses an in-memory value and cache continuity ends when the process exits.
+Multi-user services must provide a stable, non-empty, opaque value for each user (or group whose members may share cache-hit timing) on every eligible request. Do not use a raw user identifier, API key, or encryption key. A single client, environment, or generated value groups all requests using it under the same API identity. Direct-TLS requests hand-rolled through `http_client()` bypass automatic injection and must provide the field themselves. If persistence is unavailable, the SDK uses an in-memory value and cache continuity ends when the process exits.
 
 ## API Documentation
 

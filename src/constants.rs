@@ -15,5 +15,7 @@ pub const DEFAULT_ROUTER: &str = "inference.tinfoil.sh";
 /// Default repository for the confidential model router
 pub const DEFAULT_REPO: &str = "tinfoilsh/confidential-model-router";
 
+pub(crate) const PINNED_NO_DIGEST: &str = "pinned_no_digest";
+
 /// AMD KDS proxy for VCEK certificate fetching
 pub const KDS_PROXY: &str = "https://kds-proxy.tinfoil.sh";

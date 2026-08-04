@@ -9,9 +9,10 @@ use async_openai::config::OpenAIConfig;
 use async_openai::middleware::{retry::OpenAIRetryLayer, ReqwestService};
 use tower::Layer;
 
-use crate::ehbp_transport::{EhbpProxy, EhbpTransport};
+use crate::ehbp_transport::{EhbpProxy, EhbpTransport, RefreshedState};
 use crate::error::{Error, Result};
 use crate::user_cache_secret::{SharedUserCacheSecret, UserCacheSecret, UserCacheSecretService};
+use crate::verification_document::VerificationDocument;
 use crate::verifier::attestation::{
     self,
     types::{AttestationDocument, GroundTruth, Measurement, Verification},
@@ -173,24 +174,42 @@ impl SecureClient {
     
     /// Check if the client has been verified
     pub fn is_verified(&self) -> bool {
-        self.ground_truth.is_some()
-            && self.pinned_client.is_some()
-            && self.ehbp.as_ref().is_none_or(EhbpProxy::is_active)
+        self.pinned_client.is_some()
+            && self.ehbp.as_ref().map_or_else(
+                || self.ground_truth.is_some(),
+                |proxy| proxy.verified_ground_truth().is_some(),
+            )
     }
     
     /// Get the ground truth after verification
-    pub fn ground_truth(&self) -> Option<&GroundTruth> {
-        if self.is_verified() {
-            self.ground_truth.as_ref()
-        } else {
-            None
+    pub fn ground_truth(&self) -> Option<GroundTruth> {
+        if self.pinned_client.is_none() {
+            return None;
         }
+        if let Some(proxy) = &self.ehbp {
+            return proxy.verified_ground_truth();
+        }
+        self.ground_truth.clone()
     }
 
     /// Get the ground truth as a JSON string
     pub fn ground_truth_json(&self) -> Result<String> {
         let gt = self.ground_truth().ok_or(Error::Configuration("Client not verified - call verify() first".into()))?;
-        serde_json::to_string(gt).map_err(Error::Json)
+        serde_json::to_string(&gt).map_err(Error::Json)
+    }
+
+    /// Build a Verification Center-compatible document from the active verified state.
+    pub fn verification_document(&self) -> Option<VerificationDocument> {
+        let ground_truth = self.ground_truth()?;
+        VerificationDocument::from_ground_truth(ground_truth, self.host.clone())
+    }
+
+    /// Get the active verification document as a JSON string.
+    pub fn verification_document_json(&self) -> Result<String> {
+        let document = self.verification_document().ok_or(Error::Configuration(
+            "Client not verified or verified state lacks attested keys".into(),
+        ))?;
+        serde_json::to_string(&document).map_err(Error::Json)
     }
 
     /// Verify the enclave attestation and set up TLS pinning.
@@ -200,7 +219,13 @@ impl SecureClient {
     /// 2. Hardware attestation: verify AMD SEV-SNP report and certificate chain
     /// 3. Measurement comparison: ensure enclave runs the expected code
     /// 4. TLS binding: pin all future connections to the attested certificate
-    pub async fn verify(&mut self) -> Result<&GroundTruth> {
+    pub async fn verify(&mut self) -> Result<GroundTruth> {
+        let _refresh_guard = if let Some(proxy) = &self.ehbp {
+            Some(proxy.lock_refresh().await)
+        } else {
+            None
+        };
+
         // Clear prior trust state so a failure leaves the client unverified
         self.pinned_client = None;
         if let Some(proxy) = &self.ehbp {
@@ -208,7 +233,7 @@ impl SecureClient {
         }
         self.ground_truth = None;
 
-        let (code_measurement, digest, verification) =
+        let (code_measurement, digest, release_tag, verification) =
             Self::verify_attestation(&self.host, &self.repo, self.pinned_measurement.as_ref())
                 .await?;
         
@@ -220,26 +245,28 @@ impl SecureClient {
             verified_origin,
         )?;
 
+        let ground_truth = Self::build_ground_truth(
+            self.repo.clone(),
+            code_measurement,
+            digest,
+            release_tag,
+            verification.clone(),
+        );
+
         // 5b. In proxy mode, build the EHBP transport that seals request
         // bodies to the attested HPKE key. An enclave without a usable
         // HPKE key cannot receive encrypted bodies, so this fails closed.
         // Built before any trust state is committed so a failure here
         // leaves the client fully unverified.
         let ehbp = if let Some(proxy_url) = &self.proxy_url {
-            let hpke_key = verification
-                .hpke_public_key
-                .as_deref()
-                .filter(|key| !key.chars().all(|c| c == '0'))
-                .ok_or_else(|| {
-                    Error::Ehbp(
-                        "enclave attestation does not include an HPKE public key".into(),
-                    )
-                })?;
+            let hpke_key = Self::require_hpke_public_key(&verification)?;
             if let Some(proxy) = &self.ehbp {
-                proxy.rekey(hpke_key)?;
+                proxy.install_verified_state(hpke_key, ground_truth.clone())?;
                 Some(proxy.clone())
             } else {
-                Some(EhbpProxy::new(proxy_url, self.base_url(), hpke_key)?)
+                let proxy = EhbpProxy::new(proxy_url, self.base_url(), &hpke_key)?;
+                proxy.install_verified_state(hpke_key, ground_truth.clone())?;
+                Some(proxy)
             }
         } else {
             None
@@ -252,7 +279,7 @@ impl SecureClient {
             let repo = self.repo.clone();
             let pinned_measurement = self.pinned_measurement.clone();
             proxy.set_refresher(move || {
-                Self::verify_rotated_hpke_key(
+                Self::verify_rotated_state(
                     host.clone(),
                     repo.clone(),
                     pinned_measurement.clone(),
@@ -260,36 +287,22 @@ impl SecureClient {
             });
         }
 
-        // 6. Store ground truth
-        let enclave_measurement = verification.measurement;
-        let target_type = &enclave_measurement.type_;
-        let code_fingerprint = code_measurement.fingerprint_for_target(target_type);
-        let enclave_fingerprint = enclave_measurement.fingerprint();
-
-        self.ground_truth = Some(GroundTruth {
-            digest,
-            tls_public_key: Some(verification.tls_public_key_fp.clone()),
-            hpke_public_key: verification.hpke_public_key.clone(),
-            code_measurement,
-            enclave_measurement,
-            code_fingerprint,
-            enclave_fingerprint,
-        });
+        self.ground_truth = self.ehbp.is_none().then(|| ground_truth.clone());
         
-        Ok(self.ground_truth.as_ref().unwrap())
+        Ok(ground_truth)
     }
 
     async fn verify_attestation(
         host: &str,
         repo: &str,
         pinned_measurement: Option<&Measurement>,
-    ) -> Result<(Measurement, String, Verification)> {
+    ) -> Result<(Measurement, String, Option<String>, Verification)> {
         // 1. Obtain code measurement (Sigstore verification or pinned value)
-        let (code_measurement, digest) = if let Some(pinned) = pinned_measurement {
-            (pinned.clone(), "pinned_no_digest".to_string())
+        let (code_measurement, digest, release_tag) = if let Some(pinned) = pinned_measurement {
+            (pinned.clone(), crate::constants::PINNED_NO_DIGEST.to_string(), None)
         } else {
             let result = sigstore::verify_repo(repo).await?;
-            (result.measurement, result.digest)
+            (result.measurement, result.digest, Some(result.release_tag))
         };
 
         // 2. Fetch and verify hardware attestation
@@ -313,18 +326,61 @@ impl SecureClient {
         )
         .await?;
 
-        Ok((code_measurement, digest, verification))
+        Ok((code_measurement, digest, release_tag, verification))
     }
 
-    async fn verify_rotated_hpke_key(
+    async fn verify_rotated_state(
         host: String,
         repo: String,
         pinned_measurement: Option<Measurement>,
-    ) -> Result<String> {
-        let (_, _, verification) =
+    ) -> Result<RefreshedState> {
+        let (code_measurement, digest, release_tag, verification) =
             Self::verify_attestation(&host, &repo, pinned_measurement.as_ref()).await?;
+        let hpke_public_key = Self::require_hpke_public_key(&verification)?;
+        let ground_truth = Self::build_ground_truth(
+            repo,
+            code_measurement,
+            digest,
+            release_tag,
+            verification,
+        );
+        Ok(RefreshedState {
+            hpke_public_key,
+            ground_truth: Some(ground_truth),
+        })
+    }
+
+    fn build_ground_truth(
+        config_repo: String,
+        code_measurement: Measurement,
+        digest: String,
+        release_tag: Option<String>,
+        verification: Verification,
+    ) -> GroundTruth {
+        let enclave_measurement = verification.measurement;
+        let target_type = &enclave_measurement.type_;
+        let code_fingerprint = code_measurement.fingerprint_for_target(target_type);
+        let enclave_fingerprint = enclave_measurement.fingerprint();
+
+        GroundTruth {
+            config_repo,
+            release_tag,
+            digest,
+            tls_public_key: Some(verification.tls_public_key_fp),
+            hpke_public_key: verification.hpke_public_key,
+            code_measurement,
+            enclave_measurement,
+            code_fingerprint,
+            enclave_fingerprint,
+            verifier: attestation::types::verifier_identity(),
+            verified_at: attestation::types::verification_timestamp(),
+        }
+    }
+
+    fn require_hpke_public_key(verification: &Verification) -> Result<String> {
         verification
             .hpke_public_key
+            .clone()
             .filter(|key| !key.chars().all(|c| c == '0'))
             .ok_or_else(|| {
                 Error::Ehbp("enclave attestation does not include an HPKE public key".into())
@@ -462,8 +518,15 @@ impl SecureClient {
     /// Returns an HTTP client pinned and bound to the verified enclave origin.
     ///
     /// Initial requests and redirects to any other scheme, host, or port are
-    /// rejected before transmission.
+    /// rejected before transmission. This is available only for direct TLS
+    /// clients. EHBP proxy clients must use the verified high-level request
+    /// methods so request bodies remain sealed to the active attested key.
     pub fn http_client(&self) -> Result<&tls::OriginBoundClient> {
+        if self.ehbp.is_some() {
+            return Err(Error::Configuration(
+                "http_client() is unavailable in EHBP proxy mode; use the verified client methods so requests remain sealed to the active attested key".into(),
+            ));
+        }
         self.pinned_client
             .as_ref()
             .map(|client| &client.exposed)
@@ -705,13 +768,13 @@ impl Client {
     ///
     /// On success, the underlying OpenAI client is replaced with one backed
     /// by the new pinned transport.
-    pub async fn verify(&mut self) -> Result<&GroundTruth> {
-        self.secure.verify().await?;
+    pub async fn verify(&mut self) -> Result<GroundTruth> {
+        let ground_truth = self.secure.verify().await?;
 
         self.openai =
             Self::build_openai(&self.secure, self.secure.api_key(), &self.user_cache_secret)?;
 
-        Ok(self.secure.ground_truth().unwrap())
+        Ok(ground_truth)
     }
 
     /// Pin the prompt-cache secret for this client (e.g. one stable value
@@ -881,6 +944,55 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verifier::attestation::types::SoftwareIdentity;
+    use crate::verifier::attestation::PredicateType;
+    use crate::verification_document::VerificationStepStatus;
+    use serde_json::json;
+
+    const TEST_MEASUREMENT: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TEST_TLS_KEY: &str =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const TEST_HPKE_KEY: &str =
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    fn verified_client(digest: &str, release_tag: Option<&str>) -> SecureClient {
+        crate::ensure_crypto_provider();
+        let measurement = Measurement {
+            type_: PredicateType::SevGuestV2,
+            registers: vec![TEST_MEASUREMENT.to_string()],
+        };
+        let transport = reqwest::Client::new();
+        SecureClient {
+            host: "router.example".to_string(),
+            repo: "owner/repo".to_string(),
+            api_key: "test-key".to_string(),
+            pinned_measurement: None,
+            ground_truth: Some(GroundTruth {
+                config_repo: "owner/repo".to_string(),
+                release_tag: release_tag.map(str::to_string),
+                digest: digest.to_string(),
+                tls_public_key: Some(TEST_TLS_KEY.to_string()),
+                hpke_public_key: Some(TEST_HPKE_KEY.to_string()),
+                code_measurement: measurement.clone(),
+                enclave_measurement: measurement,
+                code_fingerprint: TEST_MEASUREMENT.to_string(),
+                enclave_fingerprint: TEST_MEASUREMENT.to_string(),
+                verifier: SoftwareIdentity {
+                    name: "tinfoil".to_string(),
+                    version: "0.2.0".to_string(),
+                },
+                verified_at: "2026-08-04T12:30:00Z".to_string(),
+            }),
+            pinned_client: Some(tls::HostBoundPinnedClient {
+                exposed: tls::OriginBoundClient::unbound_for_test(transport.clone()),
+                transport,
+            }),
+            proxy_url: None,
+            ehbp: None,
+            base_url_override: None,
+        }
+    }
     
     #[test]
     fn test_client_creation() {
@@ -893,6 +1005,82 @@ mod tests {
     fn test_not_verified_error() {
         let client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", "test-key");
         assert!(client.http_client().is_err());
+    }
+
+    #[test]
+    fn verification_document_json_matches_v1_shape() {
+        let document: serde_json::Value = serde_json::from_str(
+            &verified_client(&"d".repeat(64), Some("v1.2.3"))
+                .verification_document_json()
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(document, json!({
+            "schemaVersion": 1,
+            "configRepo": "owner/repo",
+            "enclaveHost": "router.example",
+            "releaseTag": "v1.2.3",
+            "releaseDigest": "d".repeat(64),
+            "codeMeasurement": {
+                "type": "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+                "registers": [TEST_MEASUREMENT]
+            },
+            "enclaveMeasurement": {
+                "measurement": {
+                    "type": "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+                    "registers": [TEST_MEASUREMENT]
+                },
+                "tlsPublicKeyFingerprint": TEST_TLS_KEY,
+                "hpkePublicKey": TEST_HPKE_KEY
+            },
+            "tlsPublicKey": TEST_TLS_KEY,
+            "hpkePublicKey": TEST_HPKE_KEY,
+            "codeFingerprint": TEST_MEASUREMENT,
+            "enclaveFingerprint": TEST_MEASUREMENT,
+            "selectedRouterEndpoint": "router.example",
+            "securityVerified": true,
+            "verifier": {"name": "tinfoil", "version": "0.2.0"},
+            "verifiedAt": "2026-08-04T12:30:00Z",
+            "steps": {
+                "fetchDigest": {"status": "success"},
+                "verifyCode": {"status": "success"},
+                "verifyEnclave": {"status": "success"},
+                "compareMeasurements": {"status": "success"},
+                "verifyCertificate": {"status": "success"}
+            }
+        }));
+    }
+
+    #[test]
+    fn pinned_verification_document_skips_release_steps() {
+        let document = verified_client(crate::constants::PINNED_NO_DIGEST, None)
+            .verification_document()
+            .unwrap();
+
+        assert!(document.release_tag.is_none());
+        assert_eq!(document.steps.fetch_digest.status, VerificationStepStatus::Skipped);
+        assert_eq!(document.steps.verify_code.status, VerificationStepStatus::Skipped);
+        assert_eq!(document.steps.verify_enclave.status, VerificationStepStatus::Success);
+        assert_eq!(
+            document.steps.compare_measurements.status,
+            VerificationStepStatus::Success
+        );
+    }
+
+    #[test]
+    fn test_proxy_mode_does_not_expose_stale_tls_client() {
+        let enclave = crate::test_support::ehbp::TestEnclave::generate();
+        let client = Client::test_client_with_ehbp(
+            "http://127.0.0.1:9",
+            "https://enclave.test.invalid",
+            &enclave.public_key_hex(),
+        );
+
+        assert!(matches!(
+            client.http_client(),
+            Err(Error::Configuration(message)) if message.contains("EHBP proxy mode")
+        ));
     }
 
     /// The closest thing this crate has to pinning the transport stack: a

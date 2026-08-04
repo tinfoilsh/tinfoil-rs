@@ -30,7 +30,7 @@ pub mod types;
 // Re-export public types
 pub use types::{
     AttestationDocument, GroundTruth, Measurement, MeasurementError, PredicateType,
-    SnpPlatformInfo, SnpPolicy, TcbParts, ValidationOptions, Verification,
+    SnpPlatformInfo, SnpPolicy, SoftwareIdentity, TcbParts, ValidationOptions, Verification,
 };
 
 use crate::error::{Error, Result};
@@ -122,6 +122,8 @@ pub async fn verify_complete(host: &str, repo: &str) -> Result<GroundTruth> {
     let enclave_fingerprint = enclave_verification.measurement.fingerprint();
 
     Ok(GroundTruth {
+        config_repo: repo.to_string(),
+        release_tag: Some(sigstore_result.release_tag),
         digest: sigstore_result.digest,
         tls_public_key: Some(enclave_verification.tls_public_key_fp),
         hpke_public_key: enclave_verification.hpke_public_key,
@@ -129,5 +131,7 @@ pub async fn verify_complete(host: &str, repo: &str) -> Result<GroundTruth> {
         enclave_measurement: enclave_verification.measurement,
         code_fingerprint,
         enclave_fingerprint,
+        verifier: types::verifier_identity(),
+        verified_at: types::verification_timestamp(),
     })
 }

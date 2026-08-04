@@ -396,6 +396,15 @@ impl Default for ValidationOptions {
 /// Ground truth after full verification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroundTruth {
+    /// Repository whose signed release was verified. Empty only when the
+    /// value is unavailable in a deserialized legacy document.
+    #[serde(default)]
+    pub config_repo: String,
+
+    /// Release tag containing the accepted artifact
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_tag: Option<String>,
+
     /// SHA-256 hex digest of the release artifact
     pub digest: String,
 
@@ -418,6 +427,44 @@ pub struct GroundTruth {
 
     /// Fingerprint of enclave measurement
     pub enclave_fingerprint: String,
+
+    /// Verifier implementation and package version
+    #[serde(default = "unknown_verifier_identity")]
+    pub verifier: SoftwareIdentity,
+
+    /// Local RFC 3339 time at which verification completed. Empty only when
+    /// the value is unavailable in a deserialized legacy document.
+    #[serde(default)]
+    pub verified_at: String,
+}
+
+/// Identifies software that performed verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SoftwareIdentity {
+    pub name: String,
+    pub version: String,
+}
+
+pub(crate) fn verifier_identity() -> SoftwareIdentity {
+    SoftwareIdentity {
+        name: env!("CARGO_PKG_NAME").to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
+fn unknown_verifier_identity() -> SoftwareIdentity {
+    SoftwareIdentity {
+        name: "unknown".to_string(),
+        version: "unknown".to_string(),
+    }
+}
+
+pub(crate) fn verification_timestamp() -> String {
+    use time::format_description::well_known::Rfc3339;
+
+    time::OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .expect("RFC 3339 formatting should succeed for the current time")
 }
 
 #[cfg(test)]
@@ -507,6 +554,8 @@ mod tests {
     #[test]
     fn test_ground_truth_json_roundtrip() {
         let gt = GroundTruth {
+            config_repo: "owner/repo".into(),
+            release_tag: Some("v1.2.3".into()),
             digest: "abc123".into(),
             tls_public_key: Some("pubkey".into()),
             hpke_public_key: Some("hpkekey".into()),
@@ -520,6 +569,11 @@ mod tests {
             },
             code_fingerprint: "fp1".into(),
             enclave_fingerprint: "fp2".into(),
+            verifier: SoftwareIdentity {
+                name: "tinfoil".into(),
+                version: "0.1.6".into(),
+            },
+            verified_at: "2026-08-04T12:30:00Z".into(),
         };
 
         let json = serde_json::to_string(&gt).expect("serialize");
@@ -529,6 +583,27 @@ mod tests {
         assert_eq!(gt.hpke_public_key, gt2.hpke_public_key);
         assert_eq!(gt.code_measurement, gt2.code_measurement);
         assert_eq!(gt.enclave_measurement, gt2.enclave_measurement);
+        assert_eq!(gt.release_tag, gt2.release_tag);
+        assert_eq!(gt.verifier, gt2.verifier);
+        assert_eq!(gt.verified_at, gt2.verified_at);
+    }
+
+    #[test]
+    fn test_legacy_ground_truth_does_not_claim_current_verifier() {
+        let json = r#"{
+            "digest":"abc123",
+            "code_measurement":{"type":"https://tinfoil.sh/predicate/sev-snp-guest/v2","registers":["a"]},
+            "enclave_measurement":{"type":"https://tinfoil.sh/predicate/sev-snp-guest/v2","registers":["a"]},
+            "code_fingerprint":"a",
+            "enclave_fingerprint":"a"
+        }"#;
+
+        let ground_truth: GroundTruth =
+            serde_json::from_str(json).expect("deserialize legacy JSON");
+
+        assert_eq!(ground_truth.verifier.name, "unknown");
+        assert_eq!(ground_truth.verifier.version, "unknown");
+        assert!(ground_truth.verified_at.is_empty());
     }
 
     #[test]
