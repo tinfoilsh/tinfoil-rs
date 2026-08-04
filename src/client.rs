@@ -957,6 +957,7 @@ mod tests {
         "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
     fn verified_client(digest: &str, release_tag: Option<&str>) -> SecureClient {
+        crate::ensure_crypto_provider();
         let measurement = Measurement {
             type_: PredicateType::SevGuestV2,
             registers: vec![TEST_MEASUREMENT.to_string()],
