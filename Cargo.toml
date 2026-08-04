@@ -1,6 +1,6 @@
 [package]
 name = "tinfoil"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Rust client for Tinfoil secure enclaves with hardware attestation verification"
@@ -116,7 +116,7 @@ dirs = "6"
 # Regex for certificate identity matching
 regex = "1"
 
-time = { version = "0.3", features = ["parsing"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 reqwest-middleware = { version = "0.5.1", default-features = false, features = ["json", "multipart", "query"] }
 http = "1"
 async-trait = "0.1"

@@ -11,6 +11,13 @@ struct ReleaseResponse {
     tag_name: String,
 }
 
+/// Release artifact selected for verification.
+#[derive(Debug, Clone)]
+pub struct Release {
+    pub tag: String,
+    pub digest: String,
+}
+
 /// Fetch the latest release tag for a repository.
 pub async fn fetch_latest_tag(repo: &str) -> Result<String> {
     let url = format!("{}/repos/{}/releases/latest", GITHUB_PROXY, repo);
@@ -55,10 +62,16 @@ pub async fn fetch_digest(repo: &str, tag: &str) -> Result<String> {
     Ok(digest)
 }
 
+/// Fetch the latest release tag and digest for a repository.
+pub async fn fetch_latest_release(repo: &str) -> Result<Release> {
+    let tag = fetch_latest_tag(repo).await?;
+    let digest = fetch_digest(repo, &tag).await?;
+    Ok(Release { tag, digest })
+}
+
 /// Fetch the latest release digest for a repository.
 pub async fn fetch_latest_digest(repo: &str) -> Result<String> {
-    let tag = fetch_latest_tag(repo).await?;
-    fetch_digest(repo, &tag).await
+    Ok(fetch_latest_release(repo).await?.digest)
 }
 
 #[derive(Deserialize)]

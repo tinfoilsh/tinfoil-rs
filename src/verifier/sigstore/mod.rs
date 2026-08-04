@@ -57,6 +57,7 @@ pub use certificate::CertificateInfo;
 pub struct SigstoreResult {
     pub measurement: Measurement,
     pub digest: String,
+    pub release_tag: String,
 }
 
 /// Verify a repository and return the expected measurement and release digest.
@@ -77,10 +78,10 @@ pub async fn verify_repo(repo: &str) -> Result<SigstoreResult> {
     crate::ensure_crypto_provider();
 
     // 1. Fetch latest release digest
-    let release_digest = github::fetch_latest_digest(repo).await?;
+    let release = github::fetch_latest_release(repo).await?;
 
     // 2. Fetch the Sigstore attestation bundle
-    let bundle_json = github::fetch_attestation_bundle(repo, &release_digest).await?;
+    let bundle_json = github::fetch_attestation_bundle(repo, &release.digest).await?;
 
     // 3. Parse bundle
     let bundle: serde_json::Value = serde_json::from_slice(&bundle_json)
@@ -101,11 +102,12 @@ pub async fn verify_repo(repo: &str) -> Result<SigstoreResult> {
     fulcio::verify_fulcio_chain(&cert_der, cert_not_before)?;
 
     // 8. Extract measurement from verified bundle and verify digest matches
-    let measurement = extract_measurement_from_bundle(&bundle, &release_digest)?;
+    let measurement = extract_measurement_from_bundle(&bundle, &release.digest)?;
 
     Ok(SigstoreResult {
         measurement,
-        digest: release_digest,
+        digest: release.digest,
+        release_tag: release.tag,
     })
 }
 

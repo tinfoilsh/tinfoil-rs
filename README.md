@@ -87,6 +87,19 @@ let resp = http
     .await?;
 ```
 
+After verification, the ground truth exposes the accepted repository, release
+tag and digest, expected and observed measurements, attested keys, verifier
+version, and local completion time:
+
+```rust
+let document = client.secure_client().ground_truth().unwrap();
+println!("{} {:?} {}", document.config_repo, document.release_tag, document.digest);
+println!("{}", document.verified_at);
+```
+
+`verified_at` is a local observation recorded after successful verification,
+not an attested timestamp or evidence freshness guarantee.
+
 ## Prompt Cache Scoping
 
 The inference router partitions prompt-prefix caches using both the authenticated API identity and `user_cache_secret`. Cache reuse requires the same identity, secret, model, and matching prompt prefix. Changing the identity or secret selects a different cache namespace, so those requests do not share cache entries or cache-hit timing.
