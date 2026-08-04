@@ -503,7 +503,9 @@ impl SecureClient {
     /// Returns an HTTP client pinned and bound to the verified enclave origin.
     ///
     /// Initial requests and redirects to any other scheme, host, or port are
-    /// rejected before transmission.
+    /// rejected before transmission. This is available only for direct TLS
+    /// clients. EHBP proxy clients must use the verified high-level request
+    /// methods so request bodies remain sealed to the active attested key.
     pub fn http_client(&self) -> Result<&tls::OriginBoundClient> {
         if self.ehbp.is_some() {
             return Err(Error::Configuration(
