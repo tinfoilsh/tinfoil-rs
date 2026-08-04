@@ -12,6 +12,7 @@ use tower::Layer;
 use crate::ehbp_transport::{EhbpProxy, EhbpTransport, RefreshedState};
 use crate::error::{Error, Result};
 use crate::user_cache_secret::{SharedUserCacheSecret, UserCacheSecret, UserCacheSecretService};
+use crate::verification_document::VerificationDocument;
 use crate::verifier::attestation::{
     self,
     types::{AttestationDocument, GroundTruth, Measurement, Verification},
@@ -195,6 +196,28 @@ impl SecureClient {
     pub fn ground_truth_json(&self) -> Result<String> {
         let gt = self.ground_truth().ok_or(Error::Configuration("Client not verified - call verify() first".into()))?;
         serde_json::to_string(&gt).map_err(Error::Json)
+    }
+
+    /// Build a Verification Center-compatible document from the active verified state.
+    pub fn verification_document(&self) -> Option<VerificationDocument> {
+        let ground_truth = self.ground_truth()?;
+        let tls_public_key = ground_truth.tls_public_key.clone()?;
+        let hpke_public_key = ground_truth.hpke_public_key.clone()?;
+
+        Some(VerificationDocument::from_ground_truth(
+            ground_truth,
+            self.host.clone(),
+            tls_public_key,
+            hpke_public_key,
+        ))
+    }
+
+    /// Get the active verification document as a JSON string.
+    pub fn verification_document_json(&self) -> Result<String> {
+        let document = self.verification_document().ok_or(Error::Configuration(
+            "Client not verified or verified state lacks attested keys".into(),
+        ))?;
+        serde_json::to_string(&document).map_err(Error::Json)
     }
 
     /// Verify the enclave attestation and set up TLS pinning.
@@ -929,6 +952,54 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verifier::attestation::types::SoftwareIdentity;
+    use crate::verifier::attestation::PredicateType;
+    use crate::verification_document::VerificationStepStatus;
+    use serde_json::json;
+
+    const TEST_MEASUREMENT: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TEST_TLS_KEY: &str =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const TEST_HPKE_KEY: &str =
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    fn verified_client(digest: &str, release_tag: Option<&str>) -> SecureClient {
+        let measurement = Measurement {
+            type_: PredicateType::SevGuestV2,
+            registers: vec![TEST_MEASUREMENT.to_string()],
+        };
+        let transport = reqwest::Client::new();
+        SecureClient {
+            host: "router.example".to_string(),
+            repo: "owner/repo".to_string(),
+            api_key: "test-key".to_string(),
+            pinned_measurement: None,
+            ground_truth: Some(GroundTruth {
+                config_repo: "owner/repo".to_string(),
+                release_tag: release_tag.map(str::to_string),
+                digest: digest.to_string(),
+                tls_public_key: Some(TEST_TLS_KEY.to_string()),
+                hpke_public_key: Some(TEST_HPKE_KEY.to_string()),
+                code_measurement: measurement.clone(),
+                enclave_measurement: measurement,
+                code_fingerprint: TEST_MEASUREMENT.to_string(),
+                enclave_fingerprint: TEST_MEASUREMENT.to_string(),
+                verifier: SoftwareIdentity {
+                    name: "tinfoil".to_string(),
+                    version: "0.2.0".to_string(),
+                },
+                verified_at: "2026-08-04T12:30:00Z".to_string(),
+            }),
+            pinned_client: Some(tls::HostBoundPinnedClient {
+                exposed: tls::OriginBoundClient::unbound_for_test(transport.clone()),
+                transport,
+            }),
+            proxy_url: None,
+            ehbp: None,
+            base_url_override: None,
+        }
+    }
     
     #[test]
     fn test_client_creation() {
@@ -941,6 +1012,67 @@ mod tests {
     fn test_not_verified_error() {
         let client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", "test-key");
         assert!(client.http_client().is_err());
+    }
+
+    #[test]
+    fn verification_document_json_matches_v1_shape() {
+        let document: serde_json::Value = serde_json::from_str(
+            &verified_client(&"d".repeat(64), Some("v1.2.3"))
+                .verification_document_json()
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(document, json!({
+            "schemaVersion": 1,
+            "configRepo": "owner/repo",
+            "enclaveHost": "router.example",
+            "releaseTag": "v1.2.3",
+            "releaseDigest": "d".repeat(64),
+            "codeMeasurement": {
+                "type": "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+                "registers": [TEST_MEASUREMENT]
+            },
+            "enclaveMeasurement": {
+                "measurement": {
+                    "type": "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+                    "registers": [TEST_MEASUREMENT]
+                },
+                "tlsPublicKeyFingerprint": TEST_TLS_KEY,
+                "hpkePublicKey": TEST_HPKE_KEY
+            },
+            "tlsPublicKey": TEST_TLS_KEY,
+            "hpkePublicKey": TEST_HPKE_KEY,
+            "codeFingerprint": TEST_MEASUREMENT,
+            "enclaveFingerprint": TEST_MEASUREMENT,
+            "selectedRouterEndpoint": "router.example",
+            "securityVerified": true,
+            "verifier": {"name": "tinfoil", "version": "0.2.0"},
+            "verifiedAt": "2026-08-04T12:30:00Z",
+            "steps": {
+                "fetchDigest": {"status": "success"},
+                "verifyCode": {"status": "success"},
+                "verifyEnclave": {"status": "success"},
+                "compareMeasurements": {"status": "success"},
+                "verifyCertificate": {"status": "success"}
+            }
+        }));
+    }
+
+    #[test]
+    fn pinned_verification_document_skips_release_steps() {
+        let document = verified_client(crate::constants::PINNED_NO_DIGEST, None)
+            .verification_document()
+            .unwrap();
+
+        assert!(document.release_tag.is_none());
+        assert_eq!(document.steps.fetch_digest.status, VerificationStepStatus::Skipped);
+        assert_eq!(document.steps.verify_code.status, VerificationStepStatus::Skipped);
+        assert_eq!(document.steps.verify_enclave.status, VerificationStepStatus::Success);
+        assert_eq!(
+            document.steps.compare_measurements.status,
+            VerificationStepStatus::Success
+        );
     }
 
     #[test]

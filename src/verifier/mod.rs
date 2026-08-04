@@ -23,5 +23,5 @@ pub mod util;
 // Re-export commonly used types
 pub use attestation::{
     fetch, verify_complete, verify_full, AttestationDocument, GroundTruth, Measurement,
-    MeasurementError, PredicateType, Verification,
+    MeasurementError, PredicateType, SoftwareIdentity, Verification,
 };

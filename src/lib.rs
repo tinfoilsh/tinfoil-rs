@@ -71,6 +71,7 @@ pub mod error;
 pub mod multimodal;
 pub mod relaxed;
 pub mod sse;
+pub mod verification_document;
 pub mod verifier;
 
 // Internal: per-user prompt-cache scoping (`user_cache_secret`). The public
@@ -121,7 +122,11 @@ pub use relaxed::{
     RelaxedChat, RelaxedChatRequestBuilder, RelaxedResponse, RelaxedStream, RelaxedStreamChunk,
     RelaxedToolCall,
 };
-pub use verifier::{GroundTruth, Measurement, PredicateType};
+pub use verification_document::{
+    DocumentEnclaveMeasurement, VerificationDocument, VerificationStepState,
+    VerificationStepStatus, VerificationSteps, VERIFICATION_DOCUMENT_SCHEMA_VERSION,
+};
+pub use verifier::{GroundTruth, Measurement, PredicateType, SoftwareIdentity};
 
 /// Re-export of `async_openai::types::chat`.
 pub use async_openai::types::chat;

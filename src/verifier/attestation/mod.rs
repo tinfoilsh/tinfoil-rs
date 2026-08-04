@@ -30,7 +30,7 @@ pub mod types;
 // Re-export public types
 pub use types::{
     AttestationDocument, GroundTruth, Measurement, MeasurementError, PredicateType,
-    SnpPlatformInfo, SnpPolicy, TcbParts, ValidationOptions, Verification,
+    SnpPlatformInfo, SnpPolicy, SoftwareIdentity, TcbParts, ValidationOptions, Verification,
 };
 
 use crate::error::{Error, Result};

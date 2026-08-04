@@ -96,8 +96,8 @@ tag and digest, expected and observed measurements, attested keys, verifier
 version, and local completion time:
 
 ```rust
-let document = client.secure_client().ground_truth().unwrap();
-println!("{} {:?} {}", document.config_repo, document.release_tag, document.digest);
+let document = client.secure_client().verification_document().unwrap();
+println!("{} {:?} {}", document.config_repo, document.release_tag, document.release_digest);
 println!("{}", document.verified_at);
 ```
 
