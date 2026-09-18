@@ -197,12 +197,15 @@ fn is_retryable_openai_error(err: &async_openai::error::OpenAIError) -> bool {
         // servers attach specific codes to transient failures (for example
         // `server_is_overloaded`, `model_unavailable`, `upstream_error`) and
         // an allowlist of codes would silently stop retrying as new ones
-        // appear. The one exception is a 429 whose type says the quota is
-        // exhausted, which no amount of waiting fixes.
+        // appear. The one exception is a 429 that reports an exhausted
+        // quota (in either `type` or `code`), which no amount of waiting
+        // fixes.
         OpenAIError::ApiError(api) => {
             let status = api.status_code;
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                return api.api_error.r#type.as_deref() != Some(INSUFFICIENT_QUOTA);
+                let quota_exhausted = api.api_error.r#type.as_deref() == Some(INSUFFICIENT_QUOTA)
+                    || api.api_error.code.as_deref() == Some(INSUFFICIENT_QUOTA);
+                return !quota_exhausted;
             }
             status.is_server_error() || status == reqwest::StatusCode::REQUEST_TIMEOUT
         }
@@ -267,6 +270,12 @@ mod tests {
             Some("insufficient_quota"),
         );
         assert!(!quota.is_retryable());
+        let quota_code_only = api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            None,
+            Some("insufficient_quota"),
+        );
+        assert!(!quota_code_only.is_retryable());
 
         // Client faults never retry, even with a code that sounds transient.
         assert!(!api_error(StatusCode::BAD_REQUEST, Some("invalid_request_error"), None).is_retryable());
