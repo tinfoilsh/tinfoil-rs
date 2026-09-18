@@ -133,25 +133,10 @@ fn http_error(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
         .as_ref()
         .and_then(|v| v.pointer("/error/param").and_then(Value::as_str))
         .map(str::to_string);
-    let parsed_code = parsed
+    let code = parsed
         .as_ref()
         .and_then(|v| v.pointer("/error/code").and_then(Value::as_str))
         .map(str::to_string);
-
-    // Synthesise the canonical OpenAI error code so `is_retryable()` can
-    // tell server faults / rate limits apart from client mistakes when
-    // the upstream body didn't include one.
-    let code = parsed_code.or_else(|| {
-        if status.is_server_error() {
-            Some("server_error".to_string())
-        } else if status == 429 {
-            Some("rate_limit_exceeded".to_string())
-        } else if status == 408 {
-            Some("server_error".to_string())
-        } else {
-            None
-        }
-    });
 
     Error::Api(OpenAIError::ApiError(ApiErrorResponse {
         status_code: status,
@@ -615,6 +600,34 @@ mod tests {
         );
         assert!(rate_limit.is_api());
         assert!(rate_limit.is_retryable());
+
+        let overloaded = http_error(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            br#"{"error": {"message": "overloaded", "type": "service_unavailable_error", "param": null, "code": "server_is_overloaded"}}"#,
+        );
+        assert!(overloaded.is_retryable(), "503 must retry regardless of code");
+    }
+
+    #[test]
+    fn http_error_preserves_server_code_without_synthesizing_one() {
+        use async_openai::error::OpenAIError;
+
+        let err = http_error(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            br#"{"error": {"message": "m", "type": "service_unavailable_error", "param": null, "code": "model_unavailable"}}"#,
+        );
+        let Error::Api(OpenAIError::ApiError(api)) = &err else {
+            panic!("expected API error");
+        };
+        assert_eq!(api.api_error.code.as_deref(), Some("model_unavailable"));
+        assert_eq!(api.api_error.param, None, "JSON null param must decode as None");
+
+        let bare = http_error(reqwest::StatusCode::BAD_GATEWAY, b"bad gateway");
+        let Error::Api(OpenAIError::ApiError(api)) = &bare else {
+            panic!("expected API error");
+        };
+        assert_eq!(api.api_error.code, None, "no code should be invented for non-JSON bodies");
+        assert!(bare.is_retryable());
     }
 
     #[test]

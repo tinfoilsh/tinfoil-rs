@@ -184,17 +184,28 @@ impl Error {
     }
 }
 
+/// Error type OpenAI uses for an exhausted billing quota. It arrives as a
+/// 429 but retrying cannot succeed until the account is topped up.
+const INSUFFICIENT_QUOTA: &str = "insufficient_quota";
+
 fn is_retryable_openai_error(err: &async_openai::error::OpenAIError) -> bool {
     use async_openai::error::OpenAIError;
     match err {
         // Transport-level reqwest errors are always retryable.
         OpenAIError::Reqwest(_) => true,
-        // API errors carry an OpenAI-style `code` ("server_error",
-        // "rate_limit_exceeded", ...). Only the transient codes retry.
-        OpenAIError::ApiError(api) => matches!(
-            api.api_error.code.as_deref(),
-            Some("server_error") | Some("rate_limit_exceeded")
-        ),
+        // Classify on the HTTP status class rather than the `code` value:
+        // servers attach specific codes to transient failures (for example
+        // `server_is_overloaded`, `model_unavailable`, `upstream_error`) and
+        // an allowlist of codes would silently stop retrying as new ones
+        // appear. The one exception is a 429 whose type says the quota is
+        // exhausted, which no amount of waiting fixes.
+        OpenAIError::ApiError(api) => {
+            let status = api.status_code;
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return api.api_error.r#type.as_deref() != Some(INSUFFICIENT_QUOTA);
+            }
+            status.is_server_error() || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        }
         // Everything else (deserialization, invalid argument,
         // feature-gated stream / file errors) is not retryable.
         _ => false,
@@ -206,6 +217,63 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
     use super::Error;
+
+    fn api_error(
+        status: reqwest::StatusCode,
+        r#type: Option<&str>,
+        code: Option<&str>,
+    ) -> Error {
+        use async_openai::error::{ApiError, ApiErrorResponse, OpenAIError};
+        Error::Api(OpenAIError::ApiError(ApiErrorResponse {
+            status_code: status,
+            api_error: ApiError {
+                message: "x".into(),
+                r#type: r#type.map(str::to_string),
+                param: None,
+                code: code.map(str::to_string),
+            },
+        }))
+    }
+
+    #[test]
+    fn api_errors_retry_on_status_class_not_code() {
+        use reqwest::StatusCode;
+
+        // Transient server-side failures retry whatever code they carry.
+        for (status, code) in [
+            (StatusCode::SERVICE_UNAVAILABLE, Some("server_is_overloaded")),
+            (StatusCode::SERVICE_UNAVAILABLE, Some("model_unavailable")),
+            (StatusCode::BAD_GATEWAY, Some("upstream_error")),
+            (StatusCode::INTERNAL_SERVER_ERROR, None),
+            (StatusCode::REQUEST_TIMEOUT, None),
+        ] {
+            assert!(
+                api_error(status, Some("server_error"), code).is_retryable(),
+                "{status} with code {code:?} should retry"
+            );
+        }
+
+        // Rate limits retry; exhausted quota does not.
+        let rate_limited = api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some("rate_limit_error"),
+            Some("rate_limit_exceeded"),
+        );
+        assert!(rate_limited.is_retryable());
+        assert!(api_error(StatusCode::TOO_MANY_REQUESTS, None, None).is_retryable());
+        let quota = api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some("insufficient_quota"),
+            Some("insufficient_quota"),
+        );
+        assert!(!quota.is_retryable());
+
+        // Client faults never retry, even with a code that sounds transient.
+        assert!(!api_error(StatusCode::BAD_REQUEST, Some("invalid_request_error"), None).is_retryable());
+        assert!(!api_error(StatusCode::UNAUTHORIZED, None, Some("invalid_api_key")).is_retryable());
+        assert!(!api_error(StatusCode::NOT_FOUND, None, Some("model_not_found")).is_retryable());
+        assert!(!api_error(StatusCode::BAD_REQUEST, None, Some("server_error")).is_retryable());
+    }
 
     #[test]
     fn ehbp_key_mismatch_is_an_attestation_error() {
