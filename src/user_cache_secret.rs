@@ -751,8 +751,21 @@ mod tests {
             secret
                 .chars()
                 .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-            "expected lowercase hex, got {secret}"
+            "expected lowercase hex"
         );
+    }
+
+    #[test]
+    fn generated_secret_failure_does_not_disclose_the_value() {
+        let invalid_secret = "G".repeat(64);
+        let failure = std::panic::catch_unwind(|| assert_generated_secret(&invalid_secret))
+            .expect_err("invalid hex must fail validation");
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .expect("assertion must report a string message");
+        assert!(message == "expected lowercase hex");
     }
 
     #[test]
