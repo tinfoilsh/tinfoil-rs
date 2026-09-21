@@ -545,6 +545,7 @@ jaDTSFaq1NIwodHp7X9fOG48uRuJWS8GmifD969sC4Ut2FJFoklceBVUNCHR
         let client = create_pinned_client(&fp).expect("Failed to create client");
         let result = client.get("http://example.com").send().await;
         assert!(result.is_err(), "HTTP request should be rejected by https_only");
+        assert!(result.unwrap_err().is_builder(), "HTTP must be rejected before connecting");
     }
 
     #[test]
