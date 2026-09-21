@@ -474,8 +474,8 @@ mod tests {
             code_fingerprint: "code-fingerprint".to_string(),
             enclave_fingerprint: "enclave-fingerprint".to_string(),
             verifier: SoftwareIdentity {
-                name: "tinfoil".to_string(),
-                version: "0.2.0".to_string(),
+                name: env!("CARGO_PKG_NAME").to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
             },
             verified_at: verified_at.to_string(),
         }

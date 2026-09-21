@@ -979,8 +979,8 @@ mod tests {
                 code_fingerprint: TEST_MEASUREMENT.to_string(),
                 enclave_fingerprint: TEST_MEASUREMENT.to_string(),
                 verifier: SoftwareIdentity {
-                    name: "tinfoil".to_string(),
-                    version: "0.2.0".to_string(),
+                    name: env!("CARGO_PKG_NAME").to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
                 },
                 verified_at: "2026-08-04T12:30:00Z".to_string(),
             }),
@@ -1040,7 +1040,7 @@ mod tests {
             "enclaveFingerprint": TEST_MEASUREMENT,
             "selectedRouterEndpoint": "router.example",
             "securityVerified": true,
-            "verifier": {"name": "tinfoil", "version": "0.2.0"},
+            "verifier": {"name": env!("CARGO_PKG_NAME"), "version": env!("CARGO_PKG_VERSION")},
             "verifiedAt": "2026-08-04T12:30:00Z",
             "steps": {
                 "fetchDigest": {"status": "success"},
