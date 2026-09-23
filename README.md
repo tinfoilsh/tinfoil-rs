@@ -3,11 +3,11 @@
 [![Build Status](https://github.com/tinfoilsh/tinfoil-rs/actions/workflows/test.yml/badge.svg)](https://github.com/tinfoilsh/tinfoil-rs/actions)
 [![Documentation](https://img.shields.io/badge/docs-tinfoil.sh-blue)](https://docs.tinfoil.sh/sdk/rust-sdk)
 
+A Rust client for verifiably private AI inference with Tinfoil. It wraps [async-openai](https://github.com/64bit/async-openai) with the same API, and before sending any request it verifies the enclave's attestation and pins the TLS connection to the attested certificate, so requests reach only the verified enclave. An [EHBP](https://docs.tinfoil.sh/resources/ehbp) proxy mode encrypts request bodies to the attested key for routing through your own backend.
+
 For complete documentation, see the [Rust SDK documentation](https://docs.tinfoil.sh/sdk/rust-sdk).
 
 ## Installation
-
-Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -17,11 +17,6 @@ tokio = { version = "1", features = ["full"] }
 
 ## Quick Start
 
-The Tinfoil Rust client is a wrapper around [async-openai](https://github.com/64bit/async-openai) and provides secure communication with Tinfoil enclaves. It has the same API as the async-openai client, with additional security features:
-
-- Automatic attestation validation to ensure enclave integrity verification
-- Supports a fallback mode with TLS certificate pinning using attested certificates to provide direct-to-enclave encrypted communication over TLS
-
 ```rust
 use tinfoil::Client;
 use tinfoil::chat::{
@@ -30,13 +25,12 @@ use tinfoil::chat::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a client (reads TINFOIL_API_KEY from env)
+    // Reads TINFOIL_API_KEY from the environment
     let client = Client::new_default().await?;
 
-    // Make requests using the OpenAI client API
-    // Note: enclave verification and direct-to-enclave encryption happens automatically
+    // Enclave verification and pinning happen automatically.
     let request = CreateChatCompletionRequestArgs::default()
-        .model("llama3-3-70b")
+        .model("llama3-3-70b") // see https://docs.tinfoil.sh/models/catalog
         .messages(vec![
             ChatCompletionRequestUserMessageArgs::default()
                 .content("Say this is a test")
@@ -46,54 +40,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     let response = client.chat().create(request).await?;
-
     println!("{}", response.choices[0].message.content.as_ref().unwrap());
 
     Ok(())
 }
 ```
 
-The common request/response types live under `tinfoil::chat`, `tinfoil::audio`,
-and `tinfoil::embeddings` — all of which are re-exports of the corresponding
-`async_openai::types::*` modules.
+Request and response types live under `tinfoil::chat`, `tinfoil::audio`, and `tinfoil::embeddings`, re-exported from `async_openai::types`.
 
-## Usage
+## Verification document
 
-```rust
-// 1. Create a client (reads TINFOIL_API_KEY from env)
-let client = Client::new_default().await?;
-
-// 2. Use client as you would async_openai::Client
-// see https://docs.rs/async-openai for API documentation
-```
-
-## Advanced Functionality
-
-```rust
-use tinfoil::{Client, SecureClient};
-
-// Create a client with explicit enclave and repo parameters
-let client = Client::new(
-    "enclave.example.com",
-    "org/repo",
-    "<YOUR_API_KEY>",
-).await?;
-
-// For direct TLS clients, use the underlying http_client
-let http = client.http_client()?;
-let resp = http
-    .get(format!("https://{}/health", client.enclave()))
-    .send()
-    .await?;
-```
-
-`http_client()` is intentionally unavailable when the client uses an EHBP
-proxy. Proxy-mode callers must use the SDK's high-level request methods so
-request bodies remain sealed to the active attested key.
-
-After verification, the ground truth exposes the accepted repository, release
-tag and digest, expected and observed measurements, attested keys, verifier
-version, and local completion time:
+After verification, the client exposes the accepted repository, release, measurements, and verifier version:
 
 ```rust
 let document = client.secure_client().verification_document().unwrap();
@@ -101,44 +58,52 @@ println!("{} {:?} {}", document.config_repo, document.release_tag, document.rele
 println!("{}", document.verified_at);
 ```
 
-`verified_at` is a local observation recorded after successful verification,
-not an attested timestamp or evidence freshness guarantee.
+`verified_at` is recorded from the local clock after successful verification. It is not an attested timestamp or a freshness guarantee.
 
 ## Prompt Cache Scoping
 
-The inference router partitions prompt-prefix caches using both the authenticated API identity and `user_cache_secret`. Cache reuse requires the same identity, secret, model, and matching prompt prefix. Changing the identity or secret selects a different cache namespace, so those requests do not share cache entries or cache-hit timing.
-
-`user_cache_secret` is sensitive application data used only for cache partitioning. It is not an API credential or encryption key. Do not log or expose it unnecessarily: a caller who can send requests with the same API identity and secret joins that cache namespace and can observe its cache-hit timing. The SDK adds it to eligible request bodies before transport over the pinned connection to the verified enclave.
-
-By default, the SDK generates a random secret and persists it at `~/.tinfoil/user_cache_secret`, requesting mode `0600` where supported. Tinfoil SDKs using the same home directory reuse this value. This default is suitable for a single-user application, but it does not separate end users who share one application process or home directory. You can control the scope explicitly:
+The router partitions prompt caches by API identity and a `user_cache_secret` that the SDK adds to eligible requests. By default it generates one and persists it at `~/.tinfoil/user_cache_secret`, which is suitable for single-user applications. Multi-user services should scope each request to its end user:
 
 ```rust
-// Pin a stable, non-empty, opaque secret for this client.
+// Pin a stable, opaque secret for this client (or set TINFOIL_USER_CACHE_SECRET).
 let client = Client::new_default().await?.with_user_cache_secret(secret);
 
-// Or provision it via the environment
-//   TINFOIL_USER_CACHE_SECRET=<secret>   use this value
-
-// Multi-user services should scope every request to its end user;
-// a non-empty string field set on the body wins over the client-level secret:
+// A per-request value wins over the client-level secret.
 let body = client.chat_relaxed().request()
-    .model("model-name")
+    .model("llama3-3-70b")
     .push_message(serde_json::json!({"role": "user", "content": "Hello!"}))
     .set("user_cache_secret", per_user_secret)
     .build();
 let response = client.chat_relaxed().create(body).await?;
 ```
 
-Resolution order is a non-empty per-request string, a non-empty client value, a non-empty `TINFOIL_USER_CACHE_SECRET`, then the generated default. Empty client or environment values are treated as unset, and an empty per-request string is replaced with the resolved client value. The SDK leaves non-string values unchanged, and applications should not use them for cache scoping.
+Requests hand-rolled through `http_client()` bypass automatic injection and must set the field themselves. See [Prompt caching](https://docs.tinfoil.sh/sdk/prompt-caching) for resolution order and guidance on choosing a scope.
 
-Multi-user services must provide a stable, non-empty, opaque value for each user (or group whose members may share cache-hit timing) on every eligible request. Do not use a raw user identifier, API key, or encryption key. A single client, environment, or generated value groups all requests using it under the same API identity. Direct-TLS requests hand-rolled through `http_client()` bypass automatic injection and must provide the field themselves. If persistence is unavailable, the SDK uses an in-memory value and cache continuity ends when the process exits.
+## Advanced Functionality
+
+```rust
+// Target a specific enclave and repository
+let client = Client::new("enclave.example.com", "org/repo", "<YOUR_API_KEY>").await?;
+
+// Route through an EHBP proxy; bodies stay encrypted to the enclave
+let client = Client::new_with_proxy("enclave.example.com", "org/repo", "<YOUR_API_KEY>", "https://your-proxy.example.com").await?;
+
+// Make verified HTTP requests to the enclave directly (TLS mode only)
+let http = client.http_client()?;
+let resp = http.get(format!("https://{}/health", client.enclave())).send().await?;
+```
+
+`http_client()` returns an error in proxy mode so request bodies always remain sealed to the attested key.
 
 ## API Documentation
 
-This library is a drop-in replacement for [async-openai](https://github.com/64bit/async-openai) that can be used with Tinfoil. All methods and types are identical. See the [async-openai documentation](https://docs.rs/async-openai) for complete API usage and documentation.
+This library is a drop-in replacement for [async-openai](https://github.com/64bit/async-openai). All methods and types are identical; see the [async-openai documentation](https://docs.rs/async-openai) for API usage.
 
 ## Reporting Vulnerabilities
 
-Please report security vulnerabilities by emailing [security@tinfoil.sh](mailto:security@tinfoil.sh).
+Please report security vulnerabilities by either:
+
+- Emailing [security@tinfoil.sh](mailto:security@tinfoil.sh)
+- Opening an issue on GitHub on this repository
 
 We aim to respond to (legitimate) security reports within 24 hours.
