@@ -35,13 +35,31 @@ pub use types::{
 
 use crate::error::{Error, Result};
 use super::sigstore;
-use super::util::fetch_with_retry;
+use super::util::fetch_with_headers_retry;
+
+const SDK_NAME_HEADER: &str = "tinfoil-sdk";
+const SDK_VERSION_HEADER: &str = "tinfoil-sdk-version";
+const SDK_NAME: &str = "tinfoil-rs";
+const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn attestation_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        SDK_NAME_HEADER,
+        reqwest::header::HeaderValue::from_static(SDK_NAME),
+    );
+    headers.insert(
+        SDK_VERSION_HEADER,
+        reqwest::header::HeaderValue::from_static(SDK_VERSION),
+    );
+    headers
+}
 
 /// Fetch attestation document from an enclave
 pub async fn fetch(host: &str) -> Result<AttestationDocument> {
     let url = format!("https://{}/.well-known/tinfoil-attestation", host);
     
-    let response = fetch_with_retry(&url)
+    let response = fetch_with_headers_retry(&url, attestation_headers())
         .await
         .map_err(|e| Error::AttestationFetch(format!("HTTP request failed: {}", e)))?;
     
@@ -134,4 +152,65 @@ pub async fn verify_complete(host: &str, repo: &str) -> Result<GroundTruth> {
         verifier: types::verifier_identity(),
         verified_at: types::verification_timestamp(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::verifier::util::fetch_with_retry;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn sdk_headers_survive_retries_and_stay_off_other_fetches() {
+        const REQUEST_COUNT: usize = 3;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/attestation", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for attempt in 0..REQUEST_COUNT {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(&mut socket);
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    head.push_str(&line);
+                }
+                requests.push(head);
+                let status = if attempt == 0 {
+                    "503 Service Unavailable"
+                } else {
+                    "200 OK"
+                };
+                socket
+                    .write_all(format!(
+                        "HTTP/1.1 {status}\r\nRetry-After: 0\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                    ).as_bytes())
+                    .await
+                    .unwrap();
+            }
+            requests
+        });
+
+        let response = fetch_with_headers_retry(&url, attestation_headers())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "{}");
+        let response = fetch_with_retry(&url).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let requests = server.await.unwrap();
+        for request in &requests[..REQUEST_COUNT - 1] {
+            assert!(request.contains("\r\ntinfoil-sdk: tinfoil-rs\r\n"));
+            assert!(request.contains(&format!(
+                "\r\ntinfoil-sdk-version: {}\r\n",
+                env!("CARGO_PKG_VERSION")
+            )));
+        }
+        assert!(!requests[REQUEST_COUNT - 1].contains("tinfoil-sdk"));
+    }
 }

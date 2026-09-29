@@ -41,11 +41,19 @@ fn parse_retry_after(response: &reqwest::Response) -> Option<Duration> {
 /// back to exponential backoff. Matches the JS SDK's withRetry() behavior
 /// of retrying both network failures and HTTP error responses.
 pub async fn fetch_with_retry(url: &str) -> reqwest::Result<reqwest::Response> {
+    fetch_with_headers_retry(url, reqwest::header::HeaderMap::new()).await
+}
+
+pub(crate) async fn fetch_with_headers_retry(
+    url: &str,
+    headers: reqwest::header::HeaderMap,
+) -> reqwest::Result<reqwest::Response> {
     // Single chokepoint for every unpinned reqwest call in the crate.
     // Guarantees the rustls crypto provider is installed before
     // reqwest's internal ClientConfig::builder() runs, no matter which
     // public entry point the caller used to get here.
     crate::ensure_crypto_provider();
+    let client = reqwest::Client::builder().build()?;
 
     let mut last_response = None;
     let mut last_err = None;
@@ -53,7 +61,7 @@ pub async fn fetch_with_retry(url: &str) -> reqwest::Result<reqwest::Response> {
     for attempt in 0..=MAX_RETRIES {
         let mut retry_after: Option<Duration> = None;
 
-        match reqwest::get(url).await {
+        match client.get(url).headers(headers.clone()).send().await {
             Ok(response)
                 if response.status().is_server_error()
                     || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS =>
