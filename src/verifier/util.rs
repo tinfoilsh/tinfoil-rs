@@ -40,11 +40,7 @@ fn parse_retry_after(response: &reqwest::Response) -> Option<Duration> {
 /// header we honor it (clamped to `MAX_RETRY_AFTER_MS`); otherwise we fall
 /// back to exponential backoff. Matches the JS SDK's withRetry() behavior
 /// of retrying both network failures and HTTP error responses.
-pub async fn fetch_with_retry(url: &str) -> reqwest::Result<reqwest::Response> {
-    fetch_with_headers_retry(url, reqwest::header::HeaderMap::new()).await
-}
-
-pub(crate) async fn fetch_with_headers_retry(
+pub(crate) async fn fetch_with_retry(
     url: &str,
     headers: reqwest::header::HeaderMap,
 ) -> reqwest::Result<reqwest::Response> {

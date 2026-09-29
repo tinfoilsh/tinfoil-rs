@@ -35,7 +35,7 @@ pub use types::{
 
 use crate::error::{Error, Result};
 use super::sigstore;
-use super::util::fetch_with_headers_retry;
+use super::util::fetch_with_retry;
 
 const SDK_NAME_HEADER: &str = "tinfoil-sdk";
 const SDK_VERSION_HEADER: &str = "tinfoil-sdk-version";
@@ -59,7 +59,7 @@ fn attestation_headers() -> reqwest::header::HeaderMap {
 pub async fn fetch(host: &str) -> Result<AttestationDocument> {
     let url = format!("https://{}/.well-known/tinfoil-attestation", host);
     
-    let response = fetch_with_headers_retry(&url, attestation_headers())
+    let response = fetch_with_retry(&url, attestation_headers())
         .await
         .map_err(|e| Error::AttestationFetch(format!("HTTP request failed: {}", e)))?;
     
@@ -157,7 +157,6 @@ pub async fn verify_complete(host: &str, repo: &str) -> Result<GroundTruth> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verifier::util::fetch_with_retry;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
 
@@ -196,12 +195,14 @@ mod tests {
             requests
         });
 
-        let response = fetch_with_headers_retry(&url, attestation_headers())
+        let response = fetch_with_retry(&url, attestation_headers())
             .await
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.text().await.unwrap(), "{}");
-        let response = fetch_with_retry(&url).await.unwrap();
+        let response = fetch_with_retry(&url, reqwest::header::HeaderMap::new())
+            .await
+            .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let requests = server.await.unwrap();
         for request in &requests[..REQUEST_COUNT - 1] {
