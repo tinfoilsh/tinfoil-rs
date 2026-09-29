@@ -88,7 +88,7 @@ pub(super) async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
         crate::constants::KDS_PROXY, chip_id_hex, bl_spl, tee_spl, snp_spl, ucode_spl
     );
 
-    let response = fetch_with_retry(&url)
+    let response = fetch_with_retry(&url, reqwest::header::HeaderMap::new())
         .await
         .map_err(|e| Error::AttestationVerification(format!("Failed to fetch VCEK: {}", e)))?;
 

@@ -22,7 +22,7 @@ pub struct Release {
 pub async fn fetch_latest_tag(repo: &str) -> Result<String> {
     let url = format!("{}/repos/{}/releases/latest", GITHUB_PROXY, repo);
 
-    let response = fetch_with_retry(&url).await?;
+    let response = fetch_with_retry(&url, reqwest::header::HeaderMap::new()).await?;
 
     if !response.status().is_success() {
         return Err(Error::GitHub(format!(
@@ -39,7 +39,7 @@ pub async fn fetch_latest_tag(repo: &str) -> Result<String> {
 pub async fn fetch_digest(repo: &str, tag: &str) -> Result<String> {
     let url = format!("{}/{}/releases/download/{}/tinfoil.hash", GITHUB_PROXY, repo, tag);
 
-    let response = fetch_with_retry(&url).await?;
+    let response = fetch_with_retry(&url, reqwest::header::HeaderMap::new()).await?;
 
     if !response.status().is_success() {
         return Err(Error::GitHub(format!(
@@ -88,7 +88,7 @@ struct AttestationsResponse {
 pub async fn fetch_attestation_bundle(repo: &str, digest: &str) -> Result<Vec<u8>> {
     let url = format!("{}/repos/{}/attestations/sha256:{}", GITHUB_PROXY, repo, digest);
 
-    let response = fetch_with_retry(&url).await?;
+    let response = fetch_with_retry(&url, reqwest::header::HeaderMap::new()).await?;
 
     if !response.status().is_success() {
         return Err(Error::GitHub(format!(
