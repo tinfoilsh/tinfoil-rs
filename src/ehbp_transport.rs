@@ -380,7 +380,9 @@ fn validate_proxy_url(base_url: &str) -> Result<()> {
 /// retry classification; everything else is an EHBP failure.
 fn map_ehbp_error(err: tinfoil_ehbp::Error) -> Error {
     match err {
-        tinfoil_ehbp::Error::KeyConfigMismatch(title) => Error::EhbpKeyMismatch(title),
+        tinfoil_ehbp::Error::Coded(tinfoil_ehbp::Code::KeyConfigMismatch, title) => {
+            Error::EhbpKeyMismatch(title)
+        }
         tinfoil_ehbp::Error::Http(inner) => Error::Http(inner),
         other => Error::Ehbp(other.to_string()),
     }
