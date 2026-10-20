@@ -212,3 +212,14 @@ pub const OID_CSP_ID: const_oid::ObjectIdentifier =
 /// ```
 pub const AMD_ARK_GENOA_SPKI_FINGERPRINT: &str =
     "429a69c9422aa258ee4d8db5fcda9c6470ef15f8cd5a9cebd6cbc7d90b863831";
+
+/// AMD Turin ARK SPKI SHA-256, from the pinned Tinfoil Go AMD trust asset.
+pub const AMD_ARK_TURIN_SPKI_FINGERPRINT: &str =
+    "4f125410563a2ab9a50356f9243f6fe0b6f73de98603f53f90339c70e9d7ad08";
+
+/// AMD VCEK extension structure version.
+pub const OID_STRUCT_VERSION: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.4.1.3704.1.1");
+/// Turin firmware-management-controller security patch level.
+pub const OID_FMC_SPL: const_oid::ObjectIdentifier =
+    const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.4.1.3704.1.3.9");

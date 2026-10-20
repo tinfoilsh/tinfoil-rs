@@ -103,7 +103,7 @@ pub fn validate_certificate_extensions(cert: &Certificate) -> Result<()> {
 /// Decode an ASN.1 string from extension value bytes.
 /// Fulcio uses UTF8String (tag 0x0C) for these extensions, but IA5String
 /// and PrintableString are also accepted.
-fn decode_asn1_string(bytes: &[u8]) -> Option<String> {
+pub(super) fn decode_asn1_string(bytes: &[u8]) -> Option<String> {
     use der::Decode;
     // Try UTF8String first (most common for Fulcio V2 extensions)
     if let Ok(s) = der::asn1::Utf8StringRef::from_der(bytes) {

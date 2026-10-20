@@ -6,7 +6,8 @@
 use std::sync::Arc;
 
 use async_openai::config::OpenAIConfig;
-use async_openai::middleware::{retry::OpenAIRetryLayer, ReqwestService};
+use async_openai::error::OpenAIError;
+use async_openai::middleware::{retry::OpenAIRetryLayer, HttpRequestFactory, ReqwestService};
 use tower::Layer;
 
 use crate::ehbp_transport::{EhbpProxy, EhbpTransport, RefreshedState};
@@ -19,9 +20,10 @@ use crate::verifier::attestation::{
 };
 use crate::verifier::sigstore;
 use crate::verifier::tls;
+use crate::verifier::v3::DirectPolicy;
 
 /// Secure client for Tinfoil inference with hardware attestation
-/// 
+///
 /// The client performs attestation verification on first use:
 /// 1. Fetches attestation document from enclave
 /// 2. Verifies AMD SEV-SNP or Intel TDX hardware signature
@@ -33,19 +35,22 @@ use crate::verifier::tls;
 pub struct SecureClient {
     /// Enclave hostname
     host: String,
-    
+
     /// GitHub repository for code provenance verification
     repo: String,
-    
+
     /// API key for authentication
     api_key: String,
-    
+
     /// Pinned code measurement (skips Sigstore verification when provided)
     pinned_measurement: Option<Measurement>,
-    
+
+    /// Explicit own-node V3 policy. Never uses discovery or legacy fallback.
+    direct_policy: Option<DirectPolicy>,
+
     /// Verified ground truth
     ground_truth: Option<GroundTruth>,
-    
+
     /// Pinned HTTP client (used after verification)
     /// This client validates cert fingerprint on every connection
     pinned_client: Option<tls::HostBoundPinnedClient>,
@@ -70,13 +75,18 @@ impl SecureClient {
     ///
     /// The `repo` parameter specifies the GitHub repository used for
     /// Sigstore code provenance verification (e.g., "tinfoilsh/confidential-model-router").
-    pub fn new(host: impl Into<String>, repo: impl Into<String>, api_key: impl Into<String>) -> Self {
+    pub fn new(
+        host: impl Into<String>,
+        repo: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> Self {
         crate::ensure_crypto_provider();
         Self {
             host: host.into(),
             repo: repo.into(),
             api_key: api_key.into(),
             pinned_measurement: None,
+            direct_policy: None,
             ground_truth: None,
             pinned_client: None,
             proxy_url: None,
@@ -84,6 +94,22 @@ impl SecureClient {
             #[cfg(test)]
             base_url_override: None,
         }
+    }
+
+    /// Create an unverified direct V3 client for one explicitly approved node.
+    ///
+    /// `verify()` must succeed before inference. This mode never discovers
+    /// routers, falls back to legacy attestation, or enables an EHBP proxy.
+    /// Requests use normal HTTPS with the public key bound by verified V3
+    /// evidence, and stop when that evidence expires.
+    pub fn new_direct(
+        host: impl Into<String>,
+        api_key: impl Into<String>,
+        policy: DirectPolicy,
+    ) -> Self {
+        let mut client = Self::new(host, String::new(), api_key);
+        client.direct_policy = Some(policy);
+        client
     }
 
     /// Create a client that routes requests through an EHBP proxy.
@@ -120,6 +146,7 @@ impl SecureClient {
             repo: String::new(),
             api_key: api_key.into(),
             pinned_measurement: Some(measurement),
+            direct_policy: None,
             ground_truth: None,
             pinned_client: None,
             proxy_url: None,
@@ -128,7 +155,7 @@ impl SecureClient {
             base_url_override: None,
         }
     }
-    
+
     /// Create a verified client using router discovery with fallback.
     ///
     /// This function:
@@ -171,19 +198,37 @@ impl SecureClient {
     pub fn host(&self) -> &str {
         &self.host
     }
-    
+
     /// Check if the client has been verified
     pub fn is_verified(&self) -> bool {
-        self.pinned_client.is_some()
+        self.pinned_client
+            .as_ref()
+            .is_some_and(tls::HostBoundPinnedClient::is_current)
             && self.ehbp.as_ref().map_or_else(
                 || self.ground_truth.is_some(),
                 |proxy| proxy.verified_ground_truth().is_some(),
             )
     }
-    
+
+    /// Return the authenticated direct-mode freshness deadline.
+    ///
+    /// The deadline remains available after expiry for refresh scheduling and
+    /// diagnostics; it does not imply that the client is currently verified.
+    /// Use [`Self::is_verified`] to check current authorization. Legacy clients,
+    /// clients not yet verified, and clients whose state was cleared by a failed
+    /// verification return `None`.
+    pub fn freshness_expires_at(&self) -> Option<std::time::SystemTime> {
+        self.direct_policy.as_ref()?;
+        self.pinned_client.as_ref()?.freshness_expires_at()
+    }
+
     /// Get the ground truth after verification
     pub fn ground_truth(&self) -> Option<GroundTruth> {
-        if self.pinned_client.is_none() {
+        if !self
+            .pinned_client
+            .as_ref()
+            .is_some_and(tls::HostBoundPinnedClient::is_current)
+        {
             return None;
         }
         if let Some(proxy) = &self.ehbp {
@@ -194,7 +239,9 @@ impl SecureClient {
 
     /// Get the ground truth as a JSON string
     pub fn ground_truth_json(&self) -> Result<String> {
-        let gt = self.ground_truth().ok_or(Error::Configuration("Client not verified - call verify() first".into()))?;
+        let gt = self.ground_truth().ok_or(Error::Configuration(
+            "Client not verified - call verify() first".into(),
+        ))?;
         serde_json::to_string(&gt).map_err(Error::Json)
     }
 
@@ -213,7 +260,7 @@ impl SecureClient {
     }
 
     /// Verify the enclave attestation and set up TLS pinning.
-    /// 
+    ///
     /// This performs full three-step verification:
     /// 1. Sigstore verification: verify code provenance via GitHub + Sigstore
     /// 2. Hardware attestation: verify AMD SEV-SNP report and certificate chain
@@ -227,23 +274,50 @@ impl SecureClient {
         };
 
         // Clear prior trust state so a failure leaves the client unverified
+        if let Some(pinned) = &self.pinned_client {
+            // Revocation is shared with already-cloned raw and typed clients.
+            // A failed re-verification cannot revive the previous transport.
+            pinned.revoke();
+        }
         self.pinned_client = None;
         if let Some(proxy) = &self.ehbp {
             proxy.revoke();
         }
         self.ground_truth = None;
 
+        if let Some(policy) = &self.direct_policy {
+            let verified = crate::verifier::v3::verify(&self.host, policy).await?;
+            let fingerprint = verified
+                .ground_truth
+                .tls_public_key
+                .as_deref()
+                .ok_or_else(|| {
+                    Error::AttestationVerification(
+                        "Direct attestation did not bind a TLS public key".into(),
+                    )
+                })?;
+            let origin = reqwest::Url::parse(&self.base_url())
+                .map_err(|e| Error::Configuration(format!("Invalid enclave origin: {e}")))?;
+            let pinned = tls::create_host_bound_pinned_client_with_expiry(
+                fingerprint,
+                origin,
+                verified.freshness_expires_at,
+            )?;
+            self.repo = verified.ground_truth.config_repo.clone();
+            self.ground_truth = Some(verified.ground_truth.clone());
+            self.pinned_client = Some(pinned);
+            return Ok(verified.ground_truth);
+        }
+
         let (code_measurement, digest, release_tag, verification) =
             Self::verify_attestation(&self.host, &self.repo, self.pinned_measurement.as_ref())
                 .await?;
-        
+
         // 5. Create pinned HTTP client for all future requests
         let verified_origin = reqwest::Url::parse(&self.base_url())
             .map_err(|e| Error::Configuration(format!("Invalid enclave origin: {e}")))?;
-        let pinned = tls::create_host_bound_pinned_client(
-            &verification.tls_public_key_fp,
-            verified_origin,
-        )?;
+        let pinned =
+            tls::create_host_bound_pinned_client(&verification.tls_public_key_fp, verified_origin)?;
 
         let ground_truth = Self::build_ground_truth(
             self.repo.clone(),
@@ -279,16 +353,12 @@ impl SecureClient {
             let repo = self.repo.clone();
             let pinned_measurement = self.pinned_measurement.clone();
             proxy.set_refresher(move || {
-                Self::verify_rotated_state(
-                    host.clone(),
-                    repo.clone(),
-                    pinned_measurement.clone(),
-                )
+                Self::verify_rotated_state(host.clone(), repo.clone(), pinned_measurement.clone())
             });
         }
 
         self.ground_truth = self.ehbp.is_none().then(|| ground_truth.clone());
-        
+
         Ok(ground_truth)
     }
 
@@ -299,7 +369,11 @@ impl SecureClient {
     ) -> Result<(Measurement, String, Option<String>, Verification)> {
         // 1. Obtain code measurement (Sigstore verification or pinned value)
         let (code_measurement, digest, release_tag) = if let Some(pinned) = pinned_measurement {
-            (pinned.clone(), crate::constants::PINNED_NO_DIGEST.to_string(), None)
+            (
+                pinned.clone(),
+                crate::constants::PINNED_NO_DIGEST.to_string(),
+                None,
+            )
         } else {
             let result = sigstore::verify_repo(repo).await?;
             (result.measurement, result.digest, Some(result.release_tag))
@@ -337,13 +411,8 @@ impl SecureClient {
         let (code_measurement, digest, release_tag, verification) =
             Self::verify_attestation(&host, &repo, pinned_measurement.as_ref()).await?;
         let hpke_public_key = Self::require_hpke_public_key(&verification)?;
-        let ground_truth = Self::build_ground_truth(
-            repo,
-            code_measurement,
-            digest,
-            release_tag,
-            verification,
-        );
+        let ground_truth =
+            Self::build_ground_truth(repo, code_measurement, digest, release_tag, verification);
         Ok(RefreshedState {
             hpke_public_key,
             ground_truth: Some(ground_truth),
@@ -386,7 +455,7 @@ impl SecureClient {
                 Error::Ehbp("enclave attestation does not include an HPKE public key".into())
             })
     }
-    
+
     /// Verify TLS certificate matches the attested public key and SAN bindings.
     ///
     /// This performs three checks on the server's TLS certificate:
@@ -401,50 +470,60 @@ impl SecureClient {
         expected_hpke_key: Option<&str>,
         attestation_doc: &AttestationDocument,
     ) -> Result<()> {
-        use tokio::net::TcpStream;
-        use tokio_rustls::TlsConnector;
+        use der::Decode;
         use rustls::pki_types::ServerName;
         use std::sync::Arc;
-        use der::Decode;
-        use x509_cert::Certificate;
+        use tokio::net::TcpStream;
+        use tokio_rustls::TlsConnector;
         use x509_cert::ext::pkix::SubjectAltName;
-        
+        use x509_cert::Certificate;
+
         // Connect to the server
         let addr = format!("{host}:443");
-        let stream = TcpStream::connect(&addr).await
+        let stream = TcpStream::connect(&addr)
+            .await
             .map_err(|e| Error::Tls(format!("Failed to connect: {}", e)))?;
-        
+
         // Crypto provider is installed at every public entry point via
         // `ensure_crypto_provider()`; this branch only runs from those
         // paths, so it's already set up.
         let root_store = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
-        
+
         let config = rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth();
-        
+
         let connector = TlsConnector::from(Arc::new(config));
-        let server_name: ServerName<'_> = host.to_string().try_into()
+        let server_name: ServerName<'_> = host
+            .to_string()
+            .try_into()
             .map_err(|_| Error::Tls("Invalid server name".into()))?;
-        
-        let tls_stream = connector.connect(server_name, stream).await
+
+        let tls_stream = connector
+            .connect(server_name, stream)
+            .await
             .map_err(|e| Error::Tls(format!("TLS handshake failed: {}", e)))?;
-        
+
         // Get the peer certificate
         let (_, conn) = tls_stream.get_ref();
-        let certs = conn.peer_certificates()
+        let certs = conn
+            .peer_certificates()
             .ok_or_else(|| Error::Tls("No peer certificates".into()))?;
-        
+
         if certs.is_empty() {
             return Err(Error::Tls("Empty certificate chain".into()));
         }
-        
+
         // Check 0: TLS public key must be ECDSA
         let peer_cert = Certificate::from_der(certs[0].as_ref())
             .map_err(|e| Error::Tls(format!("Failed to parse peer certificate: {}", e)))?;
-        let peer_key_algo = &peer_cert.tbs_certificate.subject_public_key_info.algorithm.oid;
+        let peer_key_algo = &peer_cert
+            .tbs_certificate
+            .subject_public_key_info
+            .algorithm
+            .oid;
         const OID_EC_PUBLIC_KEY: const_oid::ObjectIdentifier =
             const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
         if *peer_key_algo != OID_EC_PUBLIC_KEY {
@@ -462,15 +541,17 @@ impl SecureClient {
 
         // Extract DNS SANs from the certificate (already parsed as peer_cert above)
         let dns_sans: Vec<String> = match peer_cert.tbs_certificate.get::<SubjectAltName>() {
-            Ok(Some((_, san))) => {
-                san.0.iter().filter_map(|name| {
+            Ok(Some((_, san))) => san
+                .0
+                .iter()
+                .filter_map(|name| {
                     if let x509_cert::ext::pkix::name::GeneralName::DnsName(dns) = name {
                         Some(dns.to_string())
                     } else {
                         None
                     }
-                }).collect()
-            }
+                })
+                .collect(),
             _ => Vec::new(),
         };
 
@@ -483,9 +564,11 @@ impl SecureClient {
             let is_all_zeros = expected_hpke.chars().all(|c| c == '0');
             if !is_all_zeros {
                 let hpke_bytes = crate::verifier::dcode::decode_from_sans(&san_refs, "hpke")
-                    .ok_or_else(|| Error::Tls(
-                        "Certificate SANs do not contain HPKE key (.hpke. entries)".into()
-                    ))?;
+                    .ok_or_else(|| {
+                        Error::Tls(
+                            "Certificate SANs do not contain HPKE key (.hpke. entries)".into(),
+                        )
+                    })?;
                 let actual_hpke = hex::encode(&hpke_bytes);
                 if actual_hpke != expected_hpke {
                     return Err(Error::Tls(format!(
@@ -498,10 +581,12 @@ impl SecureClient {
 
         // Check 3: Attestation document hash in SANs matches actual document
         // Go hard-errors if .hatt. SANs are missing — we do the same.
-        let hash_bytes = crate::verifier::dcode::decode_from_sans(&san_refs, "hatt")
-            .ok_or_else(|| Error::Tls(
-                "Certificate SANs do not contain attestation hash (.hatt. entries)".into()
-            ))?;
+        let hash_bytes =
+            crate::verifier::dcode::decode_from_sans(&san_refs, "hatt").ok_or_else(|| {
+                Error::Tls(
+                    "Certificate SANs do not contain attestation hash (.hatt. entries)".into(),
+                )
+            })?;
         let actual_hash = String::from_utf8(hash_bytes)
             .map_err(|_| Error::Tls("Invalid UTF-8 in attestation hash SAN".into()))?;
         let expected_hash = attestation_doc.hash();
@@ -511,10 +596,10 @@ impl SecureClient {
                 actual_hash, expected_hash
             )));
         }
-        
+
         Ok(())
     }
-    
+
     /// Returns an HTTP client pinned and bound to the verified enclave origin.
     ///
     /// Initial requests and redirects to any other scheme, host, or port are
@@ -527,6 +612,9 @@ impl SecureClient {
                 "http_client() is unavailable in EHBP proxy mode; use the verified client methods so requests remain sealed to the active attested key".into(),
             ));
         }
+        if let Some(client) = &self.pinned_client {
+            client.exposed.ensure_current()?;
+        }
         self.pinned_client
             .as_ref()
             .map(|client| &client.exposed)
@@ -536,6 +624,9 @@ impl SecureClient {
     }
 
     pub(crate) fn pinned_http_client(&self) -> Result<&reqwest::Client> {
+        if let Some(client) = &self.pinned_client {
+            client.exposed.ensure_current()?;
+        }
         self.pinned_client
             .as_ref()
             .map(|client| &client.transport)
@@ -590,6 +681,19 @@ impl SecureClient {
         }
 
         let url = format!("{}{}", self.base_url(), path);
+        if self.direct_policy.is_some() {
+            return self
+                .http_client()?
+                .post(&url)
+                .bearer_auth(&self.api_key)
+                .json(body)
+                .send()
+                .await
+                .map_err(|error| match error {
+                    reqwest_middleware::Error::Reqwest(error) => Error::Http(error),
+                    other => Error::AttestationVerification(other.to_string()),
+                });
+        }
         Ok(self
             .pinned_http_client()?
             .post(&url)
@@ -655,6 +759,21 @@ impl Client {
     ) -> Result<Self> {
         let api_key = api_key.into();
         let mut secure = SecureClient::new(enclave, repo, &api_key);
+        secure.verify().await?;
+        Self::from_secure_client(secure, &api_key)
+    }
+
+    /// Create a verified client using one node's explicit V3 release policy.
+    ///
+    /// There is no router discovery, legacy fallback, or proxy hop. Every raw
+    /// and typed request checks attestation freshness even on reused TLS.
+    pub async fn new_direct(
+        enclave: impl Into<String>,
+        api_key: impl Into<String>,
+        policy: DirectPolicy,
+    ) -> Result<Self> {
+        let api_key = api_key.into();
+        let mut secure = SecureClient::new_direct(enclave, &api_key, policy);
         secure.verify().await?;
         Self::from_secure_client(secure, &api_key)
     }
@@ -754,6 +873,17 @@ impl Client {
         }
 
         let http = secure.pinned_http_client()?.clone();
+        if secure.direct_policy.is_some() {
+            let stack = OpenAIRetryLayer::default().layer(UserCacheSecretService::new(
+                Arc::clone(user_cache_secret),
+                DirectTransport {
+                    client: secure.http_client()?.clone(),
+                },
+            ));
+            return Ok(async_openai::Client::with_config(config)
+                .with_http_client(http)
+                .with_http_service(stack));
+        }
         let stack = OpenAIRetryLayer::default().layer(UserCacheSecretService::new(
             Arc::clone(user_cache_secret),
             ReqwestService::new(http.clone()),
@@ -821,6 +951,13 @@ impl Client {
         self.secure.host()
     }
 
+    /// Return the authenticated direct-mode freshness deadline, including an
+    /// expired deadline. This is scheduling metadata; check the secure client's
+    /// verified state before considering the endpoint available.
+    pub fn freshness_expires_at(&self) -> Option<std::time::SystemTime> {
+        self.secure.freshness_expires_at()
+    }
+
     /// Returns the GitHub repository used for code provenance verification.
     pub fn repo(&self) -> &str {
         &self.secure.repo
@@ -876,6 +1013,44 @@ impl Client {
     }
 }
 
+/// Guarded executor for typed direct requests. The factory is rebuilt on each
+/// retry, then the origin/freshness middleware runs immediately before dispatch.
+/// It does not expose a raw reqwest client that could bypass the pooled-connection
+/// freshness check.
+#[derive(Clone)]
+struct DirectTransport {
+    client: tls::OriginBoundClient,
+}
+
+impl tower::Service<HttpRequestFactory> for DirectTransport {
+    type Response = reqwest::Response;
+    type Error = OpenAIError;
+    type Future = std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::result::Result<reqwest::Response, OpenAIError>>
+                + Send,
+        >,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, factory: HttpRequestFactory) -> Self::Future {
+        let client = self.client.clone();
+        Box::pin(async move {
+            let request = factory.build().await?;
+            client.execute(request).await.map_err(|error| match error {
+                reqwest_middleware::Error::Reqwest(error) => OpenAIError::Reqwest(error),
+                other => OpenAIError::Boxed(Box::new(other)),
+            })
+        })
+    }
+}
+
 /// Deref to the inner `async_openai::Client`, exposing all OpenAI methods directly.
 /// This mirrors Go's struct embedding where `tinfoil.Client` promotes `*openai.Client`.
 impl std::ops::Deref for Client {
@@ -900,6 +1075,7 @@ impl Client {
             repo: "org/repo".to_string(),
             api_key: "test-key".to_string(),
             pinned_measurement: None,
+            direct_policy: None,
             ground_truth: None,
             pinned_client: Some(tls::HostBoundPinnedClient { transport, exposed }),
             proxy_url: None,
@@ -927,6 +1103,7 @@ impl Client {
             repo: "org/repo".to_string(),
             api_key: "test-key".to_string(),
             pinned_measurement: None,
+            direct_policy: None,
             ground_truth: None,
             pinned_client: Some(tls::HostBoundPinnedClient { transport, exposed }),
             proxy_url: Some(proxy_url.clone()),
@@ -944,17 +1121,15 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verification_document::VerificationStepStatus;
     use crate::verifier::attestation::types::SoftwareIdentity;
     use crate::verifier::attestation::PredicateType;
-    use crate::verification_document::VerificationStepStatus;
     use serde_json::json;
 
     const TEST_MEASUREMENT: &str =
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const TEST_TLS_KEY: &str =
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    const TEST_HPKE_KEY: &str =
-        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const TEST_TLS_KEY: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const TEST_HPKE_KEY: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
     fn verified_client(digest: &str, release_tag: Option<&str>) -> SecureClient {
         crate::ensure_crypto_provider();
@@ -968,6 +1143,7 @@ mod tests {
             repo: "owner/repo".to_string(),
             api_key: "test-key".to_string(),
             pinned_measurement: None,
+            direct_policy: None,
             ground_truth: Some(GroundTruth {
                 config_repo: "owner/repo".to_string(),
                 release_tag: release_tag.map(str::to_string),
@@ -993,17 +1169,159 @@ mod tests {
             base_url_override: None,
         }
     }
-    
+
+    fn direct_policy() -> DirectPolicy {
+        DirectPolicy::new(vec![crate::verifier::v3::ApprovedRelease {
+            release: crate::verifier::v3::PinnedRelease {
+                repo: "owner/repo".into(),
+                tag: "v1.2.3".into(),
+                digest: "d".repeat(64),
+            },
+            measurement: Measurement {
+                type_: PredicateType::SevGuestV2,
+                registers: vec![TEST_MEASUREMENT.into()],
+            },
+        }])
+        .unwrap()
+    }
+
+    fn direct_verified_client(lifetime: std::time::Duration) -> SecureClient {
+        let mut client = verified_client(&"d".repeat(64), Some("v1.2.3"));
+        client.direct_policy = Some(direct_policy());
+        client.pinned_client = Some(
+            tls::create_host_bound_pinned_client_with_expiry(
+                TEST_TLS_KEY,
+                reqwest::Url::parse("https://router.example").unwrap(),
+                std::time::SystemTime::now() + lifetime,
+            )
+            .unwrap(),
+        );
+        client
+    }
+
+    #[test]
+    fn direct_constructor_starts_unverified_without_proxy_or_discovery() {
+        let client =
+            SecureClient::new_direct("node.example", "synthetic-test-key", direct_policy());
+        assert_eq!(client.host(), "node.example");
+        assert!(!client.is_verified());
+        assert!(client.ground_truth().is_none());
+        assert!(client.http_client().is_err());
+        assert!(client.proxy_url.is_none());
+        assert!(client.direct_policy.is_some());
+        assert!(client.freshness_expires_at().is_none());
+        assert!(verified_client(&"d".repeat(64), Some("v1.2.3"))
+            .freshness_expires_at()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn direct_expiry_invalidates_verified_state_and_exposed_getters() {
+        use std::time::Duration;
+        let client = direct_verified_client(Duration::from_millis(50));
+        assert!(client.is_verified());
+        assert!(client.verification_document().is_some());
+        let deadline = client
+            .freshness_expires_at()
+            .expect("direct verification has a deadline");
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(!client.is_verified());
+        assert_eq!(client.freshness_expires_at(), Some(deadline));
+        assert!(client.ground_truth().is_none());
+        assert!(client.verification_document().is_none());
+        assert!(
+            matches!(client.http_client(), Err(error) if error.to_string().contains("expired"))
+        );
+        assert!(client
+            .pinned_http_client()
+            .unwrap_err()
+            .to_string()
+            .contains("expired"));
+    }
+
+    #[tokio::test]
+    async fn direct_failed_reverification_revokes_escaped_raw_and_typed_clients() {
+        use async_openai::types::embeddings::CreateEmbeddingRequestArgs;
+        use std::time::Duration;
+        let secure = direct_verified_client(Duration::from_secs(60));
+        let escaped_raw = secure.http_client().unwrap().clone();
+        let mut client = Client::from_secure_client(secure, "synthetic-test-key").unwrap();
+        let escaped_typed = client.openai.clone();
+        assert_eq!(
+            client.freshness_expires_at(),
+            client.secure.freshness_expires_at()
+        );
+        assert!(client.freshness_expires_at().is_some());
+        // Invalid syntax is rejected locally by V3 before any network request.
+        client.secure.host = "invalid hostname".into();
+        assert!(client.verify().await.is_err());
+        assert!(!client.secure.is_verified());
+        assert!(client.secure.ground_truth().is_none());
+        assert!(client.freshness_expires_at().is_none());
+        let error = escaped_raw
+            .get("https://router.example/v1/models")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("was revoked"));
+        let request = CreateEmbeddingRequestArgs::default()
+            .model("synthetic")
+            .input("synthetic")
+            .build()
+            .unwrap();
+        let error = escaped_typed
+            .embeddings()
+            .create(request)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("was revoked"));
+    }
+
+    #[tokio::test]
+    async fn typed_direct_dispatch_checks_freshness_after_async_request_construction() {
+        use std::time::{Duration, SystemTime};
+        crate::ensure_crypto_provider();
+        let raw = reqwest::Client::new();
+        let origin = reqwest::Url::parse("http://127.0.0.1:9").unwrap();
+        let client = tls::OriginBoundClient::bound_with_expiry_for_test(
+            raw.clone(),
+            origin.clone(),
+            SystemTime::now() + Duration::from_millis(50),
+        )
+        .unwrap();
+        let factory = HttpRequestFactory::new(move || {
+            let raw = raw.clone();
+            let origin = origin.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                raw.get(origin).build().map_err(OpenAIError::Reqwest)
+            }
+        });
+        let mut service = DirectTransport { client };
+        let error = tower::Service::call(&mut service, factory)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("freshness has expired"));
+    }
+
     #[test]
     fn test_client_creation() {
-        let client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", "test-key");
+        let client = SecureClient::new(
+            "inference.tinfoil.sh",
+            "tinfoilsh/confidential-model-router",
+            "test-key",
+        );
         assert_eq!(client.host(), "inference.tinfoil.sh");
         assert!(!client.is_verified());
     }
-    
+
     #[test]
     fn test_not_verified_error() {
-        let client = SecureClient::new("inference.tinfoil.sh", "tinfoilsh/confidential-model-router", "test-key");
+        let client = SecureClient::new(
+            "inference.tinfoil.sh",
+            "tinfoilsh/confidential-model-router",
+            "test-key",
+        );
         assert!(client.http_client().is_err());
     }
 
@@ -1016,40 +1334,43 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(document, json!({
-            "schemaVersion": 1,
-            "configRepo": "owner/repo",
-            "enclaveHost": "router.example",
-            "releaseTag": "v1.2.3",
-            "releaseDigest": "d".repeat(64),
-            "codeMeasurement": {
-                "type": "https://tinfoil.sh/predicate/sev-snp-guest/v2",
-                "registers": [TEST_MEASUREMENT]
-            },
-            "enclaveMeasurement": {
-                "measurement": {
+        assert_eq!(
+            document,
+            json!({
+                "schemaVersion": 1,
+                "configRepo": "owner/repo",
+                "enclaveHost": "router.example",
+                "releaseTag": "v1.2.3",
+                "releaseDigest": "d".repeat(64),
+                "codeMeasurement": {
                     "type": "https://tinfoil.sh/predicate/sev-snp-guest/v2",
                     "registers": [TEST_MEASUREMENT]
                 },
-                "tlsPublicKeyFingerprint": TEST_TLS_KEY,
-                "hpkePublicKey": TEST_HPKE_KEY
-            },
-            "tlsPublicKey": TEST_TLS_KEY,
-            "hpkePublicKey": TEST_HPKE_KEY,
-            "codeFingerprint": TEST_MEASUREMENT,
-            "enclaveFingerprint": TEST_MEASUREMENT,
-            "selectedRouterEndpoint": "router.example",
-            "securityVerified": true,
-            "verifier": {"name": env!("CARGO_PKG_NAME"), "version": env!("CARGO_PKG_VERSION")},
-            "verifiedAt": "2026-08-04T12:30:00Z",
-            "steps": {
-                "fetchDigest": {"status": "success"},
-                "verifyCode": {"status": "success"},
-                "verifyEnclave": {"status": "success"},
-                "compareMeasurements": {"status": "success"},
-                "verifyCertificate": {"status": "success"}
-            }
-        }));
+                "enclaveMeasurement": {
+                    "measurement": {
+                        "type": "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+                        "registers": [TEST_MEASUREMENT]
+                    },
+                    "tlsPublicKeyFingerprint": TEST_TLS_KEY,
+                    "hpkePublicKey": TEST_HPKE_KEY
+                },
+                "tlsPublicKey": TEST_TLS_KEY,
+                "hpkePublicKey": TEST_HPKE_KEY,
+                "codeFingerprint": TEST_MEASUREMENT,
+                "enclaveFingerprint": TEST_MEASUREMENT,
+                "selectedRouterEndpoint": "router.example",
+                "securityVerified": true,
+                "verifier": {"name": env!("CARGO_PKG_NAME"), "version": env!("CARGO_PKG_VERSION")},
+                "verifiedAt": "2026-08-04T12:30:00Z",
+                "steps": {
+                    "fetchDigest": {"status": "success"},
+                    "verifyCode": {"status": "success"},
+                    "verifyEnclave": {"status": "success"},
+                    "compareMeasurements": {"status": "success"},
+                    "verifyCertificate": {"status": "success"}
+                }
+            })
+        );
     }
 
     #[test]
@@ -1059,9 +1380,18 @@ mod tests {
             .unwrap();
 
         assert!(document.release_tag.is_none());
-        assert_eq!(document.steps.fetch_digest.status, VerificationStepStatus::Skipped);
-        assert_eq!(document.steps.verify_code.status, VerificationStepStatus::Skipped);
-        assert_eq!(document.steps.verify_enclave.status, VerificationStepStatus::Success);
+        assert_eq!(
+            document.steps.fetch_digest.status,
+            VerificationStepStatus::Skipped
+        );
+        assert_eq!(
+            document.steps.verify_code.status,
+            VerificationStepStatus::Skipped
+        );
+        assert_eq!(
+            document.steps.verify_enclave.status,
+            VerificationStepStatus::Success
+        );
         assert_eq!(
             document.steps.compare_measurements.status,
             VerificationStepStatus::Success
@@ -1103,5 +1433,4 @@ mod tests {
             UserCacheSecret::Deferred(_)
         ));
     }
-
 }

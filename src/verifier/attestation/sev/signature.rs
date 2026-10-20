@@ -18,6 +18,20 @@ fn parse_signature_components(sig_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         return Err(Error::AttestationVerification("Signature too short".into()));
     }
 
+    // Go interprets all 72 bytes as an integer. Nonzero high bytes make
+    // the scalar exceed P-384's range; never silently truncate them.
+    if sig_bytes[SIG_VALUE_SIZE..SIG_COMPONENT_SIZE]
+        .iter()
+        .any(|b| *b != 0)
+        || sig_bytes[SIG_COMPONENT_SIZE + SIG_VALUE_SIZE..SIG_COMPONENT_SIZE * 2]
+            .iter()
+            .any(|b| *b != 0)
+    {
+        return Err(Error::AttestationVerification(
+            "Nonzero high bytes in P-384 signature scalar".into(),
+        ));
+    }
+
     // Extract R (first 48 bytes of first 72-byte component) and convert from LE to BE
     let r_le = &sig_bytes[0..SIG_VALUE_SIZE];
     let r_be: Vec<u8> = r_le.iter().copied().rev().collect();
@@ -31,16 +45,17 @@ fn parse_signature_components(sig_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
 
 /// Verify report signature against VCEK public key.
 pub(super) fn verify_report_signature(report: &[u8], vcek: &[u8]) -> Result<()> {
-    use x509_cert::Certificate;
     use der::Decode;
-    use p384::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+    use p384::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+    use x509_cert::Certificate;
 
     // Parse VCEK certificate
     let vcek_cert = Certificate::from_der(vcek)
         .map_err(|e| Error::AttestationVerification(format!("Failed to parse VCEK: {}", e)))?;
 
     // Extract public key from VCEK
-    let pubkey_bytes = vcek_cert.tbs_certificate
+    let pubkey_bytes = vcek_cert
+        .tbs_certificate
         .subject_public_key_info
         .subject_public_key
         .raw_bytes();
@@ -66,8 +81,9 @@ pub(super) fn verify_report_signature(report: &[u8], vcek: &[u8]) -> Result<()> 
         .map_err(|e| Error::AttestationVerification(format!("Invalid VCEK public key: {}", e)))?;
 
     // Verify (internally hashes with SHA-384)
-    verifying_key.verify(report_body, &signature)
-        .map_err(|e| Error::AttestationVerification(format!("Signature verification failed: {}", e)))?;
+    verifying_key.verify(report_body, &signature).map_err(|e| {
+        Error::AttestationVerification(format!("Signature verification failed: {}", e))
+    })?;
 
     Ok(())
 }
@@ -75,6 +91,15 @@ pub(super) fn verify_report_signature(report: &[u8], vcek: &[u8]) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_out_of_range_high_signature_bytes() {
+        for offset in [48, 71, 120, 143] {
+            let mut sig = vec![0; SIGNATURE_SIZE];
+            sig[offset] = 1;
+            assert!(parse_signature_components(&sig).is_err());
+        }
+    }
 
     #[test]
     fn test_signature_parsing() {

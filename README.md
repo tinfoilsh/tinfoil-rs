@@ -1,5 +1,10 @@
 # Tinfoil Rust Client
 
+This library supports an opt-in explicit-node V3 attestation mode for direct
+encrypted TLS connections. Existing constructors retain their legacy behavior. See
+[direct-node verification](docs/direct-attestation.md) for the supported scope,
+approved release/measurement policy, qualification commands and limitations.
+
 [![Build Status](https://github.com/tinfoilsh/tinfoil-rs/actions/workflows/test.yml/badge.svg)](https://github.com/tinfoilsh/tinfoil-rs/actions)
 [![Documentation](https://img.shields.io/badge/docs-tinfoil.sh-blue)](https://docs.tinfoil.sh/sdk/rust-sdk)
 
