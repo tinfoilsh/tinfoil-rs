@@ -312,4 +312,21 @@ jaDTSFaq1NIwodHp7X9fOG48uRuJWS8GmifD969sC4Ut2FJFoklceBVUNCHR
             err_msg
         );
     }
+
+    #[test]
+    fn test_outer_signature_algorithm_must_match_tbs() {
+        // Embedded Fulcio intermediate issued by the root.
+        let ca = trust::load_fulcio_cas()
+            .unwrap()
+            .into_iter()
+            .find(|ca| ca.cert_chain_der.len() == 2)
+            .unwrap();
+        let mut child = Certificate::from_der(&ca.cert_chain_der[0]).unwrap();
+        let issuer = Certificate::from_der(&ca.cert_chain_der[1]).unwrap();
+        verify_issued_by(&child, &issuer, "intermediate").unwrap();
+
+        child.signature_algorithm.oid = der::asn1::ObjectIdentifier::new_unwrap(OID_ECDSA_SHA256);
+        let e = verify_issued_by(&child, &issuer, "intermediate").unwrap_err();
+        assert!(e.to_string().contains("outer signature algorithm"), "{e}");
+    }
 }

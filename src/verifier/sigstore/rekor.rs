@@ -16,8 +16,9 @@ use sha2::{Digest, Sha256};
 
 /// Verify the bundle's Rekor entry with the embedded trust root: exactly one
 /// entry; an observer timestamp inside the cert validity (SET-signed
-/// `integratedTime` for v1 dsse/hashedrekord 0.0.1, RFC 3161 for v2
-/// hashedrekord 0.0.2); checkpoint signature by the log's key under its name
+/// `integratedTime` for v1 dsse/hashedrekord 0.0.1, a verified RFC 3161 time
+/// for v2 hashedrekord 0.0.2 and for v1 entries without an inclusion
+/// promise); checkpoint signature by the log's key under its name
 /// and key hint; Merkle inclusion; body kind/version, certificate, signature
 /// and payload (v1) or PAE (v2) digest bound to the bundle.
 pub fn verify_rekor_entry(
