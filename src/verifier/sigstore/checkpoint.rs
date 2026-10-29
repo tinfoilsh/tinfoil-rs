@@ -119,24 +119,34 @@ impl SignedCheckpoint {
 
     /// Verify that at least one of the checkpoint's signatures is valid.
     /// The signed message is the marshaled note body (which already ends with a newline).
-    pub fn verify_signature(&self, key_der: &[u8], key_type: &str) -> Result<()> {
+    ///
+    /// Only signature lines whose name is `name` (the log's hostname) and whose
+    /// 4-byte key hint is the prefix of `log_id` are considered, matching the
+    /// sumdb-note verifier semantics sigstore-go uses. Other lines (witness
+    /// cosignatures, unknown keys) are ignored.
+    pub fn verify_signature(
+        &self,
+        key_der: &[u8],
+        key_type: &str,
+        name: &str,
+        log_id: &[u8],
+    ) -> Result<()> {
         let message = self.note.marshal();
         let message_bytes = message.as_bytes();
 
         for sig in &self.signatures {
-            let result = match key_type {
-                "PKIX_ECDSA_P256_SHA_256" => verify_ecdsa_p256(message_bytes, &sig.raw, key_der),
-                "PKIX_ED25519" => verify_ed25519(message_bytes, &sig.raw, key_der),
-                _ => continue,
-            };
-            if result.is_ok() {
+            if sig.name != name || log_id.get(..4) != Some(&sig.key_fingerprint[..]) {
+                continue;
+            }
+            if verify_log_signature(message_bytes, &sig.raw, key_der, key_type).is_ok() {
                 return Ok(());
             }
         }
 
-        Err(Error::SigstoreVerification(
-            "No valid checkpoint signature found".into(),
-        ))
+        Err(Error::SigstoreVerification(format!(
+            "No valid checkpoint signature found for log {name} (key hint {})",
+            hex::encode(log_id.get(..4).unwrap_or_default())
+        )))
     }
 }
 
@@ -247,6 +257,23 @@ impl CheckpointSignature {
             name: name.to_string(),
             raw: sig.to_vec(),
         })
+    }
+}
+
+/// Verify a signature made by a Rekor log key (`key_type` is the trust root's
+/// `keyDetails`). Used for checkpoint signatures and v1 signed entry timestamps.
+pub(super) fn verify_log_signature(
+    message: &[u8],
+    signature: &[u8],
+    key_der: &[u8],
+    key_type: &str,
+) -> Result<()> {
+    match key_type {
+        "PKIX_ECDSA_P256_SHA_256" => verify_ecdsa_p256(message, signature, key_der),
+        "PKIX_ED25519" => verify_ed25519(message, signature, key_der),
+        other => Err(Error::SigstoreVerification(format!(
+            "Unsupported Rekor key type: {other}"
+        ))),
     }
 }
 

@@ -19,6 +19,7 @@ pub mod merkle;
 pub mod rekor;
 pub mod transparency;
 pub mod trust;
+pub mod tsa;
 
 use super::attestation::types::{Measurement, PredicateType};
 use super::github;

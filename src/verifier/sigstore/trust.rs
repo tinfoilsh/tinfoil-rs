@@ -21,6 +21,16 @@ struct TrustedRoot {
     tlogs: Vec<Tlog>,
     certificate_authorities: Vec<CertificateAuthority>,
     ctlogs: Vec<CtLog>,
+    #[serde(default)]
+    timestamp_authorities: Vec<TimestampAuthorityEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TimestampAuthorityEntry {
+    cert_chain: CertChain,
+    #[serde(default)]
+    valid_for: Option<ValidityPeriod>,
 }
 
 /// Certificate Transparency log entry
@@ -61,6 +71,8 @@ struct ValidityPeriod {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Tlog {
+    #[serde(default)]
+    base_url: String,
     public_key: PublicKeyInfo,
     log_id: LogId,
 }
@@ -93,12 +105,72 @@ pub struct FulcioCa {
 /// Represents a loaded Rekor transparency log key with its metadata.
 pub struct RekorKey {
     pub key_id: String,
+    /// Hostname of the log's baseUrl. Checkpoint signatures must carry this
+    /// name (sigstore-go derives the note verifier name the same way).
+    pub host: String,
     pub key_der: Vec<u8>,
     pub key_type: String,
     /// Validity start as Unix timestamp (None = no lower bound)
     pub valid_from: Option<u64>,
     /// Validity end as Unix timestamp (None = no upper bound)
     pub valid_until: Option<u64>,
+}
+
+/// An RFC 3161 timestamp authority trusted for observer timestamps.
+pub struct TimestampAuthority {
+    /// Certificate chain: first is the TSA signing (leaf) cert, last is the root.
+    pub cert_chain_der: Vec<Vec<u8>>,
+    /// Validity start as Unix timestamp (None = no lower bound)
+    pub valid_from: Option<u64>,
+    /// Validity end as Unix timestamp (None = no upper bound)
+    pub valid_until: Option<u64>,
+}
+
+fn parse_validity(vf: &Option<ValidityPeriod>) -> Result<(Option<u64>, Option<u64>)> {
+    match vf {
+        Some(vf) => {
+            let from = parse_rfc3339_to_unix(&vf.start)?;
+            let until = vf
+                .end
+                .as_ref()
+                .map(|e| parse_rfc3339_to_unix(e))
+                .transpose()?;
+            Ok((Some(from), until))
+        }
+        None => Ok((None, None)),
+    }
+}
+
+/// Load timestamp authorities from embedded trust root.
+pub fn load_timestamp_authorities() -> Result<Vec<TimestampAuthority>> {
+    load_timestamp_authorities_from_json(TRUSTED_ROOT_JSON)
+}
+
+/// Load timestamp authorities from a trusted root JSON string.
+pub fn load_timestamp_authorities_from_json(json: &str) -> Result<Vec<TimestampAuthority>> {
+    let root: TrustedRoot = serde_json::from_str(json)
+        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse trusted root: {}", e)))?;
+
+    let mut tsas = Vec::new();
+    for tsa in root.timestamp_authorities {
+        let cert_chain_der = tsa
+            .cert_chain
+            .certificates
+            .iter()
+            .map(|c| {
+                decode_b64(&c.raw_bytes).map_err(|e| {
+                    Error::SigstoreVerification(format!("Failed to decode TSA cert: {}", e))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (valid_from, valid_until) = parse_validity(&tsa.valid_for)?;
+        tsas.push(TimestampAuthority {
+            cert_chain_der,
+            valid_from,
+            valid_until,
+        });
+    }
+    Ok(tsas)
 }
 
 /// Load Rekor public keys from embedded trust root.
@@ -117,22 +189,18 @@ pub fn load_rekor_keys_from_json(json: &str) -> Result<Vec<RekorKey>> {
             Error::SigstoreVerification(format!("Failed to decode Rekor key: {}", e))
         })?;
 
-        // Parse validity period from the trust root
-        let (valid_from, valid_until) = match &tlog.public_key.valid_for {
-            Some(vf) => {
-                let from = parse_rfc3339_to_unix(&vf.start)?;
-                let until = vf
-                    .end
-                    .as_ref()
-                    .map(|e| parse_rfc3339_to_unix(e))
-                    .transpose()?;
-                (Some(from), until)
-            }
-            None => (None, None),
-        };
+        let (valid_from, valid_until) = parse_validity(&tlog.public_key.valid_for)?;
+        let host = tlog
+            .base_url
+            .split("://")
+            .last()
+            .and_then(|rest| rest.split('/').next())
+            .unwrap_or("")
+            .to_string();
 
         keys.push(RekorKey {
             key_id: tlog.log_id.key_id,
+            host,
             key_der,
             key_type: tlog.public_key.key_details,
             valid_from,
@@ -303,6 +371,14 @@ mod tests {
         let keyring = load_ctlog_keyring().unwrap();
         // Just verify it loads without error
         let _ = keyring;
+    }
+
+    #[test]
+    fn test_load_timestamp_authorities() {
+        let tsas = load_timestamp_authorities().unwrap();
+        assert!(!tsas.is_empty());
+        assert!(tsas[0].cert_chain_der.len() >= 2);
+        assert_eq!(load_rekor_keys().unwrap()[0].host, "rekor.sigstore.dev");
     }
 
     #[test]
