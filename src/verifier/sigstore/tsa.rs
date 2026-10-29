@@ -57,9 +57,9 @@ struct MessageImprint {
 struct Accuracy {
     #[asn1(optional = "true")]
     seconds: Option<u64>,
-    #[asn1(context_specific = "0", optional = "true")]
+    #[asn1(context_specific = "0", optional = "true", tag_mode = "IMPLICIT")]
     millis: Option<u16>,
-    #[asn1(context_specific = "1", optional = "true")]
+    #[asn1(context_specific = "1", optional = "true", tag_mode = "IMPLICIT")]
     micros: Option<u16>,
 }
 
@@ -418,6 +418,16 @@ mod tests {
     ) -> (Vec<u64>, Vec<String>) {
         let (times, errors) = verify_timestamps(b, sig, tsas).unwrap();
         (times, errors.iter().map(|e| e.to_string()).collect())
+    }
+
+    #[test]
+    fn accuracy_uses_implicit_tags() {
+        // seconds=1, millis [0] 999, micros [1] 999
+        let acc = Accuracy::from_der(&hex::decode("300b020101800203e7810203e7").unwrap()).unwrap();
+        assert_eq!(
+            (acc.seconds, acc.millis, acc.micros),
+            (Some(1), Some(999), Some(999))
+        );
     }
 
     #[test]

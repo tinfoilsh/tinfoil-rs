@@ -71,7 +71,6 @@ struct ValidityPeriod {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Tlog {
-    #[serde(default)]
     base_url: String,
     public_key: PublicKeyInfo,
     log_id: LogId,

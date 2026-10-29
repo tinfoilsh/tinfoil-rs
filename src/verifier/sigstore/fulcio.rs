@@ -159,6 +159,13 @@ pub(super) fn verify_issued_by(
         .and_then(|p| p.decode_as::<der::asn1::ObjectIdentifier>().ok())
         .map(|oid| oid.to_string());
 
+    // RFC 5280 §4.1.1.2: the unsigned outer algorithm must equal the signed inner one.
+    if child.signature_algorithm != child.tbs_certificate.signature {
+        return Err(Error::SigstoreVerification(format!(
+            "{} outer signature algorithm does not match tbs.signature",
+            context
+        )));
+    }
     // Hash per the child's signature algorithm, not the issuer's curve (P-256 CAs can use SHA-384).
     let digest: Vec<u8> = match child.signature_algorithm.oid.to_string().as_str() {
         OID_ECDSA_SHA256 => sha2::Sha256::digest(&tbs_bytes).to_vec(),

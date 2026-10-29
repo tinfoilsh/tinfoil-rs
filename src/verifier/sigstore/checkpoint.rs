@@ -578,4 +578,54 @@ mod test {
             assert_eq!(decoded.signatures[1], sig2);
         }
     }
+
+    mod test_verify_signature {
+        use crate::verifier::sigstore::checkpoint::SignedCheckpoint;
+        use crate::verifier::sigstore::trust;
+        use crate::verifier::util::decode_b64;
+
+        fn real_checkpoint() -> (SignedCheckpoint, trust::RekorKey, Vec<u8>) {
+            let bundle: serde_json::Value =
+                serde_json::from_str(include_str!("../../../assets/rekor_test_bundle.json"))
+                    .unwrap();
+            let entry = &bundle["verificationMaterial"]["tlogEntries"][0];
+            let cp = SignedCheckpoint::decode(
+                entry["inclusionProof"]["checkpoint"]["envelope"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let log_id_b64 = entry["logId"]["keyId"].as_str().unwrap();
+            let key = trust::load_rekor_keys()
+                .unwrap()
+                .into_iter()
+                .find(|k| k.key_id == log_id_b64)
+                .unwrap();
+            (cp, key, decode_b64(log_id_b64).unwrap())
+        }
+
+        #[test]
+        fn accepts_matching_name_and_hint() {
+            let (cp, key, log_id) = real_checkpoint();
+            cp.verify_signature(&key.key_der, &key.key_type, &key.host, &log_id)
+                .unwrap();
+        }
+
+        #[test]
+        fn rejects_wrong_key_hint() {
+            let (cp, key, mut log_id) = real_checkpoint();
+            log_id[0] ^= 0x01;
+            assert!(cp
+                .verify_signature(&key.key_der, &key.key_type, &key.host, &log_id)
+                .is_err());
+        }
+
+        #[test]
+        fn rejects_wrong_signer_name() {
+            let (cp, key, log_id) = real_checkpoint();
+            assert!(cp
+                .verify_signature(&key.key_der, &key.key_type, "rekor.example.org", &log_id)
+                .is_err());
+        }
+    }
 }

@@ -99,6 +99,19 @@ pub fn verify_rekor_entry_with_trust(
 
     // The observer time also selects which Rekor key (by validity period) may have signed.
     let observer_time = match (kind, version) {
+        // integratedTime is only authenticated by the SET; without a promise the
+        // verified TSA time anchors the signature instead.
+        ("dsse" | "hashedrekord", "0.0.1")
+            if entry
+                .pointer("/inclusionPromise/signedEntryTimestamp")
+                .is_none() =>
+        {
+            *tsa_times.iter().min().ok_or_else(|| {
+                no_timestamp(
+                    "Rekor v1 entry has no inclusion promise, cannot establish signing time",
+                )
+            })?
+        }
         ("dsse" | "hashedrekord", "0.0.1") => {
             // Handle both JSON string (protobuf JSON int64 encoding) and JSON number formats.
             let integrated_time = entry
@@ -119,16 +132,6 @@ pub fn verify_rekor_entry_with_trust(
                     "Rekor entry integrated time {} is outside certificate validity window [{}, {}]",
                     integrated_time, cert_not_before, cert_not_after
                 )));
-            }
-            // integratedTime is only authenticated by the SET; without one a TSA time must anchor it.
-            if entry
-                .pointer("/inclusionPromise/signedEntryTimestamp")
-                .is_none()
-                && tsa_times.is_empty()
-            {
-                return Err(no_timestamp(
-                    "Rekor v1 entry has no inclusion promise, cannot establish signing time",
-                ));
             }
             integrated_time
         }

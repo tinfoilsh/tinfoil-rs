@@ -664,7 +664,7 @@ fn verify_rekor_entry(
         .ok_or("Missing logId")?;
 
     // v1: the integrated time selects the key by validity; v2: the TSA time does.
-    let timestamp_for_key = if !is_rekor_v2 {
+    let timestamp_for_key = if !is_rekor_v2 && has_promise {
         entry
             .get("integratedTime")
             .and_then(|t| t.as_str().and_then(|s| s.parse::<u64>().ok()).or(t.as_u64()))
