@@ -24,7 +24,7 @@
 //! - If they match, the enclave is running the exact published open-source code
 //!
 //! ## TLS Certificate Pinning
-//! 
+//!
 //! The attestation document contains the enclave's TLS public key. The SDK:
 //! - Computes SPKI fingerprint from the attestation
 //! - Pins TLS connections to only accept that exact certificate
@@ -126,6 +126,7 @@ pub use verification_document::{
     DocumentEnclaveMeasurement, VerificationDocument, VerificationStepState,
     VerificationStepStatus, VerificationSteps, VERIFICATION_DOCUMENT_SCHEMA_VERSION,
 };
+pub use verifier::v3::{ApprovedRelease, DirectPolicy, PinnedRelease};
 pub use verifier::{GroundTruth, Measurement, PredicateType, SoftwareIdentity};
 
 /// Re-export of `async_openai::types::chat`.

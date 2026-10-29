@@ -20,6 +20,10 @@ pub mod tls;
 #[doc(hidden)]
 pub mod util;
 
+pub mod v3;
+pub(crate) mod v3_document;
+pub(crate) mod v3_endorsements;
+
 // Re-export commonly used types
 pub use attestation::{
     fetch, verify_complete, verify_full, AttestationDocument, GroundTruth, Measurement,

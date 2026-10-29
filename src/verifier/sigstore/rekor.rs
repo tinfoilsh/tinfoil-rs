@@ -12,6 +12,139 @@ use crate::verifier::util::decode_b64;
 use digest::Output;
 use sha2::{Digest, Sha256};
 
+/// Authenticate an observer timestamp, in addition to the inclusion evidence.
+///
+/// The inclusion proof authenticates the logged body, not the bundle's
+/// `integratedTime` field. Freshness MUST use the timestamp covered by Rekor's
+/// signed entry timestamp (SET). This is deliberately separate from the legacy
+/// verifier so an old caller cannot accidentally treat an unchecked hint as an
+/// authenticated timestamp.
+pub(crate) fn verify_rekor_timestamp(
+    bundle: &serde_json::Value,
+    cert_not_before: u64,
+    cert_not_after: u64,
+) -> Result<u64> {
+    verify_rekor_entry(bundle, cert_not_before, cert_not_after)?;
+    let entry = &bundle["verificationMaterial"]["tlogEntries"][0];
+    let integer = |name: &str| -> Result<u64> {
+        entry[name]
+            .as_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .or_else(|| entry[name].as_u64())
+            .filter(|n| *n <= i64::MAX as u64)
+            .ok_or_else(|| Error::SigstoreVerification(format!("invalid Rekor {name}")))
+    };
+    let integrated_time = integer("integratedTime")?;
+    // Rekor v1 SET signs the GLOBAL index. The inclusion proof below uses
+    // its shard-local index; those counters intentionally need not be equal.
+    // sigstore protobuf-specs v0.5.1 sigstore_rekor.proto defines both.
+    let log_index = integer("logIndex")?;
+    let log_id = entry["logId"]["keyId"]
+        .as_str()
+        .ok_or_else(|| Error::SigstoreVerification("missing Rekor key ID".into()))?;
+    let keys = trust::load_rekor_keys()?;
+    let key = keys
+        .iter()
+        .find(|k| {
+            k.key_id == log_id
+                && k.valid_from.is_none_or(|t| integrated_time >= t)
+                && k.valid_until.is_none_or(|t| integrated_time <= t)
+        })
+        .ok_or_else(|| Error::SigstoreVerification("no trusted Rekor timestamp key".into()))?;
+    let body = entry["canonicalizedBody"]
+        .as_str()
+        .ok_or_else(|| Error::SigstoreVerification("missing Rekor body".into()))?;
+    let signature = decode_b64(
+        entry["inclusionPromise"]["signedEntryTimestamp"]
+            .as_str()
+            .ok_or_else(|| {
+                Error::SigstoreVerification(
+                    "freshness requires Rekor signed entry timestamp".into(),
+                )
+            })?,
+    )
+    .map_err(|e| Error::SigstoreVerification(format!("invalid SET: {e}")))?;
+    // Rekor's SET payload is RFC 8785 canonical JSON. These four values are
+    // ASCII strings and nonnegative int64 values, so sorted compact JSON has
+    // exactly the canonical representation (no floating point or Unicode).
+    let payload = serde_json::json!({
+        "body": body,
+        "integratedTime": integrated_time,
+        "logID": hex::encode(decode_b64(log_id).map_err(|e|
+            Error::SigstoreVerification(format!("invalid Rekor log ID: {e}")))?),
+        "logIndex": log_index,
+    });
+    let message = serde_json::to_vec(&payload)
+        .map_err(|e| Error::SigstoreVerification(format!("encoding SET payload: {e}")))?;
+    verify_set_signature(&message, &signature, &key.key_der, &key.key_type)?;
+
+    // Both the proof root AND size must be authenticated by the checkpoint.
+    let proof = &entry["inclusionProof"];
+    let checkpoint = SignedCheckpoint::decode(
+        proof["checkpoint"]["envelope"]
+            .as_str()
+            .ok_or_else(|| Error::SigstoreVerification("missing Rekor checkpoint".into()))?,
+    )?;
+    let proof_size = proof["treeSize"]
+        .as_str()
+        .and_then(|s| s.parse::<u64>().ok())
+        .or_else(|| proof["treeSize"].as_u64())
+        .ok_or_else(|| Error::SigstoreVerification("invalid Rekor proof tree size".into()))?;
+    if checkpoint.note.size != proof_size {
+        return Err(Error::SigstoreVerification(
+            "Rekor checkpoint/proof tree size mismatch".into(),
+        ));
+    }
+    Ok(integrated_time)
+}
+
+fn verify_set_signature(
+    message: &[u8],
+    signature: &[u8],
+    key_der: &[u8],
+    key_type: &str,
+) -> Result<()> {
+    use p256::ecdsa::signature::Verifier;
+    use p256::pkcs8::DecodePublicKey;
+    let verified = match key_type {
+        "PKIX_ECDSA_P256_SHA_256" => {
+            let key = p256::ecdsa::VerifyingKey::from_public_key_der(key_der)
+                .map_err(|e| Error::SigstoreVerification(format!("invalid SET key: {e}")))?;
+            let signature = p256::ecdsa::Signature::from_der(signature)
+                .map_err(|e| Error::SigstoreVerification(format!("invalid SET signature: {e}")))?;
+            key.verify(message, &signature).is_ok()
+        }
+        "PKIX_ED25519" => {
+            use der::Decode;
+            let spki = x509_cert::spki::SubjectPublicKeyInfoOwned::from_der(key_der)
+                .map_err(|e| Error::SigstoreVerification(format!("invalid SET key: {e}")))?;
+            if spki.algorithm.oid.to_string() != "1.3.101.112"
+                || spki.algorithm.parameters.is_some()
+            {
+                return Err(Error::SigstoreVerification(
+                    "invalid Ed25519 SET key algorithm".into(),
+                ));
+            }
+            let key = ed25519_dalek::VerifyingKey::try_from(spki.subject_public_key.raw_bytes())
+                .map_err(|e| Error::SigstoreVerification(format!("invalid SET key: {e}")))?;
+            let signature = ed25519_dalek::Signature::try_from(signature)
+                .map_err(|e| Error::SigstoreVerification(format!("invalid SET signature: {e}")))?;
+            key.verify_strict(message, &signature).is_ok()
+        }
+        _ => {
+            return Err(Error::SigstoreVerification(
+                "unsupported SET signature algorithm".into(),
+            ))
+        }
+    };
+    if !verified {
+        return Err(Error::SigstoreVerification(
+            "Rekor signed entry timestamp signature failed".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Verify Rekor transparency log entry with full cryptographic verification.
 ///
 /// This verifies:
@@ -559,6 +692,48 @@ mod tests {
     }
 
     #[test]
+    fn signed_timestamp_covers_time_index_and_body() {
+        use p256::ecdsa::{signature::Signer, SigningKey};
+        use p256::pkcs8::EncodePublicKey;
+        let key = SigningKey::from_slice(&[42; 32]).unwrap();
+        let public = key.verifying_key().to_public_key_der().unwrap();
+        let message = br#"{"body":"YWJj","integratedTime":123,"logID":"abcd","logIndex":7}"#;
+        let signature: p256::ecdsa::DerSignature = key.sign(message);
+        assert!(verify_set_signature(
+            message,
+            signature.as_bytes(),
+            public.as_bytes(),
+            "PKIX_ECDSA_P256_SHA_256"
+        )
+        .is_ok());
+        for modified in [
+            br#"{"body":"YWJj","integratedTime":124,"logID":"abcd","logIndex":7}"#.as_slice(),
+            br#"{"body":"YWJj","integratedTime":123,"logID":"abcd","logIndex":8}"#.as_slice(),
+            br#"{"body":"ZXZpbA==","integratedTime":123,"logID":"abcd","logIndex":7}"#.as_slice(),
+        ] {
+            assert!(verify_set_signature(
+                modified,
+                signature.as_bytes(),
+                public.as_bytes(),
+                "PKIX_ECDSA_P256_SHA_256"
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn missing_or_changed_set_cannot_be_used_as_authenticated_time() {
+        let mut bundle = parse_bundle();
+        bundle["verificationMaterial"]["tlogEntries"][0]["inclusionPromise"] =
+            serde_json::json!({});
+        assert!(verify_rekor_timestamp(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_err());
+        let mut bundle = parse_bundle();
+        bundle["verificationMaterial"]["tlogEntries"][0]["integratedTime"] =
+            serde_json::json!((CERT_NOT_BEFORE + 1).to_string());
+        assert!(verify_rekor_timestamp(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_err());
+    }
+
+    #[test]
     fn test_verify_rekor_entry_valid() {
         let bundle = parse_bundle();
         assert!(
@@ -624,8 +799,8 @@ mod tests {
     fn test_modified_checkpoint() {
         let mut bundle = parse_bundle();
         // Corrupt the checkpoint envelope
-        bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["checkpoint"]["envelope"] =
-            serde_json::Value::String("corrupted checkpoint".to_string());
+        bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["checkpoint"]
+            ["envelope"] = serde_json::Value::String("corrupted checkpoint".to_string());
         assert!(
             verify_rekor_entry(&bundle, CERT_NOT_BEFORE, CERT_NOT_AFTER).is_err(),
             "modified checkpoint should fail checkpoint signature"
@@ -640,17 +815,12 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        let mut tampered = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &root,
-        )
-        .unwrap();
+        let mut tampered =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &root).unwrap();
         // Flip a byte
         tampered[0] ^= 0xFF;
-        let new_root = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &tampered,
-        );
+        let new_root =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &tampered);
         bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["rootHash"] =
             serde_json::Value::String(new_root);
         assert!(

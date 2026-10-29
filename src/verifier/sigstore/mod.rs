@@ -16,6 +16,7 @@ pub mod dsse;
 pub mod fulcio;
 pub mod keyring;
 pub mod merkle;
+pub(crate) mod provided;
 pub mod rekor;
 pub mod transparency;
 pub mod trust;
@@ -113,8 +114,8 @@ pub async fn verify_repo(repo: &str) -> Result<SigstoreResult> {
 
 /// Extract certificate DER bytes and validity window (not_before, not_after) as Unix timestamps
 fn extract_cert_with_validity(bundle: &serde_json::Value) -> Result<(Vec<u8>, u64, u64)> {
-    use x509_cert::Certificate;
     use der::Decode;
+    use x509_cert::Certificate;
 
     // Get the certificate
     let cert_b64 = bundle
@@ -130,16 +131,26 @@ fn extract_cert_with_validity(bundle: &serde_json::Value) -> Result<(Vec<u8>, u6
     let cert = Certificate::from_der(&cert_der)
         .map_err(|e| Error::SigstoreVerification(format!("Failed to parse certificate: {}", e)))?;
 
-    let not_before = cert.tbs_certificate.validity.not_before.to_unix_duration().as_secs();
-    let not_after = cert.tbs_certificate.validity.not_after.to_unix_duration().as_secs();
+    let not_before = cert
+        .tbs_certificate
+        .validity
+        .not_before
+        .to_unix_duration()
+        .as_secs();
+    let not_after = cert
+        .tbs_certificate
+        .validity
+        .not_after
+        .to_unix_duration()
+        .as_secs();
 
     Ok((cert_der, not_before, not_after))
 }
 
 /// Extract certificate info from the bundle
 fn extract_certificate_info_from_bundle(bundle: &serde_json::Value) -> Result<CertificateInfo> {
-    use x509_cert::Certificate;
     use der::Decode;
+    use x509_cert::Certificate;
 
     // Get the certificate
     let cert_b64 = bundle
@@ -201,12 +212,17 @@ fn verify_certificate_identity(
 }
 
 /// Extract measurement from a bundle's DSSE envelope and verify digest matches
-fn extract_measurement_from_bundle(bundle: &serde_json::Value, expected_digest: &str) -> Result<Measurement> {
-    let dsse_envelope = bundle.get("dsseEnvelope")
+fn extract_measurement_from_bundle(
+    bundle: &serde_json::Value,
+    expected_digest: &str,
+) -> Result<Measurement> {
+    let dsse_envelope = bundle
+        .get("dsseEnvelope")
         .ok_or_else(|| Error::SigstoreVerification("No dsseEnvelope in bundle".into()))?;
 
     // Validate payloadType is in-toto (matches Python/JS)
-    let payload_type = dsse_envelope.get("payloadType")
+    let payload_type = dsse_envelope
+        .get("payloadType")
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::SigstoreVerification("No payloadType in DSSE envelope".into()))?;
 
@@ -217,7 +233,8 @@ fn extract_measurement_from_bundle(bundle: &serde_json::Value, expected_digest: 
         )));
     }
 
-    let payload_b64 = dsse_envelope.get("payload")
+    let payload_b64 = dsse_envelope
+        .get("payload")
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::SigstoreVerification("No payload in DSSE envelope".into()))?;
 
@@ -238,10 +255,14 @@ fn extract_measurement_from_bundle(bundle: &serde_json::Value, expected_digest: 
     }
 
     // Verify that the provided digest matches the digest in the DSSE payload subject
-    let subject = statement.subject.first()
+    let subject = statement
+        .subject
+        .first()
         .ok_or_else(|| Error::SigstoreVerification("No subject in statement".into()))?;
 
-    let payload_digest = subject.digest.get("sha256")
+    let payload_digest = subject
+        .digest
+        .get("sha256")
         .ok_or_else(|| Error::SigstoreVerification("No sha256 digest in subject".into()))?;
 
     if payload_digest.to_lowercase() != expected_digest.to_lowercase() {
@@ -259,23 +280,33 @@ fn extract_measurement_from_bundle(bundle: &serde_json::Value, expected_digest: 
         )));
     }
 
-    let snp_measurement = statement.predicate.get("snp_measurement")
+    let snp_measurement = statement
+        .predicate
+        .get("snp_measurement")
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::SigstoreVerification("Missing snp_measurement".into()))?;
 
-    let tdx = statement.predicate.get("tdx_measurement")
+    let tdx = statement
+        .predicate
+        .get("tdx_measurement")
         .ok_or_else(|| Error::SigstoreVerification("Missing tdx_measurement".into()))?;
 
-    let rtmr1 = tdx.get("rtmr1")
+    let rtmr1 = tdx
+        .get("rtmr1")
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::SigstoreVerification("Missing rtmr1".into()))?;
 
-    let rtmr2 = tdx.get("rtmr2")
+    let rtmr2 = tdx
+        .get("rtmr2")
         .and_then(|v| v.as_str())
         .ok_or_else(|| Error::SigstoreVerification("Missing rtmr2".into()))?;
 
-    let registers = vec![snp_measurement.to_string(), rtmr1.to_string(), rtmr2.to_string()];
-    
+    let registers = vec![
+        snp_measurement.to_string(),
+        rtmr1.to_string(),
+        rtmr2.to_string(),
+    ];
+
     Ok(Measurement {
         type_: PredicateType::SnpTdxMultiPlatformV1,
         registers,

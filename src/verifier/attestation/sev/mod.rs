@@ -12,13 +12,17 @@
 //! 8. Extract measurement and TLS keys
 
 mod cert_chain;
+mod product;
 mod report;
 mod signature;
+mod v3;
 mod validation;
+pub(crate) use v3::validate_policy;
+pub use v3::{verify_evidence, Evidence};
 
-use crate::error::Result;
 use super::constants::*;
 use super::types::{Measurement, PredicateType, ValidationOptions, Verification};
+use crate::error::Result;
 
 /// Full async verification including VCEK fetch and chain validation.
 ///
@@ -31,7 +35,10 @@ pub async fn verify_full(body: &str) -> Result<Verification> {
 /// Full async verification with custom validation options.
 ///
 /// Allows customizing policy, TCB, and platform requirements.
-pub async fn verify_full_with_options(body: &str, options: &ValidationOptions) -> Result<Verification> {
+pub async fn verify_full_with_options(
+    body: &str,
+    options: &ValidationOptions,
+) -> Result<Verification> {
     // 1. Decode and decompress
     let report_bytes = report::decode_report(body)?;
 
@@ -60,7 +67,8 @@ pub async fn verify_full_with_options(body: &str, options: &ValidationOptions) -
     signature::verify_report_signature(&report_bytes, &vcek)?;
 
     // 9. Extract measurements and keys
-    let measurement_bytes = &report_bytes[MEASUREMENT_OFFSET..MEASUREMENT_OFFSET + MEASUREMENT_SIZE];
+    let measurement_bytes =
+        &report_bytes[MEASUREMENT_OFFSET..MEASUREMENT_OFFSET + MEASUREMENT_SIZE];
     let report_data = &report_bytes[REPORT_DATA_OFFSET..REPORT_DATA_OFFSET + REPORT_DATA_SIZE];
     let tls_fp = hex::encode(&report_data[..32]);
     let hpke_key = hex::encode(&report_data[32..]);
@@ -104,6 +112,8 @@ mod tests {
     fn test_ark_fingerprint_constant() {
         // Ensure the fingerprint is a valid 64-character hex string
         assert_eq!(AMD_ARK_GENOA_SPKI_FINGERPRINT.len(), 64);
-        assert!(AMD_ARK_GENOA_SPKI_FINGERPRINT.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(AMD_ARK_GENOA_SPKI_FINGERPRINT
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
     }
 }

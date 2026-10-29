@@ -7,13 +7,18 @@
 //! - RSA-PSS SHA-384 signature verification
 
 use der::Decode;
-use sha2::{Sha256, Sha384, Digest};
+use sha2::{Digest, Sha256, Sha384};
 
+use super::product::{Product, Tcb};
 use crate::error::{Error, Result};
 use crate::verifier::attestation::constants::*;
 
 /// Build the cache path for a VCEK certificate.
-fn vcek_cache_path(product: &str, chip_id_hex: &str, reported_tcb: u64) -> Option<std::path::PathBuf> {
+fn vcek_cache_path(
+    product: &str,
+    chip_id_hex: &str,
+    reported_tcb: u64,
+) -> Option<std::path::PathBuf> {
     let cache_dir = dirs::cache_dir()?.join("tinfoil");
     let filename = format!("VCEK_{}_{}_{:016x}.der", product, chip_id_hex, reported_tcb);
     Some(cache_dir.join(filename))
@@ -85,7 +90,12 @@ pub(super) async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
     // Cache miss — fetch from AMD KDS
     let url = format!(
         "{}/vcek/v1/Genoa/{}?blSPL={}&teeSPL={}&snpSPL={}&ucodeSPL={}",
-        crate::constants::KDS_PROXY, chip_id_hex, bl_spl, tee_spl, snp_spl, ucode_spl
+        crate::constants::KDS_PROXY,
+        chip_id_hex,
+        bl_spl,
+        tee_spl,
+        snp_spl,
+        ucode_spl
     );
 
     let response = fetch_with_retry(&url, reqwest::header::HeaderMap::new())
@@ -99,7 +109,9 @@ pub(super) async fn fetch_vcek(chip_id: &[u8], tcb: &[u8]) -> Result<Vec<u8>> {
         )));
     }
 
-    let vcek_der = response.bytes().await
+    let vcek_der = response
+        .bytes()
+        .await
         .map_err(|e| Error::AttestationVerification(format!("Failed to read VCEK: {}", e)))?
         .to_vec();
 
@@ -125,18 +137,39 @@ pub(super) async fn fetch_cert_chain() -> Result<Vec<u8>> {
 }
 
 /// Parse PEM certificates from the chain.
-fn parse_pem_chain(chain_pem: &[u8]) -> Result<Vec<Vec<u8>>> {
-    let pems = pem::parse_many(chain_pem)
-        .map_err(|e| Error::AttestationVerification(format!("Failed to parse PEM chain: {}", e)))?;
-
-    Ok(pems.into_iter().map(|p| p.contents().to_vec()).collect())
+pub(super) fn parse_pem_chain(chain_pem: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let text = std::str::from_utf8(chain_pem)
+        .map_err(|e| Error::AttestationVerification(format!("Non-UTF8 PEM chain: {e}")))?;
+    let mut rest = text.trim();
+    let mut certs = Vec::new();
+    while !rest.is_empty() {
+        if !rest.starts_with("-----BEGIN CERTIFICATE-----") {
+            return Err(Error::AttestationVerification(
+                "AMD chain contains non-certificate/trailing data".into(),
+            ));
+        }
+        let end = rest.find("-----END CERTIFICATE-----").ok_or_else(|| {
+            Error::AttestationVerification("Unterminated AMD PEM certificate".into())
+        })? + "-----END CERTIFICATE-----".len();
+        let cert = pem::parse(&rest[..end])
+            .map_err(|e| Error::AttestationVerification(format!("AMD PEM: {e}")))?;
+        if cert.contents().is_empty() {
+            return Err(Error::AttestationVerification(
+                "Empty AMD certificate".into(),
+            ));
+        }
+        certs.push(cert.contents().to_vec());
+        rest = rest[end..].trim();
+    }
+    Ok(certs)
 }
 
 /// Compute SPKI fingerprint of a certificate's public key.
-fn compute_spki_fingerprint(cert: &x509_cert::Certificate) -> Result<String> {
+pub(super) fn compute_spki_fingerprint(cert: &x509_cert::Certificate) -> Result<String> {
     use der::Encode;
 
-    let spki_der = cert.tbs_certificate
+    let spki_der = cert
+        .tbs_certificate
         .subject_public_key_info
         .to_der()
         .map_err(|e| Error::AttestationVerification(format!("Failed to encode SPKI: {}", e)))?;
@@ -170,14 +203,11 @@ fn extract_signature_from_cert(cert: &x509_cert::Certificate) -> Vec<u8> {
     cert.signature.raw_bytes().to_vec()
 }
 
-
-
 /// Decode a DER-encoded INTEGER to u8.
-fn decode_der_integer(data: &[u8]) -> Result<u8> {
+pub(super) fn decode_der_integer(data: &[u8]) -> Result<u8> {
     use der::Decode;
-    let uint = der::asn1::UintRef::from_der(data).map_err(|e| {
-        Error::AttestationVerification(format!("Invalid DER INTEGER: {}", e))
-    })?;
+    let uint = der::asn1::UintRef::from_der(data)
+        .map_err(|e| Error::AttestationVerification(format!("Invalid DER INTEGER: {}", e)))?;
     let bytes = uint.as_bytes();
     match bytes.len() {
         0 => Ok(0),
@@ -190,7 +220,7 @@ fn decode_der_integer(data: &[u8]) -> Result<u8> {
 }
 
 /// Extract extension value by OID from VCEK certificate.
-fn get_vcek_extension(
+pub(super) fn get_vcek_extension(
     vcek_der: &[u8],
     target_oid: &const_oid::ObjectIdentifier,
 ) -> Result<Option<Vec<u8>>> {
@@ -200,26 +230,36 @@ fn get_vcek_extension(
     let cert = Certificate::from_der(vcek_der)
         .map_err(|e| Error::AttestationVerification(format!("Failed to parse VCEK: {}", e)))?;
 
+    let mut found = None;
     if let Some(extensions) = &cert.tbs_certificate.extensions {
         for ext in extensions.iter() {
             if ext.extn_id == *target_oid {
-                return Ok(Some(ext.extn_value.as_bytes().to_vec()));
+                if found.is_some() {
+                    return Err(Error::AttestationVerification(format!(
+                        "Duplicate VCEK extension {target_oid}"
+                    )));
+                }
+                found = Some(ext.extn_value.as_bytes().to_vec());
             }
         }
     }
-    Ok(None)
+    Ok(found)
 }
 
 /// Validate VCEK HWID matches report chip_id.
 ///
 /// If maskChipKey is set in the report, chip_id must be all zeros.
 /// Otherwise, HWID from VCEK must match chip_id from report.
-pub(super) fn validate_vcek_hwid(vcek_der: &[u8], chip_id: &[u8], mask_chip_key: bool) -> Result<()> {
+pub(super) fn validate_vcek_hwid(
+    vcek_der: &[u8],
+    chip_id: &[u8],
+    mask_chip_key: bool,
+) -> Result<()> {
     if mask_chip_key {
         // If maskChipKey is set, chip_id must be all zeros
         if chip_id.iter().any(|&b| b != 0) {
             return Err(Error::AttestationVerification(
-                "maskChipKey is set but CHIP_ID is not zeroed".into()
+                "maskChipKey is set but CHIP_ID is not zeroed".into(),
             ));
         }
         return Ok(());
@@ -232,7 +272,8 @@ pub(super) fn validate_vcek_hwid(vcek_der: &[u8], chip_id: &[u8], mask_chip_key:
     // HWID must be exactly 64 bytes
     if hwid.len() != 64 {
         return Err(Error::AttestationVerification(format!(
-            "VCEK HWID length is {}, expected 64 bytes", hwid.len()
+            "VCEK HWID length is {}, expected 64 bytes",
+            hwid.len()
         )));
     }
 
@@ -240,7 +281,8 @@ pub(super) fn validate_vcek_hwid(vcek_der: &[u8], chip_id: &[u8], mask_chip_key:
     if hwid != chip_id {
         return Err(Error::AttestationVerification(format!(
             "VCEK HWID does not match report CHIP_ID: expected {}, got {}",
-            hex::encode(chip_id), hex::encode(&hwid)
+            hex::encode(chip_id),
+            hex::encode(&hwid)
         )));
     }
 
@@ -261,7 +303,8 @@ pub(super) fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> 
     let vcek_bl_val = decode_der_integer(&vcek_bl)?;
     if vcek_bl_val != bl_spl {
         return Err(Error::AttestationVerification(format!(
-            "VCEK BL_SPL ({}) does not match report ({})", vcek_bl_val, bl_spl
+            "VCEK BL_SPL ({}) does not match report ({})",
+            vcek_bl_val, bl_spl
         )));
     }
 
@@ -271,7 +314,8 @@ pub(super) fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> 
     let vcek_tee_val = decode_der_integer(&vcek_tee)?;
     if vcek_tee_val != tee_spl {
         return Err(Error::AttestationVerification(format!(
-            "VCEK TEE_SPL ({}) does not match report ({})", vcek_tee_val, tee_spl
+            "VCEK TEE_SPL ({}) does not match report ({})",
+            vcek_tee_val, tee_spl
         )));
     }
 
@@ -281,7 +325,8 @@ pub(super) fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> 
     let vcek_snp_val = decode_der_integer(&vcek_snp)?;
     if vcek_snp_val != snp_spl {
         return Err(Error::AttestationVerification(format!(
-            "VCEK SNP_SPL ({}) does not match report ({})", vcek_snp_val, snp_spl
+            "VCEK SNP_SPL ({}) does not match report ({})",
+            vcek_snp_val, snp_spl
         )));
     }
 
@@ -291,17 +336,17 @@ pub(super) fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> 
     let vcek_ucode_val = decode_der_integer(&vcek_ucode)?;
     if vcek_ucode_val != ucode_spl {
         return Err(Error::AttestationVerification(format!(
-            "VCEK UCODE_SPL ({}) does not match report ({})", vcek_ucode_val, ucode_spl
+            "VCEK UCODE_SPL ({}) does not match report ({})",
+            vcek_ucode_val, ucode_spl
         )));
     }
 
     // Validate PRODUCT_NAME is "Genoa"
     let vcek_product = get_vcek_extension(vcek_der, &OID_PRODUCT_NAME)?
         .ok_or_else(|| Error::AttestationVerification("Missing PRODUCT_NAME in VCEK".into()))?;
-    let product_name = der::asn1::Ia5StringRef::from_der(&vcek_product)
-        .map_err(|e| {
-            Error::AttestationVerification(format!("Invalid PRODUCT_NAME encoding: {}", e))
-        })?;
+    let product_name = der::asn1::Ia5StringRef::from_der(&vcek_product).map_err(|e| {
+        Error::AttestationVerification(format!("Invalid PRODUCT_NAME encoding: {}", e))
+    })?;
     if product_name.as_str() != "Genoa" {
         return Err(Error::AttestationVerification(format!(
             "VCEK PRODUCT_NAME is not Genoa: {:?}",
@@ -312,7 +357,7 @@ pub(super) fn validate_vcek_extensions(vcek_der: &[u8], reported_tcb: &[u8]) -> 
     // Reject if CSP_ID is present (indicates cloud service provider cert, not chip-specific)
     if get_vcek_extension(vcek_der, &OID_CSP_ID)?.is_some() {
         return Err(Error::AttestationVerification(
-            "VCEK contains unexpected CSP_ID extension".into()
+            "VCEK contains unexpected CSP_ID extension".into(),
         ));
     }
 
@@ -399,8 +444,16 @@ fn validate_basic_constraints(
 /// 5. Validates all certificates are within their validity period
 /// 6. Validates BasicConstraints (ARK/ASK must be CAs, VCEK must not)
 pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -> Result<()> {
-    use x509_cert::Certificate;
+    verify_cert_chain_crypto_for_product(vcek_der, cert_chain_pem, Product::Genoa)
+}
+
+pub(super) fn verify_cert_chain_crypto_for_product(
+    vcek_der: &[u8],
+    cert_chain_pem: &[u8],
+    product: Product,
+) -> Result<()> {
     use der::Decode;
+    use x509_cert::Certificate;
 
     // Parse certificates
     let vcek_cert = Certificate::from_der(vcek_der)
@@ -410,7 +463,7 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
     // Version must be v3
     if vcek_cert.tbs_certificate.version != x509_cert::certificate::Version::V3 {
         return Err(Error::AttestationVerification(
-            "VCEK certificate version is not v3".into()
+            "VCEK certificate version is not v3".into(),
         ));
     }
 
@@ -423,7 +476,8 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
 
     if vcek_spki.algorithm.oid != OID_EC_PUBLIC_KEY {
         return Err(Error::AttestationVerification(format!(
-            "VCEK public key is not EC: {}", vcek_spki.algorithm.oid
+            "VCEK public key is not EC: {}",
+            vcek_spki.algorithm.oid
         )));
     }
 
@@ -434,19 +488,20 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
             .map_err(|_| Error::AttestationVerification("Failed to parse VCEK curve OID".into()))?;
         if curve_oid != OID_SECP384R1 {
             return Err(Error::AttestationVerification(format!(
-                "VCEK public key curve is not P-384: {}", curve_oid
+                "VCEK public key curve is not P-384: {}",
+                curve_oid
             )));
         }
     } else {
         return Err(Error::AttestationVerification(
-            "VCEK public key missing curve parameters".into()
+            "VCEK public key missing curve parameters".into(),
         ));
     }
 
     let chain_certs = parse_pem_chain(cert_chain_pem)?;
-    if chain_certs.len() < 2 {
+    if chain_certs.len() != 2 {
         return Err(Error::AttestationVerification(
-            "Certificate chain should contain ASK and ARK".into()
+            "Certificate chain should contain ASK and ARK".into(),
         ));
     }
 
@@ -459,17 +514,28 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
     let ark_cert = Certificate::from_der(ark_der)
         .map_err(|e| Error::AttestationVerification(format!("Failed to parse ARK: {}", e)))?;
 
+    // Tinfoil Go builds trust from its embedded ASK + ARK. Do not let
+    // document-supplied collateral substitute a different intermediate.
+    let trusted = parse_pem_chain(product.chain())?;
+    let pinned_ask = Certificate::from_der(&trusted[0])
+        .map_err(|e| Error::AttestationVerification(format!("Pinned ASK parse: {e}")))?;
+    if compute_spki_fingerprint(&ask_cert)? != compute_spki_fingerprint(&pinned_ask)? {
+        return Err(Error::AttestationVerification(
+            "ASK differs from pinned AMD product intermediate".into(),
+        ));
+    }
+
     // Validate ARK certificate version (must be v3)
     if ark_cert.tbs_certificate.version != x509_cert::certificate::Version::V3 {
         return Err(Error::AttestationVerification(
-            "ARK certificate version is not v3".into()
+            "ARK certificate version is not v3".into(),
         ));
     }
 
     // Validate ASK certificate version (must be v3)
     if ask_cert.tbs_certificate.version != x509_cert::certificate::Version::V3 {
         return Err(Error::AttestationVerification(
-            "ASK certificate version is not v3".into()
+            "ASK certificate version is not v3".into(),
         ));
     }
 
@@ -486,11 +552,12 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
     // === STEP 1: Verify ARK public key matches pinned fingerprint ===
     // This is the root of trust - if this matches, we know we have AMD's genuine ARK
     let ark_fingerprint = compute_spki_fingerprint(&ark_cert)?;
-    if ark_fingerprint != AMD_ARK_GENOA_SPKI_FINGERPRINT {
+    if ark_fingerprint != product.ark_fingerprint() {
         return Err(Error::AttestationVerification(format!(
             "ARK public key fingerprint mismatch! Expected: {}, Got: {}. \
              This could indicate a MITM attack or AMD has rotated their root key.",
-            AMD_ARK_GENOA_SPKI_FINGERPRINT, ark_fingerprint
+            product.ark_fingerprint(),
+            ark_fingerprint
         )));
     }
 
@@ -504,36 +571,40 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
     // VCEK should be issued by ASK
     if vcek_issuer != ask_subject {
         return Err(Error::AttestationVerification(
-            "VCEK issuer does not match ASK subject".into()
+            "VCEK issuer does not match ASK subject".into(),
         ));
     }
 
     // ASK should be issued by ARK
     if ask_issuer != ark_subject {
         return Err(Error::AttestationVerification(
-            "ASK issuer does not match ARK subject".into()
+            "ASK issuer does not match ARK subject".into(),
         ));
     }
 
     // ARK should be self-signed
     if ark_issuer != ark_subject {
         return Err(Error::AttestationVerification(
-            "ARK is not self-signed".into()
+            "ARK is not self-signed".into(),
         ));
     }
 
     // Verify CN values
     let ark_cn = extract_cn(ark_subject)?;
-    if ark_cn != "ARK-Genoa" {
+    if ark_cn != format!("ARK-{}", product.name()) {
         return Err(Error::AttestationVerification(format!(
-            "Unexpected ARK CN: {}, expected ARK-Genoa", ark_cn
+            "Unexpected ARK CN: {}, expected ARK-{}",
+            ark_cn,
+            product.name()
         )));
     }
 
     let ask_cn = extract_cn(ask_subject)?;
-    if ask_cn != "SEV-Genoa" {
+    if ask_cn != format!("SEV-{}", product.name()) {
         return Err(Error::AttestationVerification(format!(
-            "Unexpected ASK CN: {}, expected SEV-Genoa", ask_cn
+            "Unexpected ASK CN: {}, expected SEV-{}",
+            ask_cn,
+            product.name()
         )));
     }
 
@@ -541,7 +612,8 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
     let vcek_cn = extract_cn(vcek_subject)?;
     if vcek_cn != "SEV-VCEK" {
         return Err(Error::AttestationVerification(format!(
-            "Unexpected VCEK CN: {}, expected SEV-VCEK", vcek_cn
+            "Unexpected VCEK CN: {}, expected SEV-VCEK",
+            vcek_cn
         )));
     }
 
@@ -561,7 +633,13 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
     let ark_tbs = extract_tbs_from_cert(&ark_cert)?;
     let ark_sig = extract_signature_from_cert(&ark_cert);
     let ark_salt = parse_rsa_pss_sha384_salt_len(&ark_cert.signature_algorithm, "ARK")?;
-    verify_rsa_pss_signature(&ark_tbs, &ark_sig, &ark_pubkey, ark_salt, "ARK self-signature")?;
+    verify_rsa_pss_signature(
+        &ark_tbs,
+        &ark_sig,
+        &ark_pubkey,
+        ark_salt,
+        "ARK self-signature",
+    )?;
 
     // === STEP 4: Verify ASK signature against ARK ===
     let ask_tbs = extract_tbs_from_cert(&ask_cert)?;
@@ -574,7 +652,13 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
     let vcek_tbs = extract_tbs_from_cert(&vcek_cert)?;
     let vcek_sig = extract_signature_from_cert(&vcek_cert);
     let vcek_salt = parse_rsa_pss_sha384_salt_len(&vcek_cert.signature_algorithm, "VCEK")?;
-    verify_rsa_pss_signature(&vcek_tbs, &vcek_sig, &ask_pubkey, vcek_salt, "VCEK signature")?;
+    verify_rsa_pss_signature(
+        &vcek_tbs,
+        &vcek_sig,
+        &ask_pubkey,
+        vcek_salt,
+        "VCEK signature",
+    )?;
 
     Ok(())
 }
@@ -628,10 +712,7 @@ fn parse_rsa_pss_sha384_salt_len(
     }
 
     let params_any = alg.parameters.as_ref().ok_or_else(|| {
-        Error::AttestationVerification(format!(
-            "{} RSASSA-PSS parameters are absent",
-            cert_name
-        ))
+        Error::AttestationVerification(format!("{} RSASSA-PSS parameters are absent", cert_name))
     })?;
 
     let params_der = params_any.to_der().map_err(|e| {
@@ -678,22 +759,24 @@ fn verify_rsa_pss_signature(
     salt_len: usize,
     context: &str,
 ) -> Result<()> {
-    use rsa::RsaPublicKey;
+    use rsa::pkcs8::DecodePublicKey;
     use rsa::pss::{Signature, VerifyingKey};
     use rsa::signature::Verifier;
-    use rsa::pkcs8::DecodePublicKey;
+    use rsa::RsaPublicKey;
 
-    let rsa_pubkey = RsaPublicKey::from_public_key_der(signer_spki_der)
-        .map_err(|e| Error::AttestationVerification(format!("Invalid RSA public key for {}: {}", context, e)))?;
+    let rsa_pubkey = RsaPublicKey::from_public_key_der(signer_spki_der).map_err(|e| {
+        Error::AttestationVerification(format!("Invalid RSA public key for {}: {}", context, e))
+    })?;
 
-    let verifying_key: VerifyingKey<Sha384> =
-        VerifyingKey::new_with_salt_len(rsa_pubkey, salt_len);
+    let verifying_key: VerifyingKey<Sha384> = VerifyingKey::new_with_salt_len(rsa_pubkey, salt_len);
 
-    let sig = Signature::try_from(signature)
-        .map_err(|e| Error::AttestationVerification(format!("Invalid signature format for {}: {}", context, e)))?;
+    let sig = Signature::try_from(signature).map_err(|e| {
+        Error::AttestationVerification(format!("Invalid signature format for {}: {}", context, e))
+    })?;
 
-    verifying_key.verify(tbs_der, &sig)
-        .map_err(|e| Error::AttestationVerification(format!("{} verification failed: {}", context, e)))?;
+    verifying_key.verify(tbs_der, &sig).map_err(|e| {
+        Error::AttestationVerification(format!("{} verification failed: {}", context, e))
+    })?;
 
     Ok(())
 }
@@ -787,7 +870,13 @@ fn validate_amd_location(name: &x509_cert::name::Name, cert_name: &str) -> Resul
     require_name_attr(name, &C, cert_name, "country", "US")?;
     require_name_attr(name, &ST, cert_name, "state", "CA")?;
     require_name_attr(name, &L, cert_name, "locality", "Santa Clara")?;
-    require_name_attr(name, &O, cert_name, "organization", "Advanced Micro Devices")?;
+    require_name_attr(
+        name,
+        &O,
+        cert_name,
+        "organization",
+        "Advanced Micro Devices",
+    )?;
     require_name_attr(name, &OU, cert_name, "organizational unit", "Engineering")?;
     Ok(())
 }
@@ -798,4 +887,242 @@ fn extract_cn(name: &x509_cert::name::Name) -> Result<String> {
 
     extract_name_attr(name, &CN)
         .ok_or_else(|| Error::AttestationVerification("No CN found in certificate".into()))?
+}
+
+/// Parse AMD's KDS extensions using the report-selected product layout.
+/// As in go-sev-guest, v3+ signed CPUID supersedes PRODUCT_NAME (AMD has
+/// shipped mislabelled product strings); the extension must still be IA5.
+pub(super) fn vcek_tcb_for_product(vcek: &[u8], product: Product) -> Result<Tcb> {
+    let cert = x509_cert::Certificate::from_der(vcek)
+        .map_err(|e| Error::AttestationVerification(format!("VCEK parse: {e}")))?;
+    let mut seen = std::collections::HashSet::new();
+    for ext in cert.tbs_certificate.extensions.as_deref().unwrap_or(&[]) {
+        let oid = ext.extn_id.to_string();
+        if !seen.insert(oid.clone()) {
+            return Err(Error::AttestationVerification(
+                "Duplicate VCEK extension".into(),
+            ));
+        }
+        let known = oid == "2.5.29.35"
+            || [
+                OID_STRUCT_VERSION,
+                OID_PRODUCT_NAME,
+                OID_BL_SPL,
+                OID_TEE_SPL,
+                OID_SNP_SPL,
+                OID_UCODE_SPL,
+                OID_FMC_SPL,
+                OID_HWID,
+                OID_CSP_ID,
+            ]
+            .contains(&ext.extn_id)
+            || (4..=7).any(|n| oid == format!("1.3.6.1.4.1.3704.1.3.{n}"));
+        if !known {
+            return Err(Error::AttestationVerification(format!(
+                "Unsupported VCEK extension {oid}"
+            )));
+        }
+    }
+    let read = |oid: &const_oid::ObjectIdentifier| -> Result<u8> {
+        let data = get_vcek_extension(vcek, oid)?.ok_or_else(|| {
+            Error::AttestationVerification(format!("Missing VCEK extension {oid}"))
+        })?;
+        decode_der_integer(&data)
+    };
+    if read(&OID_STRUCT_VERSION)? != product.struct_version() {
+        return Err(Error::AttestationVerification(
+            "VCEK structure version and signed CPUID product use different TCB layouts".into(),
+        ));
+    }
+    let product_name = get_vcek_extension(vcek, &OID_PRODUCT_NAME)?
+        .ok_or_else(|| Error::AttestationVerification("Missing PRODUCT_NAME in VCEK".into()))?;
+    der::asn1::Ia5StringRef::from_der(&product_name)
+        .map_err(|e| Error::AttestationVerification(format!("Invalid PRODUCT_NAME: {e}")))?;
+    if get_vcek_extension(vcek, &OID_CSP_ID)?.is_some() {
+        return Err(Error::AttestationVerification(
+            "VCEK carries unexpected CSP_ID".into(),
+        ));
+    }
+    // Reserved SPLs must be present and zero, matching AMD's KDS schema.
+    for n in 4..=7 {
+        let oid = const_oid::ObjectIdentifier::new(&format!("1.3.6.1.4.1.3704.1.3.{n}"))
+            .map_err(|e| Error::AttestationVerification(format!("SPL OID: {e}")))?;
+        if n == 4 && product == Product::Turin {
+            if get_vcek_extension(vcek, &oid)?.is_some() {
+                return Err(Error::AttestationVerification(
+                    "Turin VCEK carries legacy SPL4".into(),
+                ));
+            }
+        } else if read(&oid)? != 0 {
+            return Err(Error::AttestationVerification(
+                "VCEK reserved SPL is nonzero".into(),
+            ));
+        }
+    }
+    let fmc = if product == Product::Turin {
+        Some(read(&OID_FMC_SPL)?)
+    } else {
+        if get_vcek_extension(vcek, &OID_FMC_SPL)?.is_some() {
+            return Err(Error::AttestationVerification(
+                "Genoa VCEK carries Turin FMC extension".into(),
+            ));
+        }
+        None
+    };
+    let value = Tcb {
+        fmc,
+        bl: read(&OID_BL_SPL)?,
+        tee: read(&OID_TEE_SPL)?,
+        snp: read(&OID_SNP_SPL)?,
+        ucode: read(&OID_UCODE_SPL)?,
+    };
+    if [value.fmc.unwrap_or(0), value.bl, value.tee, value.snp]
+        .iter()
+        .any(|n| *n > 127)
+    {
+        return Err(Error::AttestationVerification(
+            "VCEK SPL exceeds AMD 7-bit range".into(),
+        ));
+    }
+    Ok(value)
+}
+
+pub(super) fn validate_vcek_hwid_for_product(
+    vcek: &[u8],
+    chip_id: &[u8],
+    product: Product,
+) -> Result<()> {
+    let hwid = get_vcek_extension(vcek, &OID_HWID)?
+        .ok_or_else(|| Error::AttestationVerification("Missing VCEK HWID".into()))?;
+    let n = product.hwid_len();
+    // AMD encodes HWID as raw bytes; go-sev-guest also accepts OCTET STRING.
+    let hwid = if hwid.len() == n {
+        hwid
+    } else {
+        der::asn1::OctetStringRef::from_der(&hwid)
+            .map_err(|e| Error::AttestationVerification(format!("Invalid VCEK HWID: {e}")))?
+            .as_bytes()
+            .to_vec()
+    };
+    if hwid.len() != n || chip_id.len() != CHIP_ID_SIZE || hwid != chip_id[..n] {
+        return Err(Error::AttestationVerification(
+            "VCEK HWID does not match signed report CHIP_ID/product".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// AMD's product CRL revokes ASK certificates. VCEK revocation is represented
+/// by TCB updates, exactly as in go-sev-guest verifyCRL. No network or mutable
+/// cross-verification cache is used in the V3 path.
+pub(super) fn verify_crl(crl_der: &[u8], chain_pem: &[u8]) -> Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| Error::AttestationVerification("Clock precedes Unix epoch".into()))?
+        .as_secs();
+    verify_crl_at(crl_der, chain_pem, now)
+}
+
+// Private implementation only: production callers cannot override appraisal
+// time or trust roots. Unit tests advance the clock over a signed public CRL.
+fn verify_crl_at(crl_der: &[u8], chain_pem: &[u8], now: u64) -> Result<()> {
+    use der::Encode;
+    use x509_cert::{crl::CertificateList, Certificate};
+    if crl_der.is_empty() {
+        return Err(Error::AttestationVerification("Empty AMD CRL".into()));
+    }
+    let chain = parse_pem_chain(chain_pem)?;
+    if chain.len() != 2 {
+        return Err(Error::AttestationVerification(
+            "AMD chain must contain exactly ASK and ARK".into(),
+        ));
+    }
+    let ask = Certificate::from_der(&chain[0])
+        .map_err(|e| Error::AttestationVerification(format!("ASK parse: {e}")))?;
+    let ark = Certificate::from_der(&chain[1])
+        .map_err(|e| Error::AttestationVerification(format!("ARK parse: {e}")))?;
+    let crl = CertificateList::from_der(crl_der)
+        .map_err(|e| Error::AttestationVerification(format!("AMD CRL parse: {e}")))?;
+    if crl.tbs_cert_list.issuer != ark.tbs_certificate.subject
+        || crl.signature_algorithm != crl.tbs_cert_list.signature
+    {
+        return Err(Error::AttestationVerification(
+            "AMD CRL issuer/signature algorithm mismatch".into(),
+        ));
+    }
+    let salt_len = parse_rsa_pss_sha384_salt_len(&crl.signature_algorithm, "AMD CRL")?;
+    let tbs = crl
+        .tbs_cert_list
+        .to_der()
+        .map_err(|e| Error::AttestationVerification(format!("AMD CRL TBS: {e}")))?;
+    verify_rsa_pss_signature(
+        &tbs,
+        crl.signature.raw_bytes(),
+        &extract_pubkey_from_cert(&ark)?,
+        salt_len,
+        "AMD CRL",
+    )?;
+    let next = crl
+        .tbs_cert_list
+        .next_update
+        .ok_or_else(|| Error::AttestationVerification("AMD CRL missing nextUpdate".into()))?;
+    if now < crl.tbs_cert_list.this_update.to_unix_duration().as_secs()
+        || now > next.to_unix_duration().as_secs()
+    {
+        return Err(Error::AttestationVerification(
+            "AMD CRL is outside its validity window".into(),
+        ));
+    }
+    if crl
+        .tbs_cert_list
+        .revoked_certificates
+        .as_ref()
+        .is_some_and(|list| {
+            list.iter()
+                .any(|entry| entry.serial_number == ask.tbs_certificate.serial_number)
+        })
+    {
+        return Err(Error::AttestationVerification("AMD ASK is revoked".into()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod v3_collateral_tests {
+    use super::*;
+    use x509_cert::crl::CertificateList;
+    const CRL: &[u8] = include_bytes!("testdata/turin-amd-crl.der");
+    #[test]
+    fn public_amd_crl_signature_product_and_validity_window() {
+        let parsed = CertificateList::from_der(CRL).unwrap();
+        let start = parsed
+            .tbs_cert_list
+            .this_update
+            .to_unix_duration()
+            .as_secs();
+        let end = parsed
+            .tbs_cert_list
+            .next_update
+            .unwrap()
+            .to_unix_duration()
+            .as_secs();
+        verify_crl_at(CRL, Product::Turin.chain(), start + 1).unwrap();
+        assert!(verify_crl_at(CRL, Product::Turin.chain(), start - 1)
+            .unwrap_err()
+            .to_string()
+            .contains("validity window"));
+        assert!(verify_crl_at(CRL, Product::Turin.chain(), end + 1)
+            .unwrap_err()
+            .to_string()
+            .contains("validity window"));
+        assert!(verify_crl_at(CRL, Product::Genoa.chain(), start + 1).is_err());
+        let mut tampered = CRL.to_vec();
+        let n = tampered.len();
+        tampered[n - 1] ^= 1;
+        assert!(verify_crl_at(&tampered, Product::Turin.chain(), start + 1)
+            .unwrap_err()
+            .to_string()
+            .contains("verification failed"));
+    }
 }

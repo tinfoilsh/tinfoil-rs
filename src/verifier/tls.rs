@@ -3,40 +3,45 @@
 //! Tinfoil computes fingerprints by hashing the full SPKI (SubjectPublicKeyInfo)
 //! DER encoding, not just the raw public key bytes.
 
-use rustls::pki_types::CertificateDer;
-use sha2::{Sha256, Digest};
 use der::Encode;
-use std::sync::Arc;
+use rustls::pki_types::CertificateDer;
+use sha2::{Digest, Sha256};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::{Instant, SystemTime};
 
 use crate::error::{Error, Result};
 
 /// Compute SHA256 fingerprint of a certificate's public key
-/// 
+///
 /// This hashes the full SPKI (SubjectPublicKeyInfo) in DER format,
 /// which matches how Tinfoil and OpenSSL compute public key fingerprints.
 pub fn cert_pubkey_fingerprint(cert_der: &CertificateDer<'_>) -> Result<String> {
-    use x509_cert::Certificate;
     use der::Decode;
-    
+    use x509_cert::Certificate;
+
     // Parse the X.509 certificate
     let cert = Certificate::from_der(cert_der.as_ref())
         .map_err(|e| Error::Tls(format!("Failed to parse certificate: {}", e)))?;
-    
+
     // Encode the full SPKI to DER
     // This includes: algorithm identifier + public key bits
-    let spki_der = cert.tbs_certificate
+    let spki_der = cert
+        .tbs_certificate
         .subject_public_key_info
         .to_der()
         .map_err(|e| Error::Tls(format!("Failed to encode SPKI: {}", e)))?;
-    
+
     // Hash the SPKI DER
     let hash = Sha256::digest(&spki_der);
-    
+
     Ok(hex::encode(hash))
 }
 
 /// Custom certificate verifier that pins to a specific public key fingerprint
-/// 
+///
 /// This verifier:
 /// 1. First validates the certificate chain normally (CA signatures, expiry, etc.)
 /// 2. Then checks that the server cert's SPKI fingerprint matches the pinned value
@@ -45,6 +50,7 @@ pub struct PinnedCertVerifier {
     /// The expected SPKI fingerprint (hex-encoded SHA256)
     pinned_fingerprint: String,
     expected_server_name: Option<rustls::pki_types::ServerName<'static>>,
+    freshness: Option<Arc<AttestationFreshness>>,
     /// Standard certificate verifier for chain validation
     inner: Arc<rustls::client::WebPkiServerVerifier>,
 }
@@ -55,14 +61,15 @@ impl PinnedCertVerifier {
         let root_store = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
-        
+
         let inner = rustls::client::WebPkiServerVerifier::builder(Arc::new(root_store))
             .build()
             .map_err(|e| Error::Tls(format!("Failed to build verifier: {}", e)))?;
-        
+
         Ok(Self {
             pinned_fingerprint,
             expected_server_name: None,
+            freshness: None,
             inner,
         })
     }
@@ -85,6 +92,11 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
         ocsp_response: &[u8],
         now: rustls::pki_types::UnixTime,
     ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if let Some(freshness) = &self.freshness {
+            freshness
+                .check()
+                .map_err(|error| rustls::Error::General(error.to_string()))?;
+        }
         if let Some(expected) = &self.expected_server_name {
             if server_name != expected {
                 return Err(rustls::Error::General(
@@ -101,21 +113,22 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
             ocsp_response,
             now,
         )?;
-        
+
         // Then verify the fingerprint matches our pinned value
-        let actual_fingerprint = cert_pubkey_fingerprint(end_entity)
-            .map_err(|e| rustls::Error::General(format!("Fingerprint computation failed: {}", e)))?;
-        
+        let actual_fingerprint = cert_pubkey_fingerprint(end_entity).map_err(|e| {
+            rustls::Error::General(format!("Fingerprint computation failed: {}", e))
+        })?;
+
         if actual_fingerprint != self.pinned_fingerprint {
             return Err(rustls::Error::General(format!(
                 "Certificate fingerprint mismatch: expected {}, got {}",
                 self.pinned_fingerprint, actual_fingerprint
             )));
         }
-        
+
         Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
-    
+
     fn verify_tls12_signature(
         &self,
         message: &[u8],
@@ -124,7 +137,7 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         self.inner.verify_tls12_signature(message, cert, dss)
     }
-    
+
     fn verify_tls13_signature(
         &self,
         message: &[u8],
@@ -133,14 +146,14 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         self.inner.verify_tls13_signature(message, cert, dss)
     }
-    
+
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.inner.supported_verify_schemes()
     }
 }
 
 /// Create a reqwest client with certificate pinning
-/// 
+///
 /// This client will reject any connection where the server's certificate
 /// public key fingerprint doesn't match the pinned value.
 pub fn create_pinned_client(pinned_fingerprint: &str) -> Result<reqwest::Client> {
@@ -153,10 +166,76 @@ pub(crate) struct HostBoundPinnedClient {
     pub(crate) exposed: OriginBoundClient,
 }
 
+impl HostBoundPinnedClient {
+    pub(crate) fn is_current(&self) -> bool {
+        self.exposed.ensure_current().is_ok()
+    }
+
+    pub(crate) fn freshness_expires_at(&self) -> Option<SystemTime> {
+        self.exposed
+            .freshness
+            .as_ref()
+            .map(|freshness| freshness.expires_at)
+    }
+
+    pub(crate) fn revoke(&self) {
+        if let Some(freshness) = &self.exposed.freshness {
+            freshness.revoked.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// A verified direct attestation has a hard lifetime, including on a pooled
+/// TLS connection. Cloned clients/builders share revocation. Checking both
+/// clocks prevents a wall-clock rollback from extending the approved lifetime.
+#[derive(Debug)]
+struct AttestationFreshness {
+    expires_at: SystemTime,
+    monotonic_deadline: Instant,
+    revoked: AtomicBool,
+}
+
+impl AttestationFreshness {
+    fn new(expires_at: SystemTime) -> Result<Self> {
+        let remaining = expires_at.duration_since(SystemTime::now()).map_err(|_| {
+            Error::AttestationVerification(
+                "Direct attestation freshness has expired; re-verify the enclave".into(),
+            )
+        })?;
+        let monotonic_deadline = Instant::now().checked_add(remaining).ok_or_else(|| {
+            Error::AttestationVerification(
+                "Direct attestation freshness deadline is out of range".into(),
+            )
+        })?;
+        let state = Self {
+            expires_at,
+            monotonic_deadline,
+            revoked: AtomicBool::new(false),
+        };
+        state.check()?;
+        Ok(state)
+    }
+
+    fn check(&self) -> Result<()> {
+        if self.revoked.load(Ordering::Acquire) {
+            return Err(Error::AttestationVerification(
+                "Direct attestation was revoked; re-verify the enclave".into(),
+            ));
+        }
+        if SystemTime::now() >= self.expires_at || Instant::now() >= self.monotonic_deadline {
+            return Err(Error::AttestationVerification(
+                "Direct attestation freshness has expired; re-verify the enclave".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// HTTP client that rejects requests outside one verified enclave origin.
 #[derive(Clone)]
 pub struct OriginBoundClient {
     inner: reqwest_middleware::ClientWithMiddleware,
+    freshness: Option<Arc<AttestationFreshness>>,
 }
 
 impl OriginBoundClient {
@@ -164,13 +243,50 @@ impl OriginBoundClient {
     pub(crate) fn unbound_for_test(transport: reqwest::Client) -> Self {
         Self {
             inner: reqwest_middleware::ClientBuilder::new(transport).build(),
+            freshness: None,
         }
     }
 
-    fn wrap(
-        &self,
-        inner: reqwest_middleware::RequestBuilder,
-    ) -> OriginBoundRequestBuilder {
+    pub(crate) fn ensure_current(&self) -> Result<()> {
+        if let Some(freshness) = &self.freshness {
+            freshness.check()?;
+        }
+        Ok(())
+    }
+
+    fn check_dispatch(&self) -> reqwest_middleware::Result<()> {
+        self.ensure_current()
+            .map_err(reqwest_middleware::Error::middleware)
+    }
+
+    fn from_verified_transport(
+        transport: reqwest::Client,
+        expected_origin: String,
+        freshness: Option<Arc<AttestationFreshness>>,
+    ) -> Self {
+        let inner = reqwest_middleware::ClientBuilder::new(transport)
+            .with(OriginBindingMiddleware {
+                expected_origin,
+                freshness: freshness.clone(),
+            })
+            .build();
+        Self { inner, freshness }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bound_with_expiry_for_test(
+        transport: reqwest::Client,
+        expected_origin: reqwest::Url,
+        expires_at: SystemTime,
+    ) -> Result<Self> {
+        Ok(Self::from_verified_transport(
+            transport,
+            expected_origin.origin().ascii_serialization(),
+            Some(Arc::new(AttestationFreshness::new(expires_at)?)),
+        ))
+    }
+
+    fn wrap(&self, inner: reqwest_middleware::RequestBuilder) -> OriginBoundRequestBuilder {
         OriginBoundRequestBuilder {
             inner,
             client: self.clone(),
@@ -213,6 +329,7 @@ impl OriginBoundClient {
         &self,
         request: reqwest::Request,
     ) -> reqwest_middleware::Result<reqwest::Response> {
+        self.check_dispatch()?;
         self.inner.execute(request).await
     }
 }
@@ -326,6 +443,7 @@ impl OriginBoundRequestBuilder {
     }
 
     pub async fn send(self) -> reqwest_middleware::Result<reqwest::Response> {
+        self.client.check_dispatch()?;
         self.inner.send().await
     }
 
@@ -345,6 +463,7 @@ impl std::fmt::Debug for OriginBoundRequestBuilder {
 
 struct OriginBindingMiddleware {
     expected_origin: String,
+    freshness: Option<Arc<AttestationFreshness>>,
 }
 
 #[async_trait::async_trait]
@@ -355,13 +474,16 @@ impl reqwest_middleware::Middleware for OriginBindingMiddleware {
         extensions: &mut http::Extensions,
         next: reqwest_middleware::Next<'_>,
     ) -> reqwest_middleware::Result<reqwest::Response> {
+        if let Some(freshness) = &self.freshness {
+            freshness
+                .check()
+                .map_err(reqwest_middleware::Error::middleware)?;
+        }
         if !request_origin_matches(&self.expected_origin, request.url()) {
-            return Err(reqwest_middleware::Error::middleware(
-                std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "request origin is outside the verified enclave origin",
-                ),
-            ));
+            return Err(reqwest_middleware::Error::middleware(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "request origin is outside the verified enclave origin",
+            )));
         }
         next.run(request, extensions).await
     }
@@ -371,29 +493,49 @@ pub(crate) fn create_host_bound_pinned_client(
     pinned_fingerprint: &str,
     expected_origin: reqwest::Url,
 ) -> Result<HostBoundPinnedClient> {
+    create_host_bound_pinned_client_inner(pinned_fingerprint, expected_origin, None)
+}
+
+/// Build a direct-mode transport with shared, revocable attestation freshness.
+pub(crate) fn create_host_bound_pinned_client_with_expiry(
+    pinned_fingerprint: &str,
+    expected_origin: reqwest::Url,
+    expires_at: SystemTime,
+) -> Result<HostBoundPinnedClient> {
+    let freshness = Arc::new(AttestationFreshness::new(expires_at)?);
+    create_host_bound_pinned_client_inner(pinned_fingerprint, expected_origin, Some(freshness))
+}
+
+fn create_host_bound_pinned_client_inner(
+    pinned_fingerprint: &str,
+    expected_origin: reqwest::Url,
+    freshness: Option<Arc<AttestationFreshness>>,
+) -> Result<HostBoundPinnedClient> {
     let expected_server_name = server_name_from_origin(&expected_origin)?;
     let expected_origin = expected_origin.origin().ascii_serialization();
     let redirect_origin = expected_origin.clone();
+    let redirect_freshness = freshness.clone();
     let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+        if let Some(freshness) = &redirect_freshness {
+            if freshness.check().is_err() {
+                return attempt.error("direct attestation freshness expired or was revoked");
+            }
+        }
         if request_origin_matches(&redirect_origin, attempt.url()) {
             attempt.follow()
         } else {
             attempt.error("redirect target is outside the verified enclave origin")
         }
     });
-    let transport = build_pinned_client(
+    let transport = build_pinned_client_inner(
         pinned_fingerprint,
         Some(expected_server_name),
         Some(redirect_policy),
+        freshness.clone(),
     )?;
-    let exposed_transport = transport.clone();
-    let exposed = reqwest_middleware::ClientBuilder::new(exposed_transport)
-        .with(OriginBindingMiddleware { expected_origin })
-        .build();
-    Ok(HostBoundPinnedClient {
-        transport,
-        exposed: OriginBoundClient { inner: exposed },
-    })
+    let exposed =
+        OriginBoundClient::from_verified_transport(transport.clone(), expected_origin, freshness);
+    Ok(HostBoundPinnedClient { transport, exposed })
 }
 
 fn request_origin_matches(expected_origin: &str, request_url: &reqwest::Url) -> bool {
@@ -420,37 +562,172 @@ fn build_pinned_client(
     expected_server_name: Option<rustls::pki_types::ServerName<'static>>,
     redirect_policy: Option<reqwest::redirect::Policy>,
 ) -> Result<reqwest::Client> {
+    build_pinned_client_inner(
+        pinned_fingerprint,
+        expected_server_name,
+        redirect_policy,
+        None,
+    )
+}
+
+fn build_pinned_client_inner(
+    pinned_fingerprint: &str,
+    expected_server_name: Option<rustls::pki_types::ServerName<'static>>,
+    redirect_policy: Option<reqwest::redirect::Policy>,
+    freshness: Option<Arc<AttestationFreshness>>,
+) -> Result<reqwest::Client> {
     crate::ensure_crypto_provider();
 
+    let direct = freshness.is_some();
     // Create pinned verifier
     let mut verifier = PinnedCertVerifier::new(pinned_fingerprint.to_string())?;
+    verifier.freshness = freshness;
     if let Some(expected) = expected_server_name {
         verifier = verifier.with_server_name(expected);
     }
-    
+
     // Build rustls config with our custom verifier
     let config = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_no_client_auth();
-    
+
     // Build reqwest client with this config
     let mut builder = reqwest::Client::builder()
         .use_preconfigured_tls(config)
         .https_only(true);
+    if direct {
+        builder = builder.no_proxy();
+    }
     if let Some(policy) = redirect_policy {
         builder = builder.redirect(policy);
     }
     let client = builder
         .build()
         .map_err(|e| Error::Tls(format!("Failed to build HTTP client: {}", e)))?;
-    
+
     Ok(client)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn direct_transport_rejects_already_expired_attestation() {
+        let result = create_host_bound_pinned_client_with_expiry(
+            &"0".repeat(64),
+            reqwest::Url::parse("https://enclave.test.invalid").unwrap(),
+            SystemTime::now() - Duration::from_secs(1),
+        );
+        assert!(
+            matches!(result, Err(Error::AttestationVerification(message)) if message.contains("expired"))
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_expiry_blocks_cloned_builders_and_split_requests() {
+        crate::ensure_crypto_provider();
+        let transport = reqwest::Client::new();
+        let origin = reqwest::Url::parse("http://127.0.0.1:9").unwrap();
+        let client = OriginBoundClient::bound_with_expiry_for_test(
+            transport,
+            origin.clone(),
+            SystemTime::now() + Duration::from_millis(50),
+        )
+        .unwrap();
+        let builder = client
+            .post(origin.clone())
+            .bearer_auth("synthetic-test-key");
+        let cloned_builder = builder.try_clone().unwrap();
+        let (split_client, request) = builder.build_split();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        for error in [
+            cloned_builder.send().await.unwrap_err(),
+            split_client.execute(request.unwrap()).await.unwrap_err(),
+            client.get(origin).send().await.unwrap_err(),
+        ] {
+            assert!(error.is_middleware());
+            assert!(error.to_string().contains("freshness has expired"));
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_revocation_blocks_previously_cloned_transport() {
+        let client = create_host_bound_pinned_client_with_expiry(
+            &"0".repeat(64),
+            reqwest::Url::parse("https://127.0.0.1:9").unwrap(),
+            SystemTime::now() + Duration::from_secs(60),
+        )
+        .unwrap();
+        let escaped = client.exposed.clone();
+        let builder = escaped.post("https://127.0.0.1:9/v1/chat/completions");
+        assert!(client.is_current());
+        client.revoke();
+        assert!(!client.is_current());
+        let error = builder.send().await.unwrap_err();
+        assert!(error.is_middleware());
+        assert!(error.to_string().contains("was revoked"));
+    }
+
+    #[tokio::test]
+    async fn direct_expiry_blocks_dispatch_even_with_an_available_pooled_connection() {
+        crate::ensure_crypto_provider();
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            loop {
+                let mut bytes = Vec::new();
+                while !bytes.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0u8; 1];
+                    if socket.read(&mut byte).await.unwrap() == 0 {
+                        return;
+                    }
+                    bytes.push(byte[0]);
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nOK",
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let origin = reqwest::Url::parse(&format!("http://{address}")).unwrap();
+        let client = OriginBoundClient::bound_with_expiry_for_test(
+            reqwest::Client::new(),
+            origin.clone(),
+            SystemTime::now() + Duration::from_millis(250),
+        )
+        .unwrap();
+        assert_eq!(
+            client
+                .get(origin.clone())
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+            "OK"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        tokio::time::sleep(Duration::from_millis(280)).await;
+        let error = client.clone().get(origin).send().await.unwrap_err();
+        assert!(error.to_string().contains("freshness has expired"));
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "expired request reached the existing connection"
+        );
+        server.abort();
+    }
 
     /// AMD Genoa ASK certificate in DER format (first cert from genoa_cert_chain.pem).
     /// This is used to test fingerprint computation with a real certificate.
@@ -511,7 +788,9 @@ jaDTSFaq1NIwodHp7X9fOG48uRuJWS8GmifD969sC4Ut2FJFoklceBVUNCHR
 
         // Should be lowercase hex only
         assert!(
-            fingerprint.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            fingerprint
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "Fingerprint should be lowercase hex"
         );
     }
@@ -536,7 +815,10 @@ jaDTSFaq1NIwodHp7X9fOG48uRuJWS8GmifD969sC4Ut2FJFoklceBVUNCHR
 
         let result = cert_pubkey_fingerprint(&cert);
         assert!(result.is_err(), "Invalid DER should fail");
-        assert!(result.unwrap_err().to_string().contains("Failed to parse certificate"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to parse certificate"));
     }
 
     #[tokio::test]
@@ -554,7 +836,10 @@ jaDTSFaq1NIwodHp7X9fOG48uRuJWS8GmifD969sC4Ut2FJFoklceBVUNCHR
 
         let fingerprint = "0".repeat(64); // Valid format but won't match any real cert
         let result = PinnedCertVerifier::new(fingerprint);
-        assert!(result.is_ok(), "Creating PinnedCertVerifier with valid fingerprint should succeed");
+        assert!(
+            result.is_ok(),
+            "Creating PinnedCertVerifier with valid fingerprint should succeed"
+        );
     }
 
     #[test]
@@ -641,7 +926,8 @@ jaDTSFaq1NIwodHp7X9fOG48uRuJWS8GmifD969sC4Ut2FJFoklceBVUNCHR
             .json(&serde_json::json!({"model": "m"}))
             .build_split();
         let mut request = request.unwrap();
-        *request.url_mut() = reqwest::Url::parse("https://127.0.0.1:9/v1/chat/completions").unwrap();
+        *request.url_mut() =
+            reqwest::Url::parse("https://127.0.0.1:9/v1/chat/completions").unwrap();
 
         let error = client.execute(request).await.unwrap_err();
         assert!(error.is_middleware());

@@ -42,7 +42,7 @@ const SDK_VERSION_HEADER: &str = "tinfoil-sdk-version";
 const SDK_NAME: &str = "tinfoil-rs";
 const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-fn attestation_headers() -> reqwest::header::HeaderMap {
+pub(crate) fn attestation_headers() -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         SDK_NAME_HEADER,
