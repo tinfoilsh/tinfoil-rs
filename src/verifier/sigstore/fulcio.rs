@@ -159,8 +159,7 @@ pub(super) fn verify_issued_by(
         .and_then(|p| p.decode_as::<der::asn1::ObjectIdentifier>().ok())
         .map(|oid| oid.to_string());
 
-    // The hash is named by the child's signature algorithm, not the issuer's curve
-    // (e.g. a P-256 CA may sign with ecdsa-with-SHA384).
+    // Hash per the child's signature algorithm, not the issuer's curve (P-256 CAs can use SHA-384).
     let digest: Vec<u8> = match child.signature_algorithm.oid.to_string().as_str() {
         OID_ECDSA_SHA256 => sha2::Sha256::digest(&tbs_bytes).to_vec(),
         OID_ECDSA_SHA384 => sha2::Sha384::digest(&tbs_bytes).to_vec(),

@@ -230,19 +230,7 @@ pub fn load_ctlog_keyring() -> Result<Keyring> {
             Error::SigstoreVerification(format!("Failed to decode CT log key: {}", e))
         })?;
 
-        // Parse validity period from the trust root
-        let (valid_from, valid_until) = match &ctlog.public_key.valid_for {
-            Some(vf) => {
-                let from = parse_rfc3339_to_unix(&vf.start)?;
-                let until = vf
-                    .end
-                    .as_ref()
-                    .map(|e| parse_rfc3339_to_unix(e))
-                    .transpose()?;
-                (Some(from), until)
-            }
-            None => (None, None),
-        };
+        let (valid_from, valid_until) = parse_validity(&ctlog.public_key.valid_for)?;
 
         keys_with_validity.push((public_key_der, valid_from, valid_until));
     }
@@ -269,18 +257,7 @@ pub fn load_ctlog_keyring_from_json(json: &str) -> Result<Keyring> {
             Error::SigstoreVerification(format!("Failed to decode CT log key: {}", e))
         })?;
 
-        let (valid_from, valid_until) = match &ctlog.public_key.valid_for {
-            Some(vf) => {
-                let from = parse_rfc3339_to_unix(&vf.start)?;
-                let until = vf
-                    .end
-                    .as_ref()
-                    .map(|e| parse_rfc3339_to_unix(e))
-                    .transpose()?;
-                (Some(from), until)
-            }
-            None => (None, None),
-        };
+        let (valid_from, valid_until) = parse_validity(&ctlog.public_key.valid_for)?;
 
         keys_with_validity.push((public_key_der, valid_from, valid_until));
     }

@@ -117,13 +117,9 @@ impl SignedCheckpoint {
         format!("{note}{empty_line}{signatures}")
     }
 
-    /// Verify that at least one of the checkpoint's signatures is valid.
-    /// The signed message is the marshaled note body (which already ends with a newline).
-    ///
-    /// Only signature lines whose name is `name` (the log's hostname) and whose
-    /// 4-byte key hint is the prefix of `log_id` are considered, matching the
-    /// sumdb-note verifier semantics sigstore-go uses. Other lines (witness
-    /// cosignatures, unknown keys) are ignored.
+    /// Verify a checkpoint signature line named `name` (the log's hostname)
+    /// whose 4-byte key hint is the `log_id` prefix; other lines (witness
+    /// cosignatures) are ignored, as in sumdb note verification.
     pub fn verify_signature(
         &self,
         key_der: &[u8],

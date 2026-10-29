@@ -14,23 +14,12 @@ use crate::verifier::util::decode_b64;
 use digest::Output;
 use sha2::{Digest, Sha256};
 
-/// Verify Rekor transparency log entry with full cryptographic verification,
-/// using the embedded trust root.
-///
-/// This verifies:
-/// 1. The tlog entry exists in the bundle (no duplicates)
-/// 2. An observer timestamp binds the signature to a time inside the
-///    certificate's validity window: `integratedTime` for Rekor v1 entries
-///    (dsse/hashedrekord 0.0.1), a verified RFC 3161 timestamp for Rekor v2
-///    entries (hashedrekord 0.0.2, which carry no integratedTime)
-/// 3. The checkpoint signature is valid (signed by Rekor's key, under the
-///    log's name and key hint)
-/// 4. The inclusion proof is valid (Merkle path from leaf to root)
-/// 5. The entry body kind/version matches the metadata
-/// 6. The certificate in the bundle matches the one in the Rekor entry
-/// 7. The signature in the bundle matches the one in the Rekor entry
-/// 8. The payload hash in the Rekor entry matches the DSSE payload (v1 dsse)
-///    or the DSSE PAE (v2 hashedrekord)
+/// Verify the bundle's Rekor entry with the embedded trust root: exactly one
+/// entry; an observer timestamp inside the cert validity (SET-signed
+/// `integratedTime` for v1 dsse/hashedrekord 0.0.1, RFC 3161 for v2
+/// hashedrekord 0.0.2); checkpoint signature by the log's key under its name
+/// and key hint; Merkle inclusion; body kind/version, certificate, signature
+/// and payload (v1) or PAE (v2) digest bound to the bundle.
 pub fn verify_rekor_entry(
     bundle: &serde_json::Value,
     cert_not_before: u64,
@@ -80,15 +69,11 @@ pub fn verify_rekor_entry_with_trust(
         Error::SigstoreVerification(format!("Failed to decode canonicalizedBody: {}", e))
     })?;
 
-    // Verify the canonicalizedBody kind/version matches the entry's kindVersion metadata.
-    // Prevents accepting a body that was re-interpreted under a different schema.
     verify_kind_version(entry, &body_bytes)?;
     let kind = entry["kindVersion"]["kind"].as_str().unwrap_or("");
     let version = entry["kindVersion"]["version"].as_str().unwrap_or("");
 
-    // RFC 3161 timestamps: ones that fail to verify are skipped (sigstore-go
-    // semantics); every verified one must fall inside the certificate's
-    // validity window (client-spec §4.2.1, §4.3).
+    // Unverifiable timestamps are skipped (sigstore-go); verified ones must sit inside cert validity.
     let (tsa_times, tsa_errors) = tsa::verify_timestamps(
         bundle,
         &bundle_dsse_signature(bundle)?,
@@ -112,9 +97,7 @@ pub fn verify_rekor_entry_with_trust(
         }
     }
 
-    // Observer timestamp: when the signature is known to have existed. It must
-    // fall inside the certificate's validity window, and it selects which Rekor
-    // key (by validity period) may have signed the checkpoint.
+    // The observer time also selects which Rekor key (by validity period) may have signed.
     let observer_time = match (kind, version) {
         ("dsse" | "hashedrekord", "0.0.1") => {
             // Handle both JSON string (protobuf JSON int64 encoding) and JSON number formats.
@@ -137,9 +120,7 @@ pub fn verify_rekor_entry_with_trust(
                     integrated_time, cert_not_before, cert_not_after
                 )));
             }
-            // integratedTime is only authenticated by the SET (verified below
-            // once the log key is known); without one, an RFC 3161 timestamp
-            // must anchor the signature instead (client-spec §4.2).
+            // integratedTime is only authenticated by the SET; without one a TSA time must anchor it.
             if entry
                 .pointer("/inclusionPromise/signedEntryTimestamp")
                 .is_none()
@@ -151,8 +132,7 @@ pub fn verify_rekor_entry_with_trust(
             }
             integrated_time
         }
-        // Rekor v2 logs DSSE envelopes as hashedrekord entries over the PAE
-        // (rekor-v2-spec §6.1.4); sigstore-go/-python accept nothing else.
+        // Rekor v2 logs DSSE as hashedrekord over the PAE (rekor-v2-spec §6.1.4).
         ("hashedrekord", "0.0.2") => *tsa_times.iter().min().ok_or_else(|| {
             no_timestamp("Rekor v2 entry has no integratedTime, an RFC 3161 timestamp is required")
         })?,
@@ -377,7 +357,6 @@ fn verify_certificate_binding(bundle: &serde_json::Value, canonicalized_body: &[
             parse_pem_certificate(&verifier_pem)?
         }
         "hashedrekord" if entry.pointer("/spec/hashedRekordV002").is_some() => {
-            // 0.0.2: spec.hashedRekordV002.signature.verifier.x509Certificate.rawBytes is base64 DER
             let raw_b64 = entry
                 .pointer("/spec/hashedRekordV002/signature/verifier/x509Certificate/rawBytes")
                 .and_then(|r| r.as_str())
@@ -482,8 +461,7 @@ fn verify_signature_binding(bundle: &serde_json::Value, canonicalized_body: &[u8
             })?
         }
         "hashedrekord" => {
-            // hashedrekord format: spec.signature.content contains base64-encoded signature
-            // (0.0.2 nests the same shape under spec.hashedRekordV002)
+            // 0.0.1: spec.signature.content; 0.0.2 nests it under spec.hashedRekordV002
             let spec = entry.get("spec");
             let sig_b64 = spec
                 .and_then(|s| s.get("hashedRekordV002").or(Some(s)))
@@ -521,9 +499,9 @@ fn verify_signature_binding(bundle: &serde_json::Value, canonicalized_body: &[u8
     Ok(())
 }
 
-/// Verify a Rekor v1 inclusion promise: the log's signature (SET) over
-/// `{body, integratedTime, logID, logIndex}` in canonical JSON. This is what
-/// authenticates `integratedTime`; the Merkle leaf only commits to the body.
+/// Verify the Rekor v1 SET: the log's signature over canonical JSON
+/// `{body, integratedTime, logID, logIndex}`. The Merkle leaf covers only the
+/// body, so this is what authenticates `integratedTime`.
 pub fn verify_signed_entry_timestamp(
     entry: &serde_json::Value,
     rekor_key: &RekorKey,
@@ -549,7 +527,6 @@ pub fn verify_signed_entry_timestamp(
     let set = decode_b64(field("/inclusionPromise/signedEntryTimestamp")?).map_err(|e| {
         Error::SigstoreVerification(format!("Failed to decode signedEntryTimestamp: {}", e))
     })?;
-    // RFC 8785 canonical form: keys sorted, no whitespace.
     let payload = format!(
         r#"{{"body":"{}","integratedTime":{},"logID":"{}","logIndex":{}}}"#,
         field("/canonicalizedBody")?,

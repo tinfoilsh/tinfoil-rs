@@ -1,21 +1,6 @@
-//! RFC 3161 timestamp verification.
-//!
-//! Rekor v2 (rekor-tiles) entries carry no signed `integratedTime`, so the
-//! only observer timestamp binding the signature to a point in time is the
-//! RFC 3161 token in `verificationMaterial.timestampVerificationData`. This
-//! module verifies such tokens against the trust root's timestamp authorities:
-//!
-//! 1. The token is a granted `TimeStampResp` (or bare `TimeStampToken`)
-//!    wrapping CMS `SignedData` whose content is `TSTInfo`.
-//! 2. `TSTInfo.messageImprint` is the hash of the bundle signature.
-//! 3. The CMS `messageDigest` attribute is the hash of the `TSTInfo` bytes and
-//!    the CMS signature over the signed attributes verifies under the trusted
-//!    TSA leaf certificate (certificates embedded in the token are ignored).
-//! 4. The TSA chain is valid at `genTime` (issuer signatures, timestamping
-//!    EKU on the leaf) and `genTime` falls within the authority's validity
-//!    window from the trust root.
-//!
-//! Adapted from sigstore-rust `sigstore-tsa` (Apache 2.0 License).
+//! RFC 3161 timestamp verification against the trust root's timestamp
+//! authorities. Rekor v2 entries have no `integratedTime`, so this is their
+//! only observer timestamp. Adapted from sigstore-rust `sigstore-tsa` (Apache 2.0).
 
 use cms::content_info::ContentInfo;
 use cms::signed_data::{SignedData, SignerIdentifier};
@@ -45,9 +30,6 @@ const OID_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.10
 const OID_SECP256R1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 const OID_SECP384R1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.34");
 const MAX_TIMESTAMPS: usize = 32;
-
-// RFC 3161 §2.4.2 (status) and §2.4.2 (TSTInfo). Only the fields verification
-// needs are interpreted; the rest are parsed for structural validity.
 
 #[derive(Clone, Debug, Sequence)]
 struct PkiStatusInfo {
@@ -108,14 +90,9 @@ fn err(msg: impl Into<String>) -> Error {
     Error::SigstoreVerification(msg.into())
 }
 
-/// Verify the RFC 3161 timestamps in the bundle's `timestampVerificationData`
-/// against `signature` (the bundle's DSSE/message signature bytes) and the
-/// trusted authorities. Returns the signing times (Unix seconds) of the
-/// timestamps that verified, plus the error for each one that did not.
-///
-/// Like sigstore-go, a timestamp that fails to verify is skipped rather than
-/// fatal: the caller decides whether enough observer timestamps remain. Every
-/// returned time must still be checked against the certificate validity.
+/// Verify the bundle's RFC 3161 timestamps over `signature`. Returns the
+/// genTimes (Unix seconds) that verified plus one error per timestamp that
+/// did not; like sigstore-go, the caller decides whether enough remain.
 pub fn verify_timestamps(
     bundle: &serde_json::Value,
     signature: &[u8],
@@ -129,8 +106,6 @@ pub fn verify_timestamps(
         .map(|ts| ts.as_slice())
         .unwrap_or_default();
 
-    // Bound the work an attacker-controlled bundle can demand (sigstore-go
-    // caps this too).
     if timestamps.len() > MAX_TIMESTAMPS {
         return Err(err(format!(
             "Too many RFC 3161 timestamps: {} > {MAX_TIMESTAMPS}",
@@ -158,8 +133,7 @@ pub fn verify_timestamps(
     Ok((times, errors))
 }
 
-/// Verify one DER-encoded RFC 3161 token; returns its `genTime` as Unix seconds.
-pub fn verify_timestamp(
+fn verify_timestamp(
     token: &[u8],
     signature: &[u8],
     authorities: &[TimestampAuthority],
@@ -187,8 +161,6 @@ pub fn verify_timestamp(
         .as_ref()
         .ok_or_else(|| err("RFC 3161 timestamp has no signed attributes"))?;
 
-    // RFC 5652 §11.1/§11.2: content-type must name TSTInfo, message-digest
-    // must be the digest of the encapsulated TSTInfo.
     let content_type: ObjectIdentifier = attribute_value(signed_attrs, &OID_CONTENT_TYPE)?
         .decode_as()
         .map_err(|e| err(format!("Invalid CMS content-type attribute: {e}")))?;
@@ -202,8 +174,7 @@ pub fn verify_timestamp(
         return Err(err("CMS message-digest attribute does not match TSTInfo"));
     }
 
-    // The signature covers the signed attributes re-encoded as a plain SET OF
-    // (RFC 5652 §5.4), not the [0] IMPLICIT form they appear in on the wire.
+    // RFC 5652 §5.4: the signature covers the attributes as a plain SET OF, not the [0] tag.
     let signed_attrs_der = signed_attrs
         .to_der()
         .map_err(|e| err(format!("Failed to re-encode CMS signed attributes: {e}")))?;
@@ -244,8 +215,7 @@ fn verify_with_authority(
         .first()
         .ok_or_else(|| err("Timestamp authority has an empty certificate chain"))?;
 
-    // Only the trust root's leaf may sign; certificates embedded in the token
-    // are untrusted input and never consulted.
+    // Certificates embedded in the token are untrusted input; only the trust root's leaf may sign.
     if !signer_matches(&signer.sid, leaf) {
         return Err(err("Timestamp signer is not the trusted TSA certificate"));
     }
@@ -261,8 +231,7 @@ fn verify_with_authority(
         }
     }
 
-    // RFC 3161 §2.3: the TSA signing cert is an end-entity cert whose single
-    // extended key usage is id-kp-timeStamping, marked critical.
+    // RFC 3161 §2.3: end-entity cert with exactly one critical EKU, timeStamping.
     if matches!(
         leaf.tbs_certificate.get::<BasicConstraints>(),
         Ok(Some((_, bc))) if bc.ca
@@ -297,7 +266,7 @@ fn verify_with_authority(
 }
 
 fn parse_token(token: &[u8]) -> Result<(TstInfo, Vec<u8>, SignedData)> {
-    // Sigstore bundles carry a full TimeStampResp; accept a bare token too.
+    // Bundles carry a TimeStampResp; a bare TimeStampToken is accepted too.
     let content_info = match TimeStampResp::from_der(token) {
         Ok(resp) => {
             if resp.status.status > 1 {
@@ -381,7 +350,6 @@ fn hash_with(oid: &ObjectIdentifier, data: &[u8]) -> Result<Vec<u8>> {
     })
 }
 
-/// ECDSA (P-256/P-384, DER signature) over `digest_oid(message)` with the certificate's key.
 fn verify_cms_signature(
     cert: &Certificate,
     digest_oid: &ObjectIdentifier,
