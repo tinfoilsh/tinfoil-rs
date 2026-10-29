@@ -86,13 +86,23 @@ pub fn verify_rekor_entry_with_trust(
     let kind = entry["kindVersion"]["kind"].as_str().unwrap_or("");
     let version = entry["kindVersion"]["version"].as_str().unwrap_or("");
 
-    // Every RFC 3161 timestamp in the bundle must verify against a trusted TSA
-    // and fall inside the certificate's validity window (client-spec §4.2.1).
-    let tsa_times = tsa::verify_timestamps(
+    // RFC 3161 timestamps: ones that fail to verify are skipped (sigstore-go
+    // semantics); every verified one must fall inside the certificate's
+    // validity window (client-spec §4.2.1, §4.3).
+    let (tsa_times, tsa_errors) = tsa::verify_timestamps(
         bundle,
         &bundle_dsse_signature(bundle)?,
         timestamp_authorities,
     )?;
+    let no_timestamp = |what: &str| {
+        let detail = if tsa_errors.is_empty() {
+            " in bundle".to_string()
+        } else {
+            let joined: Vec<String> = tsa_errors.iter().map(|e| e.to_string()).collect();
+            format!(" ({})", joined.join("; "))
+        };
+        Error::SigstoreVerification(format!("{what}: no verified RFC 3161 timestamp{detail}"))
+    };
     for t in &tsa_times {
         if *t < cert_not_before || *t > cert_not_after {
             return Err(Error::SigstoreVerification(format!(
@@ -135,9 +145,8 @@ pub fn verify_rekor_entry_with_trust(
                 .is_none()
                 && tsa_times.is_empty()
             {
-                return Err(Error::SigstoreVerification(
-                    "Rekor v1 entry has no inclusion promise and the bundle has no RFC 3161 timestamp: cannot establish signing time"
-                        .into(),
+                return Err(no_timestamp(
+                    "Rekor v1 entry has no inclusion promise, cannot establish signing time",
                 ));
             }
             integrated_time
@@ -145,10 +154,7 @@ pub fn verify_rekor_entry_with_trust(
         // Rekor v2 logs DSSE envelopes as hashedrekord entries over the PAE
         // (rekor-v2-spec §6.1.4); sigstore-go/-python accept nothing else.
         ("hashedrekord", "0.0.2") => *tsa_times.iter().min().ok_or_else(|| {
-            Error::SigstoreVerification(
-                "Rekor v2 entry has no integratedTime: a verified RFC 3161 timestamp is required"
-                    .into(),
-            )
+            no_timestamp("Rekor v2 entry has no integratedTime, an RFC 3161 timestamp is required")
         })?,
         _ => {
             return Err(Error::SigstoreVerification(format!(
@@ -991,6 +997,19 @@ mod tests {
             e.to_string().contains("RFC 3161 timestamp is required"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn test_rekor_v2_invalid_extra_timestamp_tolerated() {
+        // sigstore-go semantics: an unverifiable extra timestamp is skipped as
+        // long as one verified observer timestamp remains.
+        verify_v2(|b| {
+            b["verificationMaterial"]["timestampVerificationData"]["rfc3161Timestamps"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({"signedTimestamp": "AAAA"}));
+        })
+        .unwrap();
     }
 
     #[test]

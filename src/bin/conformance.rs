@@ -619,10 +619,10 @@ fn verify_rekor_entry(
         let bundle_sig = decode_b64(bundle_sig_b64).map_err(|e| format!("Decode signature: {e}"))?;
         let tsas = trust::load_timestamp_authorities_from_json(trusted_root_json)
             .map_err(|e| format!("Load timestamp authorities: {e}"))?;
-        let times = tsa::verify_timestamps(bundle, &bundle_sig, &tsas)
+        let (times, errors) = tsa::verify_timestamps(bundle, &bundle_sig, &tsas)
             .map_err(|e| format!("TSA timestamp: {e}"))?;
         if is_rekor_v2 && times.is_empty() {
-            return Err("Rekor v2 entry requires TSA timestamp".into());
+            return Err(format!("Rekor v2 entry requires a verified TSA timestamp: {errors:?}"));
         }
         if let Some(cert_bytes) = cert_der {
             let cert = Certificate::from_der(cert_bytes)

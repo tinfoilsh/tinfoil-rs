@@ -108,16 +108,19 @@ fn err(msg: impl Into<String>) -> Error {
     Error::SigstoreVerification(msg.into())
 }
 
-/// Verify every RFC 3161 timestamp in the bundle's `timestampVerificationData`
+/// Verify the RFC 3161 timestamps in the bundle's `timestampVerificationData`
 /// against `signature` (the bundle's DSSE/message signature bytes) and the
-/// trusted authorities. Returns the verified signing times (Unix seconds), in
-/// bundle order; empty when the bundle carries no timestamps. Any timestamp
-/// that fails to verify is an error (matching sigstore-go/-python).
+/// trusted authorities. Returns the signing times (Unix seconds) of the
+/// timestamps that verified, plus the error for each one that did not.
+///
+/// Like sigstore-go, a timestamp that fails to verify is skipped rather than
+/// fatal: the caller decides whether enough observer timestamps remain. Every
+/// returned time must still be checked against the certificate validity.
 pub fn verify_timestamps(
     bundle: &serde_json::Value,
     signature: &[u8],
     authorities: &[TimestampAuthority],
-) -> Result<Vec<u64>> {
+) -> Result<(Vec<u64>, Vec<Error>)> {
     let timestamps = bundle
         .get("verificationMaterial")
         .and_then(|vm| vm.get("timestampVerificationData"))
@@ -135,18 +138,24 @@ pub fn verify_timestamps(
         )));
     }
 
-    timestamps
-        .iter()
-        .map(|ts| {
-            let token_b64 = ts
-                .get("signedTimestamp")
-                .and_then(|s| s.as_str())
-                .ok_or_else(|| err("RFC 3161 timestamp missing signedTimestamp"))?;
-            let token = decode_b64(token_b64)
-                .map_err(|e| err(format!("Failed to decode RFC 3161 timestamp: {e}")))?;
-            verify_timestamp(&token, signature, authorities)
-        })
-        .collect()
+    let mut times = Vec::new();
+    let mut errors = Vec::new();
+    for ts in timestamps {
+        let verified = ts
+            .get("signedTimestamp")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| err("RFC 3161 timestamp missing signedTimestamp"))
+            .and_then(|b64| {
+                decode_b64(b64)
+                    .map_err(|e| err(format!("Failed to decode RFC 3161 timestamp: {e}")))
+            })
+            .and_then(|token| verify_timestamp(&token, signature, authorities));
+        match verified {
+            Ok(t) => times.push(t),
+            Err(e) => errors.push(e),
+        }
+    }
+    Ok((times, errors))
 }
 
 /// Verify one DER-encoded RFC 3161 token; returns its `genTime` as Unix seconds.
@@ -434,24 +443,35 @@ mod tests {
         trust::load_timestamp_authorities_from_json(TRUSTED_ROOT).unwrap()
     }
 
+    fn verify(
+        b: &serde_json::Value,
+        sig: &[u8],
+        tsas: &[TimestampAuthority],
+    ) -> (Vec<u64>, Vec<String>) {
+        let (times, errors) = verify_timestamps(b, sig, tsas).unwrap();
+        (times, errors.iter().map(|e| e.to_string()).collect())
+    }
+
     #[test]
     fn verifies_staging_timestamp() {
         let b = bundle();
-        let times = verify_timestamps(&b, &dsse_signature(&b), &authorities()).unwrap();
+        let (times, errors) = verify(&b, &dsse_signature(&b), &authorities());
         assert_eq!(times, vec![1778700213]); // 2026-05-13T19:23:33Z, from the token
+        assert!(errors.is_empty());
     }
 
     #[test]
-    fn rejects_imprint_mismatch() {
+    fn skips_imprint_mismatch() {
         let b = bundle();
         let mut sig = dsse_signature(&b);
         sig[10] ^= 0x01;
-        let e = verify_timestamps(&b, &sig, &authorities()).unwrap_err();
-        assert!(e.to_string().contains("message imprint"), "{e}");
+        let (times, errors) = verify(&b, &sig, &authorities());
+        assert!(times.is_empty());
+        assert!(errors[0].contains("message imprint"), "{errors:?}");
     }
 
     #[test]
-    fn rejects_tampered_token() {
+    fn skips_tampered_token() {
         let mut b = bundle();
         let ts = &mut b["verificationMaterial"]["timestampVerificationData"]["rfc3161Timestamps"]
             [0]["signedTimestamp"];
@@ -462,34 +482,49 @@ mod tests {
             &base64::engine::general_purpose::STANDARD,
             raw,
         ));
-        assert!(verify_timestamps(&b, &dsse_signature(&b), &authorities()).is_err());
+        let (times, errors) = verify(&b, &dsse_signature(&b), &authorities());
+        assert!(times.is_empty());
+        assert_eq!(errors.len(), 1);
     }
 
     #[test]
-    fn rejects_untrusted_authority() {
+    fn skips_untrusted_authority() {
         // The embedded production root trusts timestamp.sigstore.dev, not the
         // staging TSA that issued this token.
         let b = bundle();
         let prod = trust::load_timestamp_authorities().unwrap();
-        let e = verify_timestamps(&b, &dsse_signature(&b), &prod).unwrap_err();
-        assert!(e.to_string().contains("not the trusted TSA"), "{e}");
+        let (times, errors) = verify(&b, &dsse_signature(&b), &prod);
+        assert!(times.is_empty());
+        assert!(errors[0].contains("not the trusted TSA"), "{errors:?}");
     }
 
     #[test]
-    fn rejects_time_outside_authority_window() {
+    fn skips_time_outside_authority_window() {
         let b = bundle();
         let mut tsas = authorities();
         tsas[0].valid_until = Some(1778700212);
-        let e = verify_timestamps(&b, &dsse_signature(&b), &tsas).unwrap_err();
-        assert!(e.to_string().contains("validity window"), "{e}");
+        let (times, errors) = verify(&b, &dsse_signature(&b), &tsas);
+        assert!(times.is_empty());
+        assert!(errors[0].contains("validity window"), "{errors:?}");
+    }
+
+    #[test]
+    fn invalid_extra_timestamp_does_not_hide_valid_one() {
+        let mut b = bundle();
+        let list = b["verificationMaterial"]["timestampVerificationData"]["rfc3161Timestamps"]
+            .as_array_mut()
+            .unwrap();
+        list.push(serde_json::json!({"signedTimestamp": "AAAA"}));
+        let (times, errors) = verify(&b, &dsse_signature(&b), &authorities());
+        assert_eq!(times, vec![1778700213]);
+        assert_eq!(errors.len(), 1);
     }
 
     #[test]
     fn no_timestamps_is_empty_not_error() {
         let mut b = bundle();
         b["verificationMaterial"]["timestampVerificationData"] = serde_json::json!({});
-        assert!(verify_timestamps(&b, &dsse_signature(&b), &authorities())
-            .unwrap()
-            .is_empty());
+        let (times, errors) = verify(&b, &dsse_signature(&b), &authorities());
+        assert!(times.is_empty() && errors.is_empty());
     }
 }
