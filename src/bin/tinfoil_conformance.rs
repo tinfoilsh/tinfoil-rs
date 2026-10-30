@@ -1092,14 +1092,15 @@ impl<'a> SevBodyFields<'a> {
             "report_id_ma_hex": self.hex(0x160, 32),
             "reported_tcb_hex": self.hex(0x180, 8),
             "chip_id_hex": self.hex(0x1A0, 64),
-            "committed_tcb_hex": self.hex(0x1E8, 8),
-            "current_build": self.bytes[0x1F0],
-            "current_minor": self.bytes[0x1F1],
-            "current_major": self.bytes[0x1F2],
-            "committed_build": self.bytes[0x1F4],
-            "committed_minor": self.bytes[0x1F5],
-            "committed_major": self.bytes[0x1F6],
-            "launch_tcb_hex": self.hex(0x1F8, 8),
+            // SEV-SNP ABI: COMMITTED_TCB 0x1E0, CURRENT_* 0x1E8.., COMMITTED_* 0x1EC.., LAUNCH_TCB 0x1F0.
+            "committed_tcb_hex": self.hex(0x1E0, 8),
+            "current_build": self.bytes[0x1E8],
+            "current_minor": self.bytes[0x1E9],
+            "current_major": self.bytes[0x1EA],
+            "committed_build": self.bytes[0x1EC],
+            "committed_minor": self.bytes[0x1ED],
+            "committed_major": self.bytes[0x1EE],
+            "launch_tcb_hex": self.hex(0x1F0, 8),
         })
     }
 }
@@ -1236,13 +1237,22 @@ fn run_verify_attestation_sev_inner(input: &VerifyAttestationSevInput) -> Result
     };
 
     let options = ValidationOptions::default();
-    match sevlib::verify_with_inline_collateral(
-        &input.attestation_doc_b64,
-        &vcek_der,
-        &cert_chain_pem,
-        &options,
-        trusted_ark_fp.as_deref(),
-    ) {
+    let verified = match trusted_ark_fp.as_deref() {
+        Some(fp) => sevlib::verify_with_inline_collateral_untrusted_ark(
+            &input.attestation_doc_b64,
+            &vcek_der,
+            &cert_chain_pem,
+            &options,
+            fp,
+        ),
+        None => sevlib::verify_with_inline_collateral(
+            &input.attestation_doc_b64,
+            &vcek_der,
+            &cert_chain_pem,
+            &options,
+        ),
+    };
+    match verified {
         Ok(_v) => {
             // The lib returns a Verification but we want the raw decoded
             // report bytes for body-field decoding and policy enforcement.

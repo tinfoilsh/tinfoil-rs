@@ -86,7 +86,7 @@ pub struct SigstoreResult {
 pub struct Policy {
     /// Expected OIDC issuer extension value (exact match). SPEC §5.3.
     pub oidc_issuer: String,
-    /// Required prefix on the cert's BuildSignerURI ref portion (e.g. `refs/tags/`). SPEC §5.3.
+    /// Required prefix on the cert's GitHubWorkflowRef extension value (e.g. `refs/tags/`). SPEC §5.3.
     pub workflow_ref_prefix: String,
     /// Expected GitHubWorkflowRepository extension value (exact match). SPEC §5.3.
     pub workflow_repository: String,
@@ -317,19 +317,11 @@ fn verify_certificate_identity(
         )));
     }
 
-    // Verify workflow URI matches expected pattern for this repo
-    let pattern = format!(
-        r"^https://github\.com/{}/\.github/workflows/[^@]+@refs/tags/{}$",
-        regex::escape(expected_repo),
-        regex::escape(expected_tag)
-    );
-    let re = regex::Regex::new(&pattern)
-        .map_err(|e| Error::SigstoreVerification(format!("Invalid regex: {}", e)))?;
-
-    if !re.is_match(&cert_info.subject_workflow) {
+    // SPEC §5.3: GitHubWorkflowRef is the source of truth; BuildSignerURI is optional.
+    if cert_info.workflow_ref != format!("refs/tags/{expected_tag}") {
         return Err(Error::SigstoreVerification(format!(
-            "Certificate workflow doesn't match expected pattern. Expected repo: {}, Got: {}",
-            expected_repo, cert_info.subject_workflow
+            "Certificate workflow ref {:?} is not refs/tags/{expected_tag}",
+            cert_info.workflow_ref
         )));
     }
 

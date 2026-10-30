@@ -14,8 +14,8 @@ use crate::verifier::util::decode_b64;
 use digest::Output;
 use sha2::{Digest, Sha256};
 
-/// Verify the bundle's Rekor entry with the embedded trust root: exactly one
-/// entry; an observer timestamp inside the cert validity (SET-signed
+/// Verify the bundle's Rekor entry with the embedded trust root: at least one
+/// entry (the first is verified); an observer timestamp inside the cert validity (SET-signed
 /// `integratedTime` for v1 dsse/hashedrekord 0.0.1, a verified RFC 3161 time
 /// for v2 hashedrekord 0.0.2 and for v1 entries without an inclusion
 /// promise); checkpoint signature by the log's key under its name
