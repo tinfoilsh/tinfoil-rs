@@ -28,53 +28,87 @@ pub async fn verify_full(body: &str) -> Result<Verification> {
     verify_full_with_options(body, &ValidationOptions::default()).await
 }
 
+/// Sync verification with caller-supplied collateral (VCEK DER + ASK||ARK PEM),
+/// skipping the AMD KDS fetch. The embedded pinned AMD ARK is enforced.
+pub fn verify_with_inline_collateral(
+    body: &str,
+    vcek_der: &[u8],
+    cert_chain_pem: &[u8],
+    options: &ValidationOptions,
+) -> Result<Verification> {
+    verify_inline(body, vcek_der, cert_chain_pem, options, None)
+}
+
+/// Conformance-only: trust `ark_spki_fingerprint` instead of the pinned AMD ARK,
+/// so synthetic chains can be verified. Not part of the production API.
+#[cfg(feature = "conformance")]
+pub fn verify_with_inline_collateral_untrusted_ark(
+    body: &str,
+    vcek_der: &[u8],
+    cert_chain_pem: &[u8],
+    options: &ValidationOptions,
+    ark_spki_fingerprint: &str,
+) -> Result<Verification> {
+    verify_inline(body, vcek_der, cert_chain_pem, options, Some(ark_spki_fingerprint))
+}
+
+fn verify_inline(
+    body: &str,
+    vcek_der: &[u8],
+    cert_chain_pem: &[u8],
+    options: &ValidationOptions,
+    ark_spki_fingerprint: Option<&str>,
+) -> Result<Verification> {
+    let report_bytes = report::decode_report(body)?;
+    report::validate_report_structure(&report_bytes)?;
+    cert_chain::verify_cert_chain_crypto_with_override(
+        vcek_der,
+        cert_chain_pem,
+        ark_spki_fingerprint,
+    )?;
+    verify_report_with_vcek(&report_bytes, vcek_der, options)
+}
+
+/// Report checks shared by the inline and KDS paths once the VCEK chain is
+/// trusted: field validation, VCEK HWID binding, report signature, result.
+fn verify_report_with_vcek(
+    report_bytes: &[u8],
+    vcek_der: &[u8],
+    options: &ValidationOptions,
+) -> Result<Verification> {
+    let chip_id = &report_bytes[CHIP_ID_OFFSET..CHIP_ID_OFFSET + CHIP_ID_SIZE];
+    let mask_chip_key = validation::validate_report_with_chain(report_bytes, vcek_der, options)?;
+    cert_chain::validate_vcek_hwid(vcek_der, chip_id, mask_chip_key)?;
+    signature::verify_report_signature(report_bytes, vcek_der)?;
+
+    let measurement_bytes =
+        &report_bytes[MEASUREMENT_OFFSET..MEASUREMENT_OFFSET + MEASUREMENT_SIZE];
+    let report_data = &report_bytes[REPORT_DATA_OFFSET..REPORT_DATA_OFFSET + REPORT_DATA_SIZE];
+    Ok(Verification {
+        measurement: Measurement {
+            type_: PredicateType::SevGuestV2,
+            registers: vec![hex::encode(measurement_bytes)],
+        },
+        tls_public_key_fp: hex::encode(&report_data[..32]),
+        hpke_public_key: Some(hex::encode(&report_data[32..])),
+    })
+}
+
 /// Full async verification with custom validation options.
 ///
 /// Allows customizing policy, TCB, and platform requirements.
 pub async fn verify_full_with_options(body: &str, options: &ValidationOptions) -> Result<Verification> {
-    // 1. Decode and decompress
     let report_bytes = report::decode_report(body)?;
-
-    // 2. Basic structure validation
     report::validate_report_structure(&report_bytes)?;
 
-    // 3. Extract chip_id and TCB for VCEK lookup
+    // Fetch the VCEK for this chip/TCB plus the ASK||ARK chain from AMD KDS.
     let chip_id = &report_bytes[CHIP_ID_OFFSET..CHIP_ID_OFFSET + CHIP_ID_SIZE];
     let reported_tcb = &report_bytes[REPORTED_TCB_OFFSET..REPORTED_TCB_OFFSET + 8];
-
-    // 4. Fetch and verify certificate chain
     let vcek = cert_chain::fetch_vcek(chip_id, reported_tcb).await?;
     let cert_chain_pem = cert_chain::fetch_cert_chain().await?;
-
-    // 5. Verify certificate chain with full cryptographic verification
     cert_chain::verify_cert_chain_crypto(&vcek, &cert_chain_pem)?;
 
-    // 6. Validate report with chain (matches Python's validate_report(report, chain, options))
-    // This combines report field validation with VCEK TCB validation
-    let mask_chip_key = validation::validate_report_with_chain(&report_bytes, &vcek, options)?;
-
-    // 7. Validate VCEK HWID matches chip_id
-    cert_chain::validate_vcek_hwid(&vcek, chip_id, mask_chip_key)?;
-
-    // 8. Verify report signature against VCEK
-    signature::verify_report_signature(&report_bytes, &vcek)?;
-
-    // 9. Extract measurements and keys
-    let measurement_bytes = &report_bytes[MEASUREMENT_OFFSET..MEASUREMENT_OFFSET + MEASUREMENT_SIZE];
-    let report_data = &report_bytes[REPORT_DATA_OFFSET..REPORT_DATA_OFFSET + REPORT_DATA_SIZE];
-    let tls_fp = hex::encode(&report_data[..32]);
-    let hpke_key = hex::encode(&report_data[32..]);
-
-    let measurement = Measurement {
-        type_: PredicateType::SevGuestV2,
-        registers: vec![hex::encode(measurement_bytes)],
-    };
-
-    Ok(Verification {
-        measurement,
-        tls_public_key_fp: tls_fp,
-        hpke_public_key: Some(hpke_key),
-    })
+    verify_report_with_vcek(&report_bytes, &vcek, options)
 }
 
 #[cfg(test)]
