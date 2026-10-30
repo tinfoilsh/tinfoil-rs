@@ -45,6 +45,15 @@ pub fn compute_pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
 /// 4. Compute PAE (Pre-Authentication Encoding) of payload
 /// 5. Verify ECDSA signature over PAE
 pub fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
+    verify_dsse_signature_with_trust(bundle, trust::embedded_trust_root_json())
+}
+
+/// Same as [`verify_dsse_signature`], but uses the supplied trust-root JSON
+/// for SCT verification and issuer-SPKI lookup instead of the embedded one.
+pub fn verify_dsse_signature_with_trust(
+    bundle: &serde_json::Value,
+    trust_root_json: &str,
+) -> Result<()> {
     // Get the certificate
     let cert_b64 = bundle
         .get("verificationMaterial")
@@ -64,10 +73,10 @@ pub fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
     certificate::validate_certificate_extensions(&cert)?;
 
     // Find the issuer certificate's SPKI for SCT verification
-    let issuer_spki_der = fulcio::find_issuer_spki(&cert)?;
+    let issuer_spki_der = fulcio::find_issuer_spki_with_trust(&cert, trust_root_json)?;
 
     // Verify Signed Certificate Timestamps (SCTs) with full cryptographic verification
-    verify_sct(&cert_der, &issuer_spki_der)?;
+    verify_sct(&cert_der, &issuer_spki_der, trust_root_json)?;
 
     let pubkey_bytes = cert
         .tbs_certificate
@@ -154,7 +163,7 @@ pub fn verify_dsse_signature(bundle: &serde_json::Value) -> Result<()> {
 ///
 /// All SCTs are tried (not just the first), so that if one SCT is from a
 /// retired/expired CT log, a valid SCT from a current log can still succeed.
-fn verify_sct(cert_der: &[u8], issuer_spki_der: &[u8]) -> Result<()> {
+fn verify_sct(cert_der: &[u8], issuer_spki_der: &[u8], trust_root_json: &str) -> Result<()> {
     let cert = Certificate::from_der(cert_der).map_err(|e| {
         Error::SigstoreVerification(format!("Failed to parse certificate for SCT: {}", e))
     })?;
@@ -175,7 +184,7 @@ fn verify_sct(cert_der: &[u8], issuer_spki_der: &[u8]) -> Result<()> {
     }
 
     // Load CT log keyring (with validity periods)
-    let ct_keyring = trust::load_ctlog_keyring()?;
+    let ct_keyring = trust::load_ctlog_keyring_from_json(trust_root_json)?;
 
     // Try each SCT - succeed if at least one verifies against a valid CT log key
     let mut last_err = None;

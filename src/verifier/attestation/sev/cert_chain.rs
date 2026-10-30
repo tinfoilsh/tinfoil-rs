@@ -399,6 +399,20 @@ fn validate_basic_constraints(
 /// 5. Validates all certificates are within their validity period
 /// 6. Validates BasicConstraints (ARK/ASK must be CAs, VCEK must not)
 pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -> Result<()> {
+    verify_cert_chain_crypto_with_override(vcek_der, cert_chain_pem, None)
+}
+
+/// Variant of [`verify_cert_chain_crypto`] that lets the caller override the
+/// pinned ARK SPKI fingerprint. `None` uses the embedded AMD-Genoa pin; `Some`
+/// trusts whatever caller-supplied ARK is in the chain — used by the
+/// conformance suite's Phase 4B-SEV synthetic-chain fixtures (where the ARK
+/// is freshly generated, not AMD's real one) and explicitly NOT exposed to
+/// production paths.
+pub(super) fn verify_cert_chain_crypto_with_override(
+    vcek_der: &[u8],
+    cert_chain_pem: &[u8],
+    expected_ark_fingerprint: Option<&str>,
+) -> Result<()> {
     use x509_cert::Certificate;
     use der::Decode;
 
@@ -484,13 +498,15 @@ pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -
     validate_basic_constraints(&vcek_cert, "VCEK", false)?;
 
     // === STEP 1: Verify ARK public key matches pinned fingerprint ===
-    // This is the root of trust - if this matches, we know we have AMD's genuine ARK
+    // Root of trust. Default = pinned AMD-Genoa SPKI fingerprint; conformance
+    // can override (only) for Phase 4B-SEV synthetic-chain fixtures.
+    let pinned_ark_fp = expected_ark_fingerprint.unwrap_or(AMD_ARK_GENOA_SPKI_FINGERPRINT);
     let ark_fingerprint = compute_spki_fingerprint(&ark_cert)?;
-    if ark_fingerprint != AMD_ARK_GENOA_SPKI_FINGERPRINT {
+    if ark_fingerprint != pinned_ark_fp {
         return Err(Error::AttestationVerification(format!(
             "ARK public key fingerprint mismatch! Expected: {}, Got: {}. \
              This could indicate a MITM attack or AMD has rotated their root key.",
-            AMD_ARK_GENOA_SPKI_FINGERPRINT, ark_fingerprint
+            pinned_ark_fp, ark_fingerprint
         )));
     }
 

@@ -14,6 +14,16 @@ use crate::verifier::util::decode_b64;
 /// This avoids TUF network calls and provides offline verification capability.
 const TRUSTED_ROOT_JSON: &str = include_str!("../../../assets/trusted_root.json");
 
+/// Return the embedded Sigstore trusted root as raw JSON bytes.
+///
+/// Used by the standard verification path. Callers that need a different
+/// trust root (e.g. a synthetic test root from a conformance fixture) should
+/// pass their own JSON to the `*_from_json` variants and the `_with_trust`
+/// entry points on rekor/fulcio/dsse.
+pub fn embedded_trust_root_json() -> &'static str {
+    TRUSTED_ROOT_JSON
+}
+
 /// Parsed trusted root for Rekor public keys, Fulcio CAs, and CT logs
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
