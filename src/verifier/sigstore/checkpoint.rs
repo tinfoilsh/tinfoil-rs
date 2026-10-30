@@ -117,26 +117,32 @@ impl SignedCheckpoint {
         format!("{note}{empty_line}{signatures}")
     }
 
-    /// Verify that at least one of the checkpoint's signatures is valid.
-    /// The signed message is the marshaled note body (which already ends with a newline).
-    pub fn verify_signature(&self, key_der: &[u8], key_type: &str) -> Result<()> {
+    /// Verify a checkpoint signature line named `name` (the log's hostname)
+    /// whose 4-byte key hint is the `log_id` prefix; other lines (witness
+    /// cosignatures) are ignored, as in sumdb note verification.
+    pub fn verify_signature(
+        &self,
+        key_der: &[u8],
+        key_type: &str,
+        name: &str,
+        log_id: &[u8],
+    ) -> Result<()> {
         let message = self.note.marshal();
         let message_bytes = message.as_bytes();
 
         for sig in &self.signatures {
-            let result = match key_type {
-                "PKIX_ECDSA_P256_SHA_256" => verify_ecdsa_p256(message_bytes, &sig.raw, key_der),
-                "PKIX_ED25519" => verify_ed25519(message_bytes, &sig.raw, key_der),
-                _ => continue,
-            };
-            if result.is_ok() {
+            if sig.name != name || log_id.get(..4) != Some(&sig.key_fingerprint[..]) {
+                continue;
+            }
+            if verify_log_signature(message_bytes, &sig.raw, key_der, key_type).is_ok() {
                 return Ok(());
             }
         }
 
-        Err(Error::SigstoreVerification(
-            "No valid checkpoint signature found".into(),
-        ))
+        Err(Error::SigstoreVerification(format!(
+            "No valid checkpoint signature found for log {name} (key hint {})",
+            hex::encode(log_id.get(..4).unwrap_or_default())
+        )))
     }
 }
 
@@ -247,6 +253,23 @@ impl CheckpointSignature {
             name: name.to_string(),
             raw: sig.to_vec(),
         })
+    }
+}
+
+/// Verify a signature made by a Rekor log key (`key_type` is the trust root's
+/// `keyDetails`). Used for checkpoint signatures and v1 signed entry timestamps.
+pub(super) fn verify_log_signature(
+    message: &[u8],
+    signature: &[u8],
+    key_der: &[u8],
+    key_type: &str,
+) -> Result<()> {
+    match key_type {
+        "PKIX_ECDSA_P256_SHA_256" => verify_ecdsa_p256(message, signature, key_der),
+        "PKIX_ED25519" => verify_ed25519(message, signature, key_der),
+        other => Err(Error::SigstoreVerification(format!(
+            "Unsupported Rekor key type: {other}"
+        ))),
     }
 }
 
@@ -553,6 +576,56 @@ mod test {
             assert_eq!(decoded.signatures.len(), 2);
             assert_eq!(decoded.signatures[0], sig1);
             assert_eq!(decoded.signatures[1], sig2);
+        }
+    }
+
+    mod test_verify_signature {
+        use crate::verifier::sigstore::checkpoint::SignedCheckpoint;
+        use crate::verifier::sigstore::trust;
+        use crate::verifier::util::decode_b64;
+
+        fn real_checkpoint() -> (SignedCheckpoint, trust::RekorKey, Vec<u8>) {
+            let bundle: serde_json::Value =
+                serde_json::from_str(include_str!("../../../assets/rekor_test_bundle.json"))
+                    .unwrap();
+            let entry = &bundle["verificationMaterial"]["tlogEntries"][0];
+            let cp = SignedCheckpoint::decode(
+                entry["inclusionProof"]["checkpoint"]["envelope"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let log_id_b64 = entry["logId"]["keyId"].as_str().unwrap();
+            let key = trust::load_rekor_keys()
+                .unwrap()
+                .into_iter()
+                .find(|k| k.key_id == log_id_b64)
+                .unwrap();
+            (cp, key, decode_b64(log_id_b64).unwrap())
+        }
+
+        #[test]
+        fn accepts_matching_name_and_hint() {
+            let (cp, key, log_id) = real_checkpoint();
+            cp.verify_signature(&key.key_der, &key.key_type, &key.host, &log_id)
+                .unwrap();
+        }
+
+        #[test]
+        fn rejects_wrong_key_hint() {
+            let (cp, key, mut log_id) = real_checkpoint();
+            log_id[0] ^= 0x01;
+            assert!(cp
+                .verify_signature(&key.key_der, &key.key_type, &key.host, &log_id)
+                .is_err());
+        }
+
+        #[test]
+        fn rejects_wrong_signer_name() {
+            let (cp, key, log_id) = real_checkpoint();
+            assert!(cp
+                .verify_signature(&key.key_der, &key.key_type, "rekor.example.org", &log_id)
+                .is_err());
         }
     }
 }

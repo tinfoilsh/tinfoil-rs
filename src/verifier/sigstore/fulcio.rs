@@ -4,6 +4,7 @@
 //! Fulcio Certificate Authority from the Sigstore public-good instance.
 
 use der::{Decode, Encode};
+use sha2::Digest;
 use x509_cert::Certificate;
 
 use super::trust;
@@ -13,6 +14,10 @@ use crate::error::{Error, Result};
 const OID_SECP256R1: &str = "1.2.840.10045.3.1.7";
 /// OID for P-384 curve (secp384r1): 1.3.132.0.34
 const OID_SECP384R1: &str = "1.3.132.0.34";
+/// ecdsa-with-SHA256 / SHA384 / SHA512 (RFC 5758 §3.2)
+const OID_ECDSA_SHA256: &str = "1.2.840.10045.4.3.2";
+const OID_ECDSA_SHA384: &str = "1.2.840.10045.4.3.3";
+const OID_ECDSA_SHA512: &str = "1.2.840.10045.4.3.4";
 
 /// Find the issuer certificate's SPKI for a given certificate.
 ///
@@ -90,7 +95,7 @@ pub fn verify_fulcio_chain(cert_der: &[u8], cert_not_before: u64) -> Result<()> 
 }
 
 /// Verify `leaf` against a Fulcio-style chain `[intermediate(s)..., root]`.
-fn verify_against_chain(leaf: &Certificate, chain_der: &[Vec<u8>]) -> Result<()> {
+pub(super) fn verify_against_chain(leaf: &Certificate, chain_der: &[Vec<u8>]) -> Result<()> {
     // Parse all chain certificates up front.
     let chain_certs: Vec<Certificate> = chain_der
         .iter()
@@ -126,7 +131,7 @@ fn verify_against_chain(leaf: &Certificate, chain_der: &[Vec<u8>]) -> Result<()>
 }
 
 /// Verify that `child` was signed by `issuer` (DN match + cryptographic signature).
-fn verify_issued_by(
+pub(super) fn verify_issued_by(
     child: &Certificate,
     issuer: &Certificate,
     context: &str,
@@ -154,9 +159,29 @@ fn verify_issued_by(
         .and_then(|p| p.decode_as::<der::asn1::ObjectIdentifier>().ok())
         .map(|oid| oid.to_string());
 
+    // RFC 5280 §4.1.1.2: the unsigned outer algorithm must equal the signed inner one.
+    if child.signature_algorithm != child.tbs_certificate.signature {
+        return Err(Error::SigstoreVerification(format!(
+            "{} outer signature algorithm does not match tbs.signature",
+            context
+        )));
+    }
+    // Hash per the child's signature algorithm, not the issuer's curve (P-256 CAs can use SHA-384).
+    let digest: Vec<u8> = match child.signature_algorithm.oid.to_string().as_str() {
+        OID_ECDSA_SHA256 => sha2::Sha256::digest(&tbs_bytes).to_vec(),
+        OID_ECDSA_SHA384 => sha2::Sha384::digest(&tbs_bytes).to_vec(),
+        OID_ECDSA_SHA512 => sha2::Sha512::digest(&tbs_bytes).to_vec(),
+        other => {
+            return Err(Error::SigstoreVerification(format!(
+                "{} uses unsupported signature algorithm {}",
+                context, other
+            )))
+        }
+    };
+
     let verified = match curve_oid.as_deref() {
-        Some(OID_SECP256R1) => verify_ecdsa_p256(&tbs_bytes, sig_bytes, issuer_pubkey_bytes),
-        Some(OID_SECP384R1) => verify_ecdsa_p384(&tbs_bytes, sig_bytes, issuer_pubkey_bytes),
+        Some(OID_SECP256R1) => verify_ecdsa_p256(&digest, sig_bytes, issuer_pubkey_bytes),
+        Some(OID_SECP384R1) => verify_ecdsa_p384(&digest, sig_bytes, issuer_pubkey_bytes),
         _ => {
             return Err(Error::SigstoreVerification(format!(
                 "{} issuer uses unsupported curve",
@@ -174,9 +199,9 @@ fn verify_issued_by(
     Ok(())
 }
 
-/// Verify ECDSA P-256 signature over TBS certificate bytes.
-fn verify_ecdsa_p256(tbs_bytes: &[u8], sig_bytes: &[u8], pubkey_bytes: &[u8]) -> bool {
-    use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+/// Verify ECDSA P-256 signature over an already-hashed TBS certificate.
+fn verify_ecdsa_p256(digest: &[u8], sig_bytes: &[u8], pubkey_bytes: &[u8]) -> bool {
+    use p256::ecdsa::{signature::hazmat::PrehashVerifier, Signature, VerifyingKey};
 
     let Some(key) = VerifyingKey::from_sec1_bytes(pubkey_bytes).ok() else {
         return false;
@@ -184,12 +209,12 @@ fn verify_ecdsa_p256(tbs_bytes: &[u8], sig_bytes: &[u8], pubkey_bytes: &[u8]) ->
     let Some(sig) = Signature::from_der(sig_bytes).ok() else {
         return false;
     };
-    key.verify(tbs_bytes, &sig).is_ok()
+    key.verify_prehash(digest, &sig).is_ok()
 }
 
-/// Verify ECDSA P-384 signature over TBS certificate bytes.
-fn verify_ecdsa_p384(tbs_bytes: &[u8], sig_bytes: &[u8], pubkey_bytes: &[u8]) -> bool {
-    use p384::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+/// Verify ECDSA P-384 signature over an already-hashed TBS certificate.
+fn verify_ecdsa_p384(digest: &[u8], sig_bytes: &[u8], pubkey_bytes: &[u8]) -> bool {
+    use p384::ecdsa::{signature::hazmat::PrehashVerifier, Signature, VerifyingKey};
 
     let Some(key) = VerifyingKey::from_sec1_bytes(pubkey_bytes).ok() else {
         return false;
@@ -197,7 +222,7 @@ fn verify_ecdsa_p384(tbs_bytes: &[u8], sig_bytes: &[u8], pubkey_bytes: &[u8]) ->
     let Some(sig) = Signature::from_der(sig_bytes).ok() else {
         return false;
     };
-    key.verify(tbs_bytes, &sig).is_ok()
+    key.verify_prehash(digest, &sig).is_ok()
 }
 
 #[cfg(test)]
@@ -286,5 +311,22 @@ jaDTSFaq1NIwodHp7X9fOG48uRuJWS8GmifD969sC4Ut2FJFoklceBVUNCHR
             "Error should mention untrusted CA, got: {}",
             err_msg
         );
+    }
+
+    #[test]
+    fn test_outer_signature_algorithm_must_match_tbs() {
+        // Embedded Fulcio intermediate issued by the root.
+        let ca = trust::load_fulcio_cas()
+            .unwrap()
+            .into_iter()
+            .find(|ca| ca.cert_chain_der.len() == 2)
+            .unwrap();
+        let mut child = Certificate::from_der(&ca.cert_chain_der[0]).unwrap();
+        let issuer = Certificate::from_der(&ca.cert_chain_der[1]).unwrap();
+        verify_issued_by(&child, &issuer, "intermediate").unwrap();
+
+        child.signature_algorithm.oid = der::asn1::ObjectIdentifier::new_unwrap(OID_ECDSA_SHA256);
+        let e = verify_issued_by(&child, &issuer, "intermediate").unwrap_err();
+        assert!(e.to_string().contains("outer signature algorithm"), "{e}");
     }
 }

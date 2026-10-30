@@ -27,8 +27,10 @@ use tinfoil::verifier::sigstore::checkpoint::SignedCheckpoint;
 use tinfoil::verifier::sigstore::dsse::compute_pae;
 use tinfoil::verifier::sigstore::merkle::rfc6962::Rfc6269HasherTrait;
 use tinfoil::verifier::sigstore::merkle::{MerkleProofVerifier, Rfc6269Default};
+use tinfoil::verifier::sigstore::rekor;
 use tinfoil::verifier::sigstore::transparency;
 use tinfoil::verifier::sigstore::trust;
+use tinfoil::verifier::sigstore::tsa;
 use tinfoil::verifier::util::decode_b64;
 
 const DEFAULT_TRUSTED_ROOT: &str = include_str!("../../assets/trusted_root.json");
@@ -568,9 +570,13 @@ fn verify_rekor_entry(
         .get("version")
         .and_then(|v| v.as_str())
         .unwrap_or("0.0.1");
+    // Rekor v1's intoto type also has a 0.0.2 schema; only hashedrekord/dsse
+    // 0.0.2 are rekor-tiles (Rekor v2) entries.
+    let is_rekor_v2 = entry_version == "0.0.2"
+        && kind_version.get("kind").and_then(|k| k.as_str()) != Some("intoto");
 
-    // For Rekor v1 (0.0.1): verify integrated time within cert validity
-    if entry_version == "0.0.1" {
+    // For Rekor v1: verify integrated time within cert validity
+    if !is_rekor_v2 {
         if let Some(cert_bytes) = cert_der {
             let integrated_time = entry
                 .get("integratedTime")
@@ -599,13 +605,46 @@ fn verify_rekor_entry(
             }
         }
     }
-    // For Rekor v2 (0.0.2): need TSA timestamp verification
-    // We verify what we can (checkpoint, inclusion proof) and check TSA if present
-    if entry_version == "0.0.2" {
-        if let Some(cert_bytes) = cert_der {
-            // Try to verify timestamp from TSA
-            verify_tsa_timestamp(bundle, cert_bytes, trusted_root_json)?;
+    // Every RFC 3161 timestamp must verify against a trusted TSA and fall inside
+    // the cert validity window. Rekor v2 entries have no integratedTime, so for
+    // them a verified timestamp is the only observer time and is required.
+    let tsa_time = {
+        let bundle_sig_b64 = if is_dsse {
+            bundle.pointer("/dsseEnvelope/signatures/0/sig")
+        } else {
+            bundle.pointer("/messageSignature/signature")
         }
+        .and_then(|s| s.as_str())
+        .ok_or("Missing bundle signature")?;
+        let bundle_sig = decode_b64(bundle_sig_b64).map_err(|e| format!("Decode signature: {e}"))?;
+        let tsas = trust::load_timestamp_authorities_from_json(trusted_root_json)
+            .map_err(|e| format!("Load timestamp authorities: {e}"))?;
+        let (times, errors) = tsa::verify_timestamps(bundle, &bundle_sig, &tsas)
+            .map_err(|e| format!("TSA timestamp: {e}"))?;
+        if is_rekor_v2 && times.is_empty() {
+            return Err(format!("Rekor v2 entry requires a verified TSA timestamp: {errors:?}"));
+        }
+        if let Some(cert_bytes) = cert_der {
+            let cert = Certificate::from_der(cert_bytes)
+                .map_err(|e| format!("Parse cert for TSA check: {e}"))?;
+            let validity = &cert.tbs_certificate.validity;
+            let not_before = validity.not_before.to_unix_duration().as_secs();
+            let not_after = validity.not_after.to_unix_duration().as_secs();
+            for t in &times {
+                if *t < not_before || *t > not_after {
+                    return Err(format!(
+                        "TSA timestamp {t} outside cert validity [{not_before}, {not_after}]"
+                    ));
+                }
+            }
+        }
+        times.iter().min().copied()
+    };
+    // Rekor v1: integratedTime is authenticated by the SET; without a promise the
+    // TSA timestamp must anchor the signature instead.
+    let has_promise = entry.pointer("/inclusionPromise/signedEntryTimestamp").is_some();
+    if !is_rekor_v2 && !has_promise && tsa_time.is_none() {
+        return Err("Rekor v1 entry has no inclusion promise and no TSA timestamp".into());
     }
 
     // Get inclusion proof
@@ -624,13 +663,13 @@ fn verify_rekor_entry(
         .and_then(|k| k.as_str())
         .ok_or("Missing logId")?;
 
-    // For v1, use integrated time for key validity check; for v2, accept any valid key
-    let timestamp_for_key = if entry_version == "0.0.1" {
+    // v1: the integrated time selects the key by validity; v2: the TSA time does.
+    let timestamp_for_key = if !is_rekor_v2 && has_promise {
         entry
             .get("integratedTime")
             .and_then(|t| t.as_str().and_then(|s| s.parse::<u64>().ok()).or(t.as_u64()))
     } else {
-        None
+        tsa_time
     };
 
     let rekor_key = rekor_keys
@@ -665,8 +704,18 @@ fn verify_rekor_entry(
     let signed_checkpoint =
         SignedCheckpoint::decode(checkpoint_str).map_err(|e| format!("Parse checkpoint: {e}"))?;
 
+    if !is_rekor_v2 && has_promise {
+        rekor::verify_signed_entry_timestamp(entry, rekor_key).map_err(|e| e.to_string())?;
+    }
+
+    let log_id_bytes = decode_b64(log_id).map_err(|e| format!("Decode logId: {e}"))?;
     signed_checkpoint
-        .verify_signature(&rekor_key.key_der, &rekor_key.key_type)
+        .verify_signature(
+            &rekor_key.key_der,
+            &rekor_key.key_type,
+            &rekor_key.host,
+            &log_id_bytes,
+        )
         .map_err(|e| format!("Checkpoint signature: {e}"))?;
 
     // Verify root hash matches checkpoint
@@ -758,134 +807,6 @@ fn verify_rekor_entry(
 
     Rfc6269Default::verify_inclusion(log_index, &leaf_hash, tree_size, &proof_outputs, &root_output)
         .map_err(|e| format!("Merkle inclusion proof failed: {e}"))
-}
-
-// ---------------------------------------------------------------------------
-// TSA timestamp verification (basic)
-// ---------------------------------------------------------------------------
-
-fn verify_tsa_timestamp(
-    bundle: &serde_json::Value,
-    cert_der: &[u8],
-    _trusted_root_json: &str,
-) -> Result<(), String> {
-    // Extract TSA timestamps from bundle
-    let timestamps = bundle
-        .get("verificationMaterial")
-        .and_then(|vm| vm.get("timestampVerificationData"))
-        .and_then(|tvd| tvd.get("rfc3161Timestamps"))
-        .and_then(|ts| ts.as_array());
-
-    let timestamps = match timestamps {
-        Some(ts) if !ts.is_empty() => ts,
-        _ => return Err("Rekor v2 entry requires TSA timestamp".into()),
-    };
-
-    // Parse the first timestamp to extract the signing time
-    let ts_b64 = timestamps[0]
-        .get("signedTimestamp")
-        .and_then(|s| s.as_str())
-        .ok_or("Missing signedTimestamp")?;
-    let ts_bytes = decode_b64(ts_b64).map_err(|e| format!("Decode TSA timestamp: {e}"))?;
-
-    // Extract signing time from the CMS SignedData structure
-    // The TSTInfo is embedded in the CMS content. We do basic ASN.1 parsing
-    // to extract the genTime field.
-    let signing_time = extract_tsa_gen_time(&ts_bytes)?;
-
-    // Verify the signing time is within the certificate's validity period
-    let cert =
-        Certificate::from_der(cert_der).map_err(|e| format!("Parse cert for TSA check: {e}"))?;
-    let not_before = cert
-        .tbs_certificate
-        .validity
-        .not_before
-        .to_unix_duration()
-        .as_secs();
-    let not_after = cert
-        .tbs_certificate
-        .validity
-        .not_after
-        .to_unix_duration()
-        .as_secs();
-
-    if signing_time < not_before || signing_time > not_after {
-        return Err(format!(
-            "TSA timestamp {signing_time} outside cert validity [{not_before}, {not_after}]"
-        ));
-    }
-
-    Ok(())
-}
-
-/// Extract genTime from an RFC 3161 TimeStampResp/TimeStampToken.
-/// This does minimal ASN.1 parsing to find the GeneralizedTime in TSTInfo.
-fn extract_tsa_gen_time(ts_bytes: &[u8]) -> Result<u64, String> {
-    // The signedTimestamp is a CMS SignedData structure (or TimeStampResp).
-    // Structure: SEQUENCE { contentType, content: [0] EXPLICIT SEQUENCE { ... } }
-    // We need to find the TSTInfo which contains genTime (GeneralizedTime).
-    //
-    // TSTInfo ::= SEQUENCE {
-    //   version INTEGER,
-    //   policy OBJECT IDENTIFIER,
-    //   messageImprint MessageImprint,
-    //   serialNumber INTEGER,
-    //   genTime GeneralizedTime,  <-- this is what we want
-    //   ...
-    // }
-    //
-    // We search for GeneralizedTime tags (0x18) in the DER data.
-    // This is a heuristic but works for well-formed TSA responses.
-
-    let mut i = 0;
-    while i < ts_bytes.len() {
-        if ts_bytes[i] == 0x18 {
-            // GeneralizedTime tag
-            if i + 1 < ts_bytes.len() {
-                let len = ts_bytes[i + 1] as usize;
-                if i + 2 + len <= ts_bytes.len() {
-                    let time_str = std::str::from_utf8(&ts_bytes[i + 2..i + 2 + len])
-                        .map_err(|_| "Invalid GeneralizedTime encoding")?;
-                    if let Ok(ts) = parse_generalized_time(time_str) {
-                        return Ok(ts);
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-
-    Err("Could not find genTime in TSA timestamp".into())
-}
-
-fn parse_generalized_time(s: &str) -> Result<u64, String> {
-    // Format: YYYYMMDDHHMMSSZ or YYYYMMDDHHMMSS.fffZ
-    let s = s.trim_end_matches('Z');
-    let s = s.split('.').next().unwrap_or(s); // strip fractional seconds
-
-    if s.len() < 14 {
-        return Err("GeneralizedTime too short".into());
-    }
-
-    let year: i32 = s[0..4].parse().map_err(|_| "Invalid year")?;
-    let month: u8 = s[4..6].parse().map_err(|_| "Invalid month")?;
-    let day: u8 = s[6..8].parse().map_err(|_| "Invalid day")?;
-    let hour: u8 = s[8..10].parse().map_err(|_| "Invalid hour")?;
-    let minute: u8 = s[10..12].parse().map_err(|_| "Invalid minute")?;
-    let second: u8 = s[12..14].parse().map_err(|_| "Invalid second")?;
-
-    let dt = time::PrimitiveDateTime::new(
-        time::Date::from_calendar_date(year, month.try_into().map_err(|_| "Invalid month")?, day)
-            .map_err(|e| format!("Invalid date: {e}"))?,
-        time::Time::from_hms(hour, minute, second).map_err(|e| format!("Invalid time: {e}"))?,
-    )
-    .assume_offset(time::UtcOffset::UTC);
-
-    let ts = dt.unix_timestamp();
-    if ts < 0 {
-        return Err("Timestamp before epoch".into());
-    }
-    Ok(ts as u64)
 }
 
 // ---------------------------------------------------------------------------
