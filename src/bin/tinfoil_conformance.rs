@@ -110,6 +110,7 @@ fn cmd_capabilities() -> u8 {
                 "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1"
             ],
             "legacy_bundle_format_supported": false,
+            "rekor_v2_supported": true,
             "accepts_multi_tlog_entries": true,
             "oidc_issuer_v2_preferred": true,
             "scts_count_distinguish_missing_vs_duplicate": true,
