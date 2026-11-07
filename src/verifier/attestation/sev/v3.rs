@@ -16,6 +16,7 @@ use crate::verifier::attestation::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use std::time::SystemTime;
 
 /// Untrusted document-carried AMD evidence. None of its fields is a trust anchor.
 #[derive(Debug, Clone, Copy)]
@@ -36,16 +37,26 @@ pub fn verify_evidence(
     expected_report_data: &[u8; 64],
     policy: &Value,
 ) -> Result<Measurement> {
+    verify_evidence_with_expiry(ev, expected_report_data, policy)
+        .map(|(measurement, _)| measurement)
+}
+
+pub(crate) fn verify_evidence_with_expiry(
+    ev: Evidence<'_>,
+    expected_report_data: &[u8; 64],
+    policy: &Value,
+) -> Result<(Measurement, SystemTime)> {
     if ev.report.len() != REPORT_SIZE {
         return Err(err("SEV report must be exactly 1184 bytes"));
     }
     report::validate_report_structure(ev.report)?;
     let product = Product::from_report(ev.report, true)?;
     validate_format(ev.report, product)?;
-    cert_chain::verify_cert_chain_crypto_for_product(ev.vcek_der, ev.cert_chain_pem, product)?;
+    let cert_expiry =
+        cert_chain::verify_cert_chain_crypto_for_product(ev.vcek_der, ev.cert_chain_pem, product)?;
     // Go appraises revocation against the repository-pinned intermediate,
     // never a serial number chosen by the untrusted document.
-    cert_chain::verify_crl(ev.crl_der, product.chain())?;
+    let crl_expiry = cert_chain::verify_crl(ev.crl_der, product.chain())?;
     let cert_tcb = cert_chain::vcek_tcb_for_product(ev.vcek_der, product)?;
     cert_chain::validate_vcek_hwid_for_product(
         ev.vcek_der,
@@ -55,12 +66,15 @@ pub fn verify_evidence(
     signature::verify_report_signature(ev.report, ev.vcek_der)?;
     let policy = parse_policy(policy)?;
     validate_fields(ev.report, expected_report_data, &policy, product, cert_tcb)?;
-    Ok(Measurement {
-        type_: PredicateType::SevGuestV2,
-        registers: vec![hex::encode(
-            &ev.report[MEASUREMENT_OFFSET..MEASUREMENT_OFFSET + MEASUREMENT_SIZE],
-        )],
-    })
+    Ok((
+        Measurement {
+            type_: PredicateType::SevGuestV2,
+            registers: vec![hex::encode(
+                &ev.report[MEASUREMENT_OFFSET..MEASUREMENT_OFFSET + MEASUREMENT_SIZE],
+            )],
+        },
+        cert_expiry.min(crl_expiry),
+    ))
 }
 
 /// Validate every SEV policy in a signed platform artifact, including entries
@@ -365,6 +379,7 @@ fn validate_fields(
 mod tests {
     use super::*;
     use base64::Engine;
+    use der::Decode;
     fn fixture() -> (Vec<u8>, Vec<u8>, Value) {
         let f: Value = serde_json::from_str(include_str!("testdata/turin-public.json")).unwrap();
         let b64 = base64::engine::general_purpose::STANDARD;
@@ -395,6 +410,21 @@ mod tests {
     #[test]
     fn public_turin_signature_and_policy_positive_with_negative_mutations() {
         let (report, vcek, policy) = fixture();
+        let expires_at = cert_chain::verify_cert_chain_crypto_for_product(
+            &vcek,
+            Product::Turin.chain(),
+            Product::Turin,
+        )
+        .unwrap();
+        let certificate = x509_cert::Certificate::from_der(&vcek).unwrap();
+        assert_eq!(
+            expires_at,
+            certificate
+                .tbs_certificate
+                .validity
+                .not_after
+                .to_system_time()
+        );
         let expected: [u8; 64] = report[REPORT_DATA_OFFSET..REPORT_DATA_OFFSET + 64]
             .try_into()
             .unwrap();

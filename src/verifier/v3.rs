@@ -243,7 +243,7 @@ fn verify_document_at(
     let crl = document.collateral.amd_crl.as_ref().ok_or_else(|| {
         Error::AttestationVerification("V3 document is missing AMD CRL collateral".into())
     })?;
-    let enclave = attestation::sev::verify_evidence(
+    let (enclave, hardware_expiry) = attestation::sev::verify_evidence_with_expiry(
         attestation::sev::Evidence {
             report: &document.raw_cpu_report,
             vcek_der: &vcek.vcek_der,
@@ -282,7 +282,7 @@ fn verify_document_at(
     let code_fingerprint = refs.measurement.fingerprint_for_target(&enclave.type_);
     let enclave_fingerprint = enclave.fingerprint();
     Ok(VerifiedDirect {
-        freshness_expires_at: refs.freshness_expires_at,
+        freshness_expires_at: refs.freshness_expires_at.min(hardware_expiry),
         ground_truth: GroundTruth {
             config_repo: approved.release.repo.clone(),
             release_tag: Some(approved.release.tag.clone()),

@@ -66,8 +66,9 @@ owns that verification, matching the referenced Go/CLI assurance boundary.
 ## Expiry and refresh
 
 Witness age is bounded to seven days with five minutes of permitted future clock
-skew. Expiry derives from the older authenticated witness timestamp, not local
-verification time. Reverification of unchanged witnesses does not renew expiry.
+skew. Expiry is the earliest authenticated witness, CPU certificate, or CRL
+deadline, not local verification time. Reverification of unchanged material does
+not renew expiry.
 
 New requests fail at expiry, including requests using an existing pooled TLS
 connection, cloned raw clients, split builders and typed calls. The transport

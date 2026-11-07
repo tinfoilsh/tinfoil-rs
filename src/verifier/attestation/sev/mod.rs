@@ -17,7 +17,7 @@ mod report;
 mod signature;
 mod v3;
 mod validation;
-pub(crate) use v3::validate_policy;
+pub(crate) use v3::{validate_policy, verify_evidence_with_expiry};
 pub use v3::{verify_evidence, Evidence};
 
 use super::constants::*;

@@ -8,6 +8,7 @@
 
 use der::Decode;
 use sha2::{Digest, Sha256, Sha384};
+use std::time::SystemTime;
 
 use super::product::{Product, Tcb};
 use crate::error::{Error, Result};
@@ -444,14 +445,14 @@ fn validate_basic_constraints(
 /// 5. Validates all certificates are within their validity period
 /// 6. Validates BasicConstraints (ARK/ASK must be CAs, VCEK must not)
 pub(super) fn verify_cert_chain_crypto(vcek_der: &[u8], cert_chain_pem: &[u8]) -> Result<()> {
-    verify_cert_chain_crypto_for_product(vcek_der, cert_chain_pem, Product::Genoa)
+    verify_cert_chain_crypto_for_product(vcek_der, cert_chain_pem, Product::Genoa).map(|_| ())
 }
 
 pub(super) fn verify_cert_chain_crypto_for_product(
     vcek_der: &[u8],
     cert_chain_pem: &[u8],
     product: Product,
-) -> Result<()> {
+) -> Result<SystemTime> {
     use der::Decode;
     use x509_cert::Certificate;
 
@@ -660,7 +661,13 @@ pub(super) fn verify_cert_chain_crypto_for_product(
         "VCEK signature",
     )?;
 
-    Ok(())
+    Ok(vcek_cert
+        .tbs_certificate
+        .validity
+        .not_after
+        .to_system_time()
+        .min(ask_cert.tbs_certificate.validity.not_after.to_system_time())
+        .min(ark_cert.tbs_certificate.validity.not_after.to_system_time()))
 }
 
 /// Verify the outer `signature_algorithm` field equals the inner `tbs_certificate.signature`
@@ -1015,7 +1022,7 @@ pub(super) fn validate_vcek_hwid_for_product(
 /// AMD's product CRL revokes ASK certificates. VCEK revocation is represented
 /// by TCB updates, exactly as in go-sev-guest verifyCRL. No network or mutable
 /// cross-verification cache is used in the V3 path.
-pub(super) fn verify_crl(crl_der: &[u8], chain_pem: &[u8]) -> Result<()> {
+pub(super) fn verify_crl(crl_der: &[u8], chain_pem: &[u8]) -> Result<SystemTime> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1026,7 +1033,7 @@ pub(super) fn verify_crl(crl_der: &[u8], chain_pem: &[u8]) -> Result<()> {
 
 // Private implementation only: production callers cannot override appraisal
 // time or trust roots. Unit tests advance the clock over a signed public CRL.
-fn verify_crl_at(crl_der: &[u8], chain_pem: &[u8], now: u64) -> Result<()> {
+fn verify_crl_at(crl_der: &[u8], chain_pem: &[u8], now: u64) -> Result<SystemTime> {
     use der::Encode;
     use x509_cert::{crl::CertificateList, Certificate};
     if crl_der.is_empty() {
@@ -1085,7 +1092,7 @@ fn verify_crl_at(crl_der: &[u8], chain_pem: &[u8], now: u64) -> Result<()> {
     {
         return Err(Error::AttestationVerification("AMD ASK is revoked".into()));
     }
-    Ok(())
+    Ok(next.to_system_time())
 }
 
 #[cfg(test)]
@@ -1107,7 +1114,10 @@ mod v3_collateral_tests {
             .unwrap()
             .to_unix_duration()
             .as_secs();
-        verify_crl_at(CRL, Product::Turin.chain(), start + 1).unwrap();
+        assert_eq!(
+            verify_crl_at(CRL, Product::Turin.chain(), start + 1).unwrap(),
+            parsed.tbs_cert_list.next_update.unwrap().to_system_time()
+        );
         assert!(verify_crl_at(CRL, Product::Turin.chain(), start - 1)
             .unwrap_err()
             .to_string()
