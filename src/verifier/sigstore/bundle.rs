@@ -25,7 +25,7 @@ impl TryFrom<String> for B64 {
     }
 }
 
-/// Non-negative int64 as protojson prints it: a decimal string.
+/// Non-negative int64 exactly as protojson prints it: a decimal string without leading zeros.
 #[derive(Deserialize)]
 #[serde(try_from = "String")]
 struct Int64(String);
@@ -33,7 +33,7 @@ struct Int64(String);
 impl TryFrom<String> for Int64 {
     type Error = String;
     fn try_from(s: String) -> std::result::Result<Self, String> {
-        if !s.is_empty() && s.len() <= 19 && s.bytes().all(|b| b.is_ascii_digit()) && s.parse::<i64>().is_ok() {
+        if s.bytes().all(|b| b.is_ascii_digit()) && s.parse::<i64>().map(|n| n.to_string() == s).unwrap_or(false) {
             Ok(Int64(s))
         } else {
             Err(format!("expected a non-negative int64 string, got {s:?}"))
@@ -171,10 +171,22 @@ struct DsseSignature {
     keyid: Option<String>,
 }
 
+fn exactly_one(set: &[bool], what: &str) -> Result<()> {
+    if set.iter().filter(|b| **b).count() == 1 {
+        Ok(())
+    } else {
+        Err(Error::SigstoreVerification(format!("Failed to parse bundle: exactly one of {what} must be set")))
+    }
+}
+
 /// Parse bundle JSON, rejecting anything but the canonical protobuf JSON encoding.
 pub fn parse_bundle(json: &[u8]) -> Result<serde_json::Value> {
     let parse_err = |e: serde_json::Error| Error::SigstoreVerification(format!("Failed to parse bundle: {e}"));
-    serde_json::from_slice::<Bundle>(json).map_err(parse_err)?;
+    let b: Bundle = serde_json::from_slice(json).map_err(parse_err)?;
+    // protobuf oneofs, which protojson enforces at parse time too.
+    exactly_one(&[b.message_signature.is_some(), b.dsse_envelope.is_some()], "messageSignature, dsseEnvelope")?;
+    let vm = &b.verification_material;
+    exactly_one(&[vm.public_key.is_some(), vm.x509_certificate_chain.is_some(), vm.certificate.is_some()], "publicKey, x509CertificateChain, certificate")?;
     serde_json::from_slice(json).map_err(parse_err)
 }
 
@@ -218,6 +230,13 @@ mod tests {
         rejects(&mutated(V1, |v| entry(v)["logIndex"] = json!(845420855)), "int64 as number");
         rejects(&mutated(V1, |v| entry(v)["logIndex"] = json!("-1")), "negative int64");
         rejects(&mutated(V1, |v| entry(v)["logIndex"] = json!("9223372036854775808")), "int64 overflow");
+        rejects(&mutated(V1, |v| entry(v)["logIndex"] = json!("0001")), "leading zeros");
+        rejects(&mutated(V1, |v| entry(v)["logIndex"] = json!("")), "empty int64");
+        parse_bundle(mutated(V1, |v| entry(v)["logIndex"] = json!("0")).as_bytes()).unwrap();
+        rejects(&mutated(V1, |v| v["messageSignature"] = json!({"signature": "AA=="})), "both content oneof members");
+        rejects(&mutated(V1, |v| { v.as_object_mut().unwrap().remove("dsseEnvelope"); }), "no content");
+        rejects(&mutated(V1, |v| v["verificationMaterial"]["x509CertificateChain"] = json!({"certificates": []})), "both verification material members");
+        rejects(&mutated(V1, |v| v["verificationMaterial"]["publicKey"] = json!({"hint": "k"})), "certificate plus publicKey");
         for bad in ["AA", "AA==\n", "-_8=", "AB=="] {
             rejects(&mutated(V1, |v| v["dsseEnvelope"]["payload"] = json!(bad)), "non-canonical base64");
         }
