@@ -76,7 +76,7 @@ pub async fn fetch_latest_digest(repo: &str) -> Result<String> {
 
 #[derive(Deserialize)]
 struct Attestation {
-    bundle: serde_json::Value,
+    bundle: Box<serde_json::value::RawValue>,
 }
 
 #[derive(Deserialize)]
@@ -106,6 +106,6 @@ pub async fn fetch_attestation_bundle(repo: &str, digest: &str) -> Result<Vec<u8
         )));
     }
 
-    let bundle = serde_json::to_vec(&attestations.attestations[0].bundle)?;
-    Ok(bundle)
+    // Raw bytes, not a re-serialized Value: the canonical-JSON gate must still see duplicate keys.
+    Ok(attestations.attestations[0].bundle.get().as_bytes().to_vec())
 }

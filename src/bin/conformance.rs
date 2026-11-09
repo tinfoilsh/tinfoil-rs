@@ -142,8 +142,8 @@ fn verify_bundle(args: &[String]) -> Result<(), String> {
     // 1. Load and parse bundle
     let bundle_json =
         fs::read_to_string(&vargs.bundle_path).map_err(|e| format!("Read bundle: {e}"))?;
-    let bundle: serde_json::Value =
-        serde_json::from_str(&bundle_json).map_err(|e| format!("Parse bundle JSON: {e}"))?;
+    let bundle: serde_json::Value = tinfoil::verifier::sigstore::bundle::parse_bundle(bundle_json.as_bytes())
+        .map_err(|e| format!("Parse bundle JSON: {e}"))?;
 
     // 2. Load trusted root
     let tr_json = match &vargs.trusted_root_path {
