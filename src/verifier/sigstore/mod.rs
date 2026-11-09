@@ -10,6 +10,7 @@
 //! 6. Extracting the expected measurement
 
 // Submodules adapted from sigstore-rs (Apache 2.0 License)
+pub mod bundle;
 pub mod certificate;
 pub mod checkpoint;
 pub mod dsse;
@@ -84,9 +85,8 @@ pub async fn verify_repo(repo: &str) -> Result<SigstoreResult> {
     // 2. Fetch the Sigstore attestation bundle
     let bundle_json = github::fetch_attestation_bundle(repo, &release.digest).await?;
 
-    // 3. Parse bundle
-    let bundle: serde_json::Value = serde_json::from_slice(&bundle_json)
-        .map_err(|e| Error::SigstoreVerification(format!("Failed to parse bundle: {}", e)))?;
+    // 3. Parse bundle (canonical protobuf JSON only)
+    let bundle = bundle::parse_bundle(&bundle_json)?;
 
     // 4. Verify DSSE signature cryptographically
     dsse::verify_dsse_signature(&bundle)?;
