@@ -4,7 +4,7 @@
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
-use tinfoil_conformance::{EXIT_INTERNAL, EXIT_MALFORMED, EXIT_UNSUPPORTED};
+use tinfoil_conformance::EXIT_INTERNAL;
 
 fn main() -> ExitCode {
     exit(run())
@@ -12,13 +12,19 @@ fn main() -> ExitCode {
 
 fn run() -> i32 {
     let Some(command) = std::env::args().nth(1) else {
-        eprintln!("usage: tinfoil-conformance <stage>|capabilities|live-verify");
-        return EXIT_MALFORMED;
+        // No stage ran, so there is no verdict to report.
+        eprintln!("usage: tinfoil-conformance <stage>|capabilities|live-verify|capture");
+        return EXIT_INTERNAL;
     };
     match command.as_str() {
         "capabilities" => write_json(&tinfoil_conformance::capabilities(), 0),
-        // Not implemented yet; reported as unsupported so the suite skips it.
-        "live-verify" | "capture" => EXIT_UNSUPPORTED,
+        // Not implemented yet. These commands take their own input, not a
+        // stage input, so they are answered here instead of being decoded as
+        // a stage; the suite skips a command that reports itself unsupported.
+        "live-verify" | "capture" => {
+            let (output, code) = tinfoil_conformance::unsupported(&command);
+            write_json(&output, code)
+        }
         stage => {
             let mut stdin = Vec::new();
             if let Err(error) = std::io::stdin().read_to_end(&mut stdin) {

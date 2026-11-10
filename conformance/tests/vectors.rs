@@ -17,7 +17,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use tinfoil_conformance::{EXIT_ACCEPTED, EXIT_MALFORMED, EXIT_REJECTED, EXIT_UNSUPPORTED};
+use tinfoil_conformance::{
+    CODE_MALFORMED_INPUT, EXIT_ACCEPTED, EXIT_MALFORMED, EXIT_REJECTED, EXIT_UNSUPPORTED,
+};
 
 const VECTORS_ENV: &str = "TINFOIL_CONFORMANCE_VECTORS";
 
@@ -126,6 +128,18 @@ fn run_fixture(path: &Path) -> Outcome {
             return Outcome::Fail(format!("accepted (exit {code}), want {}", expected["code"]));
         }
         let want = &expected["code"];
+        // Malformed input has its own exit code; every other rejection
+        // shares one. A fixture that declares its code fixes the exit too.
+        if let Some(want) = want.as_str() {
+            let want_exit = if want == CODE_MALFORMED_INPUT {
+                EXIT_MALFORMED
+            } else {
+                EXIT_REJECTED
+            };
+            if code != want_exit {
+                return Outcome::Fail(format!("exit: got {code}, want {want_exit} for {want}"));
+            }
+        }
         if !want.is_null() && output["rejection"]["code"] != *want {
             return Outcome::Fail(format!(
                 "code: got {}, want {want}",

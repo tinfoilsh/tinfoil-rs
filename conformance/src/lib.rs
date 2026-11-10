@@ -175,6 +175,15 @@ pub struct Rejection {
 /// The input is parsed before the stage is looked at, so malformed input is
 /// reported as such for every stage name.
 pub fn run(stage: &str, stdin: &[u8]) -> (Output, i32) {
+    // A struct also deserialises from an array, member by position, so the
+    // input is required to be an object before it is decoded.
+    let is_object = stdin
+        .iter()
+        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+        .is_some_and(|byte| *byte == b'{');
+    if !is_object {
+        return malformed(stage);
+    }
     let Ok(input) = serde_json::from_slice::<Input>(stdin) else {
         return malformed(stage);
     };
@@ -205,7 +214,8 @@ pub fn capabilities() -> serde_json::Value {
     })
 }
 
-fn unsupported(stage: &str) -> (Output, i32) {
+/// The output and exit code for a stage or command that is not supported.
+pub fn unsupported(stage: &str) -> (Output, i32) {
     let output = Output {
         stage: stage.to_owned(),
         accepted: false,
@@ -271,7 +281,10 @@ mod tests {
     fn input_that_is_not_one_well_formed_object_is_malformed() {
         let cases = [
             ("empty", ""),
-            ("not an object", "[]"),
+            ("empty array", "[]"),
+            ("array with the members by position", r#"["1"]"#),
+            ("array after whitespace", " \n[\"1\"]"),
+            ("string", r#""1""#),
             ("trailing data", r#"{"schema_version":"1"} {}"#),
             (
                 "invalid UTF-8 escape",
