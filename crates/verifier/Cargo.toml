@@ -8,5 +8,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+base64 = "0.22"
+getrandom = { version = "0.3", features = ["std"] }
+sha2 = "0.10"
+
 [lints]
 workspace = true
