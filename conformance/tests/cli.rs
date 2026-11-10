@@ -8,7 +8,7 @@ use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
-use tinfoil_conformance::{EXIT_INTERNAL, EXIT_MALFORMED, EXIT_UNSUPPORTED};
+use tinfoil_conformance::{EXIT_INTERNAL, EXIT_MALFORMED, EXIT_REJECTED, EXIT_UNSUPPORTED};
 
 fn adapter(arguments: &[&str], stdin: &str) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_tinfoil-conformance"))
@@ -39,10 +39,26 @@ fn capabilities_are_printed_as_json() {
 #[test]
 fn a_stage_reads_stdin_and_reports_its_exit_code() {
     let output = adapter(&["v3-check-envelope"], r#"{"schema_version":"1"}"#);
-    assert_eq!(output.status.code(), Some(EXIT_UNSUPPORTED));
+    // The input carries an empty document, which the stage rejects when it
+    // is compiled in.
+    let want = if cfg!(tinfoil_conformance) {
+        EXIT_REJECTED
+    } else {
+        EXIT_UNSUPPORTED
+    };
+    assert_eq!(output.status.code(), Some(want));
     let json = stdout_json(&output);
     assert_eq!(json["stage"], "v3-check-envelope");
     assert_eq!(json["accepted"], false);
+}
+
+#[test]
+fn capabilities_list_the_stages_of_this_build() {
+    let capabilities = stdout_json(&adapter(&["capabilities"], ""));
+    let stages = capabilities["v3"]["stages_supported"].as_array().unwrap();
+    let envelope = stages.iter().any(|stage| stage == "v3-check-envelope");
+    assert_eq!(envelope, cfg!(tinfoil_conformance));
+    assert_eq!(stages.len(), usize::from(envelope));
 }
 
 #[test]

@@ -5,9 +5,13 @@
 //! The adapter answers with JSON on stdout and an exit code; the exit code is
 //! the verdict and the JSON carries the verified facts or the rejection code.
 //!
-//! No stage is implemented yet: every stage reports [`EXIT_UNSUPPORTED`] once
-//! its input has parsed, so the suite skips its fixtures instead of failing
-//! them.
+//! A stage that is not implemented reports [`EXIT_UNSUPPORTED`] once its
+//! input has parsed, so the suite skips its fixtures instead of failing them.
+//!
+//! The stages reach into the verifier's internal modules, which the verifier
+//! exposes only to a build with `--cfg tinfoil_conformance`. Built without
+//! that flag, the adapter implements no stage and says so in its
+//! capabilities.
 
 // Clippy has no test exemption for this lint; see the workspace lints.
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
@@ -57,11 +61,19 @@ pub const STAGES: [&str; 7] = [
     STAGE_VERIFY_TIMESTAMP,
 ];
 
-/// The stages that this adapter implements.
-pub const STAGES_SUPPORTED: [&str; 0] = [];
+/// The stages that this build of the adapter implements.
+#[cfg(tinfoil_conformance)]
+pub const STAGES_SUPPORTED: &[&str] = &[STAGE_CHECK_ENVELOPE];
+
+/// The stages that this build of the adapter implements: none, because the
+/// verifier's internal modules are not exposed to it.
+#[cfg(not(tinfoil_conformance))]
+pub const STAGES_SUPPORTED: &[&str] = &[];
 
 /// The rejection code for an input that did not parse.
 pub const CODE_MALFORMED_INPUT: &str = "MALFORMED_INPUT";
+/// The rejection code of the envelope layer.
+pub const CODE_ENVELOPE_REJECTED: &str = "ENVELOPE_REJECTED";
 
 /// The stdin JSON of one adapter run.
 ///
@@ -194,7 +206,11 @@ pub fn run(stage: &str, stdin: &[u8]) -> (Output, i32) {
     if input.amd_root_ca_pem.is_empty() != input.ask_pem.is_empty() {
         return malformed(stage);
     }
-    unsupported(stage)
+    match stage {
+        #[cfg(tinfoil_conformance)]
+        STAGE_CHECK_ENVELOPE => stages::check_envelope(&input),
+        _ => unsupported(stage),
+    }
 }
 
 /// The adapter's self-description, which the suite reads to decide which
@@ -237,6 +253,89 @@ fn malformed(stage: &str) -> (Output, i32) {
     (output, EXIT_MALFORMED)
 }
 
+#[cfg(tinfoil_conformance)]
+mod stages {
+    //! The stages, over the verifier's internal modules.
+
+    use base64::Engine as _;
+    use base64::alphabet;
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    use tinfoil_verifier::conformance::document;
+
+    use super::{
+        CODE_ENVELOPE_REJECTED, EXIT_ACCEPTED, EXIT_REJECTED, Input, Output, Rejection,
+        STAGE_CHECK_ENVELOPE, malformed,
+    };
+
+    /// Standard base64 with padding, as input fields carry it. Unlike the
+    /// verifier's own decoding it is lenient about unused trailing bits.
+    const INPUT_BASE64: GeneralPurpose = GeneralPurpose::new(
+        &alphabet::STANDARD,
+        GeneralPurposeConfig::new()
+            .with_decode_allow_trailing_bits(true)
+            .with_decode_padding_mode(DecodePaddingMode::RequireCanonical),
+    );
+
+    /// Decodes a base64 input field, ignoring line breaks.
+    pub(super) fn decode_base64(value: &str) -> Option<Vec<u8>> {
+        let joined: String = value
+            .chars()
+            .filter(|c| !matches!(c, '\r' | '\n'))
+            .collect();
+        INPUT_BASE64.decode(joined).ok()
+    }
+
+    /// Decodes a hex input field of either case.
+    pub(super) fn decode_hex(value: &str) -> Option<Vec<u8>> {
+        let digits = value.as_bytes().chunks_exact(2);
+        if !digits.remainder().is_empty() {
+            return None;
+        }
+        digits
+            .map(|pair| {
+                std::str::from_utf8(pair)
+                    .ok()
+                    .filter(|pair| pair.bytes().all(|digit| digit.is_ascii_hexdigit()))
+                    .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            })
+            .collect()
+    }
+
+    /// Strict parse, nonce equality, endorsed-section hashes and report
+    /// data. The nonce is the one in the input, never the document's own.
+    pub(super) fn check_envelope(input: &Input) -> (Output, i32) {
+        let stage = STAGE_CHECK_ENVELOPE;
+        let Some(doc) = decode_base64(&input.document_b64) else {
+            return malformed(stage);
+        };
+        let Some(nonce) = decode_hex(&input.nonce_hex) else {
+            return malformed(stage);
+        };
+        match document::parse(&doc, &nonce) {
+            Ok(_) => {
+                let output = Output {
+                    stage: stage.to_owned(),
+                    accepted: true,
+                    outputs: None,
+                    rejection: None,
+                };
+                (output, EXIT_ACCEPTED)
+            }
+            Err(_) => {
+                let output = Output {
+                    stage: stage.to_owned(),
+                    accepted: false,
+                    outputs: None,
+                    rejection: Some(Rejection {
+                        code: CODE_ENVELOPE_REJECTED.to_owned(),
+                    }),
+                };
+                (output, EXIT_REJECTED)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,8 +347,11 @@ mod tests {
     }
 
     #[test]
-    fn every_stage_is_unsupported_once_its_input_parses() {
+    fn a_stage_that_is_not_implemented_is_unsupported_once_its_input_parses() {
         for stage in STAGES {
+            if STAGES_SUPPORTED.contains(&stage) {
+                continue;
+            }
             let (output, code) = run(stage, MINIMAL.as_bytes());
             assert_eq!(code, EXIT_UNSUPPORTED, "{stage}");
             assert_eq!(output.stage, stage);
@@ -338,6 +440,21 @@ mod tests {
     }
 
     #[test]
+    fn the_supported_stages_follow_the_build() {
+        let envelope = STAGES_SUPPORTED.contains(&STAGE_CHECK_ENVELOPE);
+        assert_eq!(envelope, cfg!(tinfoil_conformance));
+        let (_, code) = run(STAGE_CHECK_ENVELOPE, MINIMAL.as_bytes());
+        // With the stage compiled in, the empty document of the minimal
+        // input is rejected; without it, the stage is unsupported.
+        let want = if envelope {
+            EXIT_REJECTED
+        } else {
+            EXIT_UNSUPPORTED
+        };
+        assert_eq!(code, want);
+    }
+
+    #[test]
     fn output_omits_absent_members() {
         let (output, _) = run(STAGE_VERIFY, MINIMAL.as_bytes());
         let json = serde_json::to_string(&output).unwrap();
@@ -357,5 +474,122 @@ mod tests {
         for stage in stages {
             assert!(STAGES.contains(&stage.as_str().unwrap()));
         }
+    }
+}
+
+#[cfg(all(test, tinfoil_conformance))]
+mod stage_tests {
+    use super::stages::{decode_base64, decode_hex};
+    use super::*;
+
+    /// A well-formed document without keys or collateral, bound to
+    /// [`NONCE_HEX`].
+    const DOCUMENT_B64: &str = concat!(
+        "eyJmb3JtYXQiOiJodHRwczovL3RpbmZvaWwuc2gvcHJlZGljYXRlL2F0dGVzdGF0aW9uL3YzIiwiY2hhbGxlbmdl",
+        "Ijp7Im5vbmNlIjoiMDAwMTAyMDMwNDA1MDYwNzA4MDkwYTBiMGMwZDBlMGYxMDExMTIxMzE0MTUxNjE3MTgxOTFh",
+        "MWIxYzFkMWUxZiIsInJlcG9ydF9kYXRhIjoiMGE1MzI2NmFlNWYxZGVkOWI3ZTlkZTQ3NjJkYWFiYTAzYTE2ZjI4",
+        "ZmUyM2VlOTFkOTQ3MWQ2MDk4NWM1MjkxYjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw",
+        "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJyZXBvcnRfZGF0YV9hbGdvcml0aG0iOiJodHRwczovL3RpbmZvaWwu",
+        "c2gvcmVwb3J0LWRhdGEvdjEifSwiY3B1X2V2aWRlbmNlIjp7ImZvcm1hdCI6Imh0dHBzOi8vdGluZm9pbC5zaC9m",
+        "b3JtYXQvc2V2LXNucC1yZXBvcnQvdjEiLCJyZXBvcnRfYmFzZTY0IjoiQVE9PSIsImVuZG9yc2VkIjp7ImNyeXB0",
+        "b19tYXRlcmlhbF9oYXNoIjoiYzg0MzgyYzZjYTg5ODljOTE5YWFkYWQ2OTc5YTkxN2MyNDNmYzA1ZGNjNTQyNTM1",
+        "ZjVmNjE4YzMxYzBjZWYxOSIsImRldmljZV9ldmlkZW5jZV9oYXNoIjoiNWU4NGY2MzJlMDEyOTNiZmY0NTk2Y2Y3",
+        "MmM0NWRlMGY5ZTEwMzdlNWNkYTMyMzJiODUwYzQ3OGQxYTZiNTkyYiJ9fSwiY3J5cHRvX21hdGVyaWFsIjoiZXlK",
+        "bWIzSnRZWFFpT2lKb2RIUndjem92TDNScGJtWnZhV3d1YzJndlkzSjVjSFJ2TFcxaGRHVnlhV0ZzTDNZeElpd2lh",
+        "WFJsYlhNaU9sdGRmUT09IiwiZGV2aWNlX2V2aWRlbmNlIjoiZXlKbWIzSnRZWFFpT2lKb2RIUndjem92TDNScGJt",
+        "WnZhV3d1YzJndlpHVjJhV05sTFdWMmFXUmxibU5sTDNZeElpd2lhWFJsYlhNaU9sdGRmUT09In0=",
+    );
+    const NONCE_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    fn check(document_b64: &str, nonce_hex: &str) -> (Output, i32) {
+        let input = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "document_b64": document_b64,
+            "nonce_hex": nonce_hex,
+        });
+        run(STAGE_CHECK_ENVELOPE, input.to_string().as_bytes())
+    }
+
+    #[test]
+    fn a_well_formed_document_is_accepted() {
+        let (output, code) = check(DOCUMENT_B64, NONCE_HEX);
+        assert_eq!(code, EXIT_ACCEPTED);
+        assert_eq!(
+            serde_json::to_string(&output).unwrap(),
+            r#"{"stage":"v3-check-envelope","accepted":true}"#
+        );
+        // Input fields are read leniently: either case of hex, and line
+        // breaks in base64.
+        assert_eq!(
+            check(DOCUMENT_B64, &NONCE_HEX.to_uppercase()).1,
+            EXIT_ACCEPTED
+        );
+        let wrapped = format!("{}\r\n{}", &DOCUMENT_B64[..76], &DOCUMENT_B64[76..]);
+        assert_eq!(check(&wrapped, NONCE_HEX).1, EXIT_ACCEPTED);
+    }
+
+    #[test]
+    fn a_rejection_carries_the_envelope_code() {
+        let other_nonce = "ff".repeat(32);
+        let truncated =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"{\"format\":");
+        let cases = [
+            ("another nonce", DOCUMENT_B64, other_nonce.as_str()),
+            ("a short nonce", DOCUMENT_B64, &NONCE_HEX[..62]),
+            ("an empty nonce", DOCUMENT_B64, ""),
+            ("an empty document", "", NONCE_HEX),
+            ("a truncated document", truncated.as_str(), NONCE_HEX),
+        ];
+        for (name, document_b64, nonce_hex) in cases {
+            let (output, code) = check(document_b64, nonce_hex);
+            assert_eq!(code, EXIT_REJECTED, "{name}");
+            assert!(!output.accepted, "{name}");
+            assert_eq!(
+                output.rejection,
+                Some(Rejection {
+                    code: CODE_ENVELOPE_REJECTED.to_owned()
+                }),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn undecodable_fields_are_malformed_input() {
+        let cases = [
+            ("base64 with another alphabet", "-_-_", NONCE_HEX),
+            ("base64 without padding", "e30", NONCE_HEX),
+            ("base64 with a stray character", "e30=*", NONCE_HEX),
+            ("hex with an odd length", DOCUMENT_B64, "abc"),
+            ("hex with another character", DOCUMENT_B64, "zz"),
+            ("hex with a prefix", DOCUMENT_B64, "0x00"),
+        ];
+        for (name, document_b64, nonce_hex) in cases {
+            let (output, code) = check(document_b64, nonce_hex);
+            assert_eq!(code, EXIT_MALFORMED, "{name}");
+            assert_eq!(
+                output.rejection,
+                Some(Rejection {
+                    code: CODE_MALFORMED_INPUT.to_owned()
+                }),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_fields_decode_leniently() {
+        assert_eq!(decode_base64("YWJj"), Some(b"abc".to_vec()));
+        assert_eq!(decode_base64("YW\nJj\r\n"), Some(b"abc".to_vec()));
+        assert_eq!(decode_base64("YR=="), Some(b"a".to_vec()));
+        assert_eq!(decode_base64(""), Some(Vec::new()));
+        assert_eq!(decode_base64("YQ"), None);
+        assert_eq!(decode_base64("YQ==YQ=="), None);
+        assert_eq!(decode_base64("Y Q=="), None);
+        assert_eq!(decode_hex("00fFAb"), Some(vec![0x00, 0xff, 0xab]));
+        assert_eq!(decode_hex(""), Some(Vec::new()));
+        assert_eq!(decode_hex("0"), None);
+        assert_eq!(decode_hex("+1"), None);
+        assert_eq!(decode_hex("\u{e9}"), None);
     }
 }
