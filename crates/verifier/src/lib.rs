@@ -7,3 +7,7 @@
 //! connections to a verified enclave belong to the `tinfoil` client crate.
 //!
 //! The crate is under construction and exports nothing yet.
+
+// Clippy has no test exemption for this lint, unlike the other denied
+// lints (see clippy.toml). Overflow in a test is a test failure, not a risk.
+#![cfg_attr(test, allow(clippy::arithmetic_side_effects))]

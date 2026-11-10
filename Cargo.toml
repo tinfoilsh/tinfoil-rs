@@ -10,7 +10,9 @@ repository = "https://github.com/tinfoilsh/tinfoil-rs"
 
 # Lints for the workspace members that opt in with `lints.workspace = true`.
 # The verifier parses untrusted input, so anything that can panic on a
-# malformed document is denied outside tests (see clippy.toml).
+# malformed document is denied outside tests (see clippy.toml). Clippy cannot
+# exempt tests from `arithmetic_side_effects`, so each member allows it for
+# its own test code.
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
