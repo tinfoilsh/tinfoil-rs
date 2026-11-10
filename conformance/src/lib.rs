@@ -9,6 +9,9 @@
 //! its input has parsed, so the suite skips its fixtures instead of failing
 //! them.
 
+// Clippy has no test exemption for this lint; see the workspace lints.
+#![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
+
 use serde::{Deserialize, Serialize};
 
 /// The document was accepted; [`Output::outputs`] carries the verified facts.
