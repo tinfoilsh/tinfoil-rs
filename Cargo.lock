@@ -2329,6 +2329,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinfoil-conformance"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tinfoil-ehbp"
 version = "0.4.1"
 source = "git+https://github.com/tinfoilsh/encrypted-http-body-protocol?tag=v0.4.1#6de58891fd9166508047ec3f88e5cc4796d9932b"

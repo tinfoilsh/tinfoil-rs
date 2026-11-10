@@ -114,7 +114,7 @@ jobs:
         run: cargo test --locked -p tinfoil-verifier --verbose
 
   lint:
-    name: Format and clippy (verifier)
+    name: Format and clippy (v3 crates)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -127,10 +127,37 @@ jobs:
         run: rustup update stable && rustup default stable && rustup component add rustfmt clippy
 
       - name: Check formatting
-        run: cargo fmt --check -p tinfoil-verifier
+        run: cargo fmt --check -p tinfoil-verifier -p tinfoil-conformance
 
       - name: Run clippy
-        run: cargo clippy --locked -p tinfoil-verifier --all-targets -- -D warnings
+        run: cargo clippy --locked -p tinfoil-verifier -p tinfoil-conformance --all-targets -- -D warnings
+
+  conformance:
+    name: Conformance vectors
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check out the shared vectors
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: tinfoilsh/tinfoil-conformance
+          # Pinned; bump deliberately when the vector suite changes.
+          ref: e0063e74ba050706643ee86e11ed4340759e34f1
+          path: tinfoil-conformance
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup update stable && rustup default stable
+
+      - name: Run the adapter over the vectors
+        env:
+          TINFOIL_CONFORMANCE_VECTORS: ${{ github.workspace }}/tinfoil-conformance/vectors/v3
+        run: cargo test --locked -p tinfoil-conformance -- --nocapture
 
   deny:
     name: Banned dependencies
