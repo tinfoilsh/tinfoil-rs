@@ -1,3 +1,28 @@
+[workspace]
+members = [".", "crates/verifier"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/tinfoilsh/tinfoil-rs"
+
+# Lints for the workspace members that opt in with `lints.workspace = true`.
+# The verifier parses untrusted input, so anything that can panic on a
+# malformed document is denied outside tests (see clippy.toml).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tinfoil_conformance)"] }
+
+[workspace.lints.clippy]
+arithmetic_side_effects = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+unwrap_used = "deny"
+
 [package]
 name = "tinfoil"
 version = "0.2.3"

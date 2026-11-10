@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, milesdai/feat/rust-v3-generation]
 
 permissions: {}
 
@@ -57,6 +57,9 @@ jobs:
       - name: Run integration tests
         run: cargo test --locked --test '*' --verbose
 
+      - name: Test the verifier crate
+        run: cargo test --locked -p tinfoil-verifier --verbose
+
       - name: Check if API key is available
         # Bash only — Windows runner uses pwsh by default, but bash is
         # available there too. Force it explicitly so the heredoc syntax
@@ -107,3 +110,40 @@ jobs:
 
       - name: Unit tests on MSRV
         run: cargo test --locked --lib --verbose
+
+      - name: Test the verifier crate on MSRV
+        run: cargo test --locked -p tinfoil-verifier --verbose
+
+  lint:
+    name: Format and clippy (verifier)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup update stable && rustup default stable && rustup component add rustfmt clippy
+
+      - name: Check formatting
+        run: cargo fmt --check -p tinfoil-verifier
+
+      - name: Run clippy
+        run: cargo clippy --locked -p tinfoil-verifier --all-targets -- -D warnings
+
+  deny:
+    name: Banned dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check banned crates
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check bans

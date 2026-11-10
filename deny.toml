@@ -1,0 +1,10 @@
+# TLS is pinned to the `ring` rustls provider so the workspace links on
+# Windows MSVC. These crates must never enter the dependency graph.
+[bans]
+multiple-versions = "allow"
+deny = [
+    { crate = "aws-lc-rs" },
+    { crate = "aws-lc-sys" },
+    { crate = "native-tls" },
+    { crate = "openssl-sys" },
+]
