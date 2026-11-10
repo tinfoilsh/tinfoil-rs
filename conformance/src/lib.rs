@@ -287,11 +287,12 @@ mod stages {
 
     /// Decodes a hex input field of either case.
     pub(super) fn decode_hex(value: &str) -> Option<Vec<u8>> {
-        let digits = value.as_bytes().chunks_exact(2);
-        if !digits.remainder().is_empty() {
+        let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+        if !remainder.is_empty() {
             return None;
         }
-        digits
+        pairs
+            .iter()
             .map(|pair| {
                 std::str::from_utf8(pair)
                     .ok()

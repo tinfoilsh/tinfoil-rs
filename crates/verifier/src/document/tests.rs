@@ -335,7 +335,7 @@ fn rejects_duplicate_member_names_at_every_depth() {
         (
             "top level, escaped name",
             format.clone(),
-            format!(r#"{format}"format":"{ATTESTATION_V3_FORMAT}","#),
+            format!(r#"{format}"\u0066ormat":"{ATTESTATION_V3_FORMAT}","#),
         ),
         (
             "challenge",
@@ -644,7 +644,7 @@ fn rejects_malformed_sections() {
         let end = start
             + text[start..]
                 .find(r#"","#)
-                .map_or(text.len() - start - 2, |i| i)
+                .unwrap_or(text.len() - start - 2)
             + 1;
         let emptied = format!(r#"{}"{section}":""{}"#, &text[..start], &text[end..]);
         assert!(rejection(&emptied).contains(want), "{section}");

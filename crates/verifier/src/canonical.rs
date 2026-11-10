@@ -63,16 +63,13 @@ fn nibble(digit: u8) -> Option<u8> {
 /// Decodes hex digits of either case, or returns `None` for an odd length or
 /// a character that is not a hex digit.
 pub fn decode_hex(value: &str) -> Option<Vec<u8>> {
-    let digits = value.as_bytes();
-    let pairs = digits.chunks_exact(2);
-    if !pairs.remainder().is_empty() {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
         return None;
     }
     pairs
-        .map(|pair| match pair {
-            [high, low] => Some((nibble(*high)? << 4) | nibble(*low)?),
-            _ => None,
-        })
+        .iter()
+        .map(|[high, low]| Some((nibble(*high)? << 4) | nibble(*low)?))
         .collect()
 }
 
