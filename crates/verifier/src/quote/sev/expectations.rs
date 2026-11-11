@@ -219,8 +219,8 @@ impl Expectations {
     ///    the ABI version was already checked as a floor;
     /// 3. the report's platform info equals the expected one in every
     ///    flag;
-    /// 4. the report was launched without an identity block: CHIP_ID is not
-    ///    masked, no author key is enabled, and the identity key digest and
+    /// 4. the report was launched without an identity block: MASK_CHIP_KEY
+    ///    is clear, no author key is enabled, and the identity key digest and
     ///    author key digest are all zero.
     pub fn validate(&self, quote: &Quote) -> Result<(), AssemblyError> {
         let report = quote.report();
@@ -249,7 +249,7 @@ impl Expectations {
         let signer = &report.signer_info;
         if signer.mask_chip_key {
             return Err(AssemblyError::new(
-                "report masks CHIP_ID; masked platform identities are unsupported",
+                "report sets MASK_CHIP_KEY; a report that is not signed with the chip key is unsupported",
             ));
         }
         if signer.author_key_enabled {
@@ -545,7 +545,7 @@ mod tests {
             }),
             ("author key digest", |report| report[0x110 + 47] = 1),
             ("author key enabled", |report| report[0x48] = 1),
-            ("masked CHIP_ID", |report| report[0x48] = 2),
+            ("MASK_CHIP_KEY", |report| report[0x48] = 2),
             ("report data", |report| report[0x50] ^= 1),
             ("VMPL", |report| report[0x30] = 1),
             ("CHIP_ID", |report| report[0x1A0] ^= 1),

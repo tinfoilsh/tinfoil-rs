@@ -186,7 +186,9 @@ pub enum SigningKey {
 pub struct SignerInfo {
     /// The kind of key that signed the report.
     pub signing_key: SigningKey,
-    /// Whether the host masked the CHIP_ID, which then reads as zeros.
+    /// MASK_CHIP_KEY: whether the host has turned off signing with the
+    /// chip key. This is not the masking of CHIP_ID, a separate host
+    /// setting that leaves this flag clear and makes CHIP_ID read as zeros.
     pub mask_chip_key: bool,
     /// Whether the guest was launched with an identity block that carries
     /// an author key.
@@ -195,7 +197,7 @@ pub struct SignerInfo {
 
 impl SignerInfo {
     /// Decodes the 32-bit signer field: bit 0 is the author key flag, bit 1
-    /// the mask flag, bits 2 to 4 the signing key, and bits 5 to 31 must be
+    /// MASK_CHIP_KEY, bits 2 to 4 the signing key, and bits 5 to 31 must be
     /// zero. Signing key values 2 to 6 are reserved and an error.
     pub fn parse(value: u32) -> Result<Self, QuoteError> {
         if value >> 5 != 0 {
