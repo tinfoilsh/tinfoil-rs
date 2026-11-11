@@ -24,6 +24,7 @@
 pub mod bundle;
 pub mod certificate;
 pub mod checkpoint;
+mod evidence;
 pub mod keyed;
 pub mod merkle;
 pub mod rekor;
@@ -31,7 +32,12 @@ pub mod sct;
 pub mod statement;
 pub mod timestamp;
 pub mod trusted_root;
+mod wire;
 
+#[cfg(test)]
+mod bundle_tests;
+#[cfg(test)]
+mod replay_tests;
 #[cfg(test)]
 pub(crate) mod testutil;
 

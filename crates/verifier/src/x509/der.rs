@@ -12,7 +12,6 @@ use base64::engine::general_purpose::STANDARD;
 
 use super::X509Error;
 use crate::instant::{Civil, Instant};
-use crate::stub::pending;
 
 /// One block of a PEM file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +227,258 @@ impl TimeFields<'_> {
     }
 }
 
+/// One DER element: its tag byte, its contents, and its whole encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Element<'a> {
+    /// The identifier octet: class, constructed bit and tag number.
+    pub tag: u8,
+    /// The contents octets.
+    pub content: &'a [u8],
+    /// The identifier, length and contents octets together.
+    pub encoded: &'a [u8],
+}
+
+impl<'a> Element<'a> {
+    /// A reader over the contents, for a constructed element.
+    pub fn reader(&self) -> DerReader<'a> {
+        DerReader::new(self.content)
+    }
+}
+
+/// The tag of a universal BOOLEAN.
+pub const TAG_BOOLEAN: u8 = 0x01;
+/// The tag of a universal INTEGER.
+pub const TAG_INTEGER: u8 = 0x02;
+/// The tag of a universal BIT STRING.
+pub const TAG_BIT_STRING: u8 = 0x03;
+/// The tag of a universal OCTET STRING.
+pub const TAG_OCTET_STRING: u8 = 0x04;
+/// The tag of a universal OBJECT IDENTIFIER.
+pub const TAG_OID: u8 = 0x06;
+/// The tag of a universal SEQUENCE.
+pub const TAG_SEQUENCE: u8 = 0x30;
+/// The tag of a universal SET.
+pub const TAG_SET: u8 = 0x31;
+
+/// Reads DER elements from the front of a byte string, one at a time.
+///
+/// Only what DER allows is read: a single identifier octet (tag numbers
+/// below 31), and a definite length in its shortest form. What an element
+/// contains is the caller's to check.
+#[derive(Debug, Clone, Copy)]
+pub struct DerReader<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> DerReader<'a> {
+    /// A reader over `bytes`.
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Self { rest: bytes }
+    }
+
+    /// Whether nothing is left to read.
+    pub fn is_empty(&self) -> bool {
+        self.rest.is_empty()
+    }
+
+    /// The identifier octet of the next element, if there is one.
+    pub fn peek_tag(&self) -> Option<u8> {
+        self.rest.first().copied()
+    }
+
+    /// Reads the next element, whatever its tag.
+    pub fn element(&mut self) -> Result<Element<'a>, X509Error> {
+        let malformed = || X509Error::new("malformed DER element");
+        let input = self.rest;
+        let (&tag, after_tag) = input.split_first().ok_or_else(malformed)?;
+        if tag & 0x1f == 0x1f {
+            return Err(X509Error::new("DER tag numbers above 30 are not supported"));
+        }
+        let (&first, after_first) = after_tag.split_first().ok_or_else(malformed)?;
+        let (length, after_length) = if first < 0x80 {
+            (usize::from(first), after_first)
+        } else {
+            let count = usize::from(first & 0x7f);
+            if count == 0 {
+                return Err(X509Error::new("DER length is indefinite"));
+            }
+            if count > 4 {
+                return Err(X509Error::new("DER length is too large"));
+            }
+            let (digits, after_digits) =
+                after_first.split_at_checked(count).ok_or_else(malformed)?;
+            let mut length = 0usize;
+            for digit in digits {
+                length = length
+                    .checked_mul(256)
+                    .and_then(|length| length.checked_add(usize::from(*digit)))
+                    .ok_or_else(malformed)?;
+            }
+            let minimal =
+                digits.first().is_some_and(|digit| *digit != 0) && (count > 1 || length >= 0x80);
+            if !minimal {
+                return Err(X509Error::new("DER length is not in its shortest form"));
+            }
+            (length, after_digits)
+        };
+        let (content, rest) = after_length
+            .split_at_checked(length)
+            .ok_or_else(malformed)?;
+        let encoded_len = input.len().checked_sub(rest.len()).ok_or_else(malformed)?;
+        let encoded = input.get(..encoded_len).ok_or_else(malformed)?;
+        self.rest = rest;
+        Ok(Element {
+            tag,
+            content,
+            encoded,
+        })
+    }
+
+    /// Reads the next element, which must have the given tag.
+    pub fn expect(&mut self, tag: u8) -> Result<Element<'a>, X509Error> {
+        let element = self.element()?;
+        if element.tag != tag {
+            return Err(X509Error::new(format!(
+                "DER element has tag {:#04x}, want {tag:#04x}",
+                element.tag
+            )));
+        }
+        Ok(element)
+    }
+
+    /// Reads the next element if it has the given tag.
+    pub fn optional(&mut self, tag: u8) -> Result<Option<Element<'a>>, X509Error> {
+        if self.peek_tag() == Some(tag) {
+            self.element().map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Requires that nothing is left to read.
+    pub fn finish(self) -> Result<(), X509Error> {
+        if self.rest.is_empty() {
+            Ok(())
+        } else {
+            Err(X509Error::new("DER value is followed by further data"))
+        }
+    }
+}
+
+/// Reads the single DER element that spans `der` exactly.
+pub fn single_element(der: &[u8]) -> Result<Element<'_>, X509Error> {
+    let mut reader = DerReader::new(der);
+    let element = reader.element()?;
+    reader.finish()?;
+    Ok(element)
+}
+
+/// Checks the contents of an INTEGER: not empty, and in its shortest
+/// two's-complement form.
+pub fn check_integer(content: &[u8]) -> Result<(), X509Error> {
+    let minimal = match content {
+        [] => false,
+        [_] => true,
+        [0x00, second, ..] => second & 0x80 != 0,
+        [0xff, second, ..] => second & 0x80 == 0,
+        _ => true,
+    };
+    if minimal {
+        Ok(())
+    } else {
+        Err(X509Error::new("DER INTEGER is not in its shortest form"))
+    }
+}
+
+/// The value of a BOOLEAN from its contents: exactly `00` or `FF`.
+pub fn boolean(content: &[u8]) -> Result<bool, X509Error> {
+    match content {
+        [0x00] => Ok(false),
+        [0xff] => Ok(true),
+        _ => Err(X509Error::new("DER BOOLEAN is not 00 or FF")),
+    }
+}
+
+/// Splits the contents of a BIT STRING into its count of unused bits and
+/// its bytes. The count is at most seven, is zero for an empty string, and
+/// the unused bits themselves are zero.
+pub fn bit_string(content: &[u8]) -> Result<(u8, &[u8]), X509Error> {
+    let malformed = || X509Error::new("malformed DER BIT STRING");
+    let (&unused, bytes) = content.split_first().ok_or_else(malformed)?;
+    if unused > 7 {
+        return Err(malformed());
+    }
+    match bytes.last() {
+        None if unused != 0 => Err(malformed()),
+        Some(last) if last.trailing_zeros() < u32::from(unused) => Err(X509Error::new(
+            "DER BIT STRING has unused bits that are set",
+        )),
+        _ => Ok((unused, bytes)),
+    }
+}
+
+/// Checks that an OBJECT IDENTIFIER's contents are in the shortest form:
+/// not empty, no sub-identifier that starts with a padding octet, and a
+/// last sub-identifier that ends.
+pub fn check_object_identifier(content: &[u8]) -> Result<(), X509Error> {
+    let mut at_start = true;
+    for byte in content {
+        if at_start && *byte == 0x80 {
+            return Err(X509Error::new(
+                "DER OBJECT IDENTIFIER is not in its shortest form",
+            ));
+        }
+        at_start = byte & 0x80 == 0;
+    }
+    if content.is_empty() || !at_start {
+        return Err(X509Error::new("malformed DER OBJECT IDENTIFIER"));
+    }
+    Ok(())
+}
+
+/// Checks every OBJECT IDENTIFIER inside a DER value, at any depth of its
+/// constructed elements ([`check_object_identifier`]).
+///
+/// A decoder that keeps an identifier as the bytes it read does not notice
+/// a padded sub-identifier, and an identifier in two spellings would then
+/// compare as two identifiers. This walk rules the second spelling out for
+/// a whole value at once. It does not look inside primitive elements, such
+/// as an OCTET STRING that wraps a further value, and it uses no recursion.
+pub fn check_object_identifiers(der: &[u8]) -> Result<(), X509Error> {
+    let mut pending = vec![DerReader::new(der)];
+    while let Some(mut reader) = pending.pop() {
+        while !reader.is_empty() {
+            let element = reader.element()?;
+            if element.tag == TAG_OID {
+                check_object_identifier(element.content)?;
+            } else if element.tag & 0x20 != 0 {
+                pending.push(element.reader());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The magnitude of one integer of an ECDSA signature: positive, in its
+/// shortest form, and no wider than `field_len` bytes.
+fn ecdsa_integer(content: &[u8], field_len: usize) -> Result<&[u8], X509Error> {
+    check_integer(content)?;
+    let magnitude = match content {
+        [first, ..] if first & 0x80 != 0 => {
+            return Err(X509Error::new("ECDSA signature integer is negative"));
+        }
+        [0x00, rest @ ..] => rest,
+        other => other,
+    };
+    if magnitude.is_empty() {
+        return Err(X509Error::new("ECDSA signature integer is zero"));
+    }
+    if magnitude.len() > field_len {
+        return Err(X509Error::new("ECDSA signature integer is too wide"));
+    }
+    Ok(magnitude)
+}
+
 /// Converts a DER ECDSA signature (`SEQUENCE { r INTEGER, s INTEGER }`) to
 /// the fixed-width form: `r` then `s`, each big-endian and left-padded to
 /// `field_len` bytes.
@@ -236,14 +487,70 @@ impl TimeFields<'_> {
 /// data after the sequence. An integer that is zero, negative or wider than
 /// `field_len` is an error.
 pub fn ecdsa_der_to_raw(der: &[u8], field_len: usize) -> Result<Vec<u8>, X509Error> {
-    pending("x509::der::ecdsa_der_to_raw")
+    let mut integers = single_element(der)
+        .ok()
+        .filter(|sequence| sequence.tag == TAG_SEQUENCE)
+        .ok_or_else(|| X509Error::new("ECDSA signature is not one DER SEQUENCE"))?
+        .reader();
+    let r = ecdsa_integer(integers.expect(TAG_INTEGER)?.content, field_len)?;
+    let s = ecdsa_integer(integers.expect(TAG_INTEGER)?.content, field_len)?;
+    integers.finish()?;
+    let mut raw = Vec::with_capacity(field_len.saturating_mul(2));
+    for magnitude in [r, s] {
+        let padding = field_len.saturating_sub(magnitude.len());
+        raw.resize(raw.len().saturating_add(padding), 0);
+        raw.extend_from_slice(magnitude);
+    }
+    Ok(raw)
+}
+
+/// Appends a DER element with the given tag and contents.
+pub(crate) fn push_element(out: &mut Vec<u8>, tag: u8, content: &[u8]) {
+    out.push(tag);
+    let length = content.len();
+    if length < 0x80 {
+        // Below 128, so the conversion keeps every bit.
+        out.push(u8::try_from(length).unwrap_or(0x7f));
+    } else {
+        let bytes = length.to_be_bytes();
+        let significant: Vec<u8> = bytes
+            .iter()
+            .copied()
+            .skip_while(|byte| *byte == 0)
+            .collect();
+        out.push(0x80 | u8::try_from(significant.len()).unwrap_or(0x7f));
+        out.extend_from_slice(&significant);
+    }
+    out.extend_from_slice(content);
 }
 
 /// Converts a fixed-width ECDSA signature (`r` then `s`, each `raw.len() / 2`
 /// bytes, big-endian) to canonical DER. An odd length, an empty input or a
 /// zero integer is an error.
 pub fn ecdsa_raw_to_der(raw: &[u8]) -> Result<Vec<u8>, X509Error> {
-    pending("x509::der::ecdsa_raw_to_der")
+    if raw.is_empty() || !raw.len().is_multiple_of(2) {
+        return Err(X509Error::new(
+            "fixed-width ECDSA signature has an odd or zero length",
+        ));
+    }
+    let (r, s) = raw.split_at(raw.len() / 2);
+    let mut integers = Vec::with_capacity(raw.len().saturating_add(6));
+    for half in [r, s] {
+        let start = half
+            .iter()
+            .position(|byte| *byte != 0)
+            .ok_or_else(|| X509Error::new("ECDSA signature integer is zero"))?;
+        let magnitude = half.get(start..).unwrap_or_default();
+        let mut content = Vec::with_capacity(magnitude.len().saturating_add(1));
+        if magnitude.first().is_some_and(|first| first & 0x80 != 0) {
+            content.push(0);
+        }
+        content.extend_from_slice(magnitude);
+        push_element(&mut integers, TAG_INTEGER, &content);
+    }
+    let mut der = Vec::with_capacity(integers.len().saturating_add(4));
+    push_element(&mut der, TAG_SEQUENCE, &integers);
+    Ok(der)
 }
 
 #[cfg(test)]
@@ -394,5 +701,148 @@ mod tests {
         assert!(first_element_of_sequence(&[0x31, 0x02, 0x05, 0x00]).is_err());
         assert!(first_element_of_sequence(&[0x30, 0x00]).is_err());
         assert!(first_element_of_sequence(&[0x30, 0x80, 0x05, 0x00, 0x00, 0x00]).is_err());
+    }
+
+    #[test]
+    fn der_lengths_must_be_definite_and_shortest() {
+        let read = |bytes: &[u8]| DerReader::new(bytes).element().map(|e| e.content.to_vec());
+        assert_eq!(read(&[0x04, 0x01, 0xaa]).unwrap(), [0xaa]);
+        let mut long = vec![0x04, 0x81, 0x80];
+        long.extend_from_slice(&[7; 128]);
+        assert_eq!(read(&long).unwrap().len(), 128);
+        for bad in [
+            &[0x04, 0x80, 0x00, 0x00][..],
+            &[0x04, 0x81, 0x01, 0xaa],
+            &[0x04, 0x82, 0x00, 0x80],
+            &[0x04, 0x85, 0x00, 0x00, 0x00, 0x00, 0x01, 0xaa],
+            &[0x04, 0x02, 0xaa],
+            &[0x1f, 0x01, 0x00],
+            &[0x04],
+            &[],
+        ] {
+            assert!(read(bad).is_err(), "{bad:02x?}");
+        }
+    }
+
+    #[test]
+    fn a_reader_walks_elements_and_reports_what_is_left() {
+        let der = [0x30, 0x06, 0x02, 0x01, 0x05, 0x01, 0x01, 0xff];
+        let sequence = single_element(&der).unwrap();
+        assert_eq!(sequence.tag, TAG_SEQUENCE);
+        assert_eq!(sequence.encoded, der);
+        let mut reader = sequence.reader();
+        assert!(reader.optional(TAG_OID).unwrap().is_none());
+        assert_eq!(reader.expect(TAG_INTEGER).unwrap().content, [5]);
+        assert!(reader.finish().is_err());
+        assert!({ reader }.expect(TAG_INTEGER).is_err());
+        assert!(boolean(reader.expect(TAG_BOOLEAN).unwrap().content).unwrap());
+        reader.finish().unwrap();
+        assert!(single_element(&[0x05, 0x00, 0x00]).is_err());
+    }
+
+    #[test]
+    fn primitive_contents_have_one_form() {
+        assert!(check_integer(&[0x00]).is_ok());
+        assert!(check_integer(&[0x00, 0x80]).is_ok());
+        assert!(check_integer(&[0xff, 0x7f]).is_ok());
+        assert!(check_integer(&[]).is_err());
+        assert!(check_integer(&[0x00, 0x7f]).is_err());
+        assert!(check_integer(&[0xff, 0x80]).is_err());
+        assert!(!boolean(&[0x00]).unwrap());
+        assert!(boolean(&[0x01]).is_err());
+        assert!(boolean(&[]).is_err());
+        assert_eq!(bit_string(&[0x00]).unwrap(), (0, &[][..]));
+        assert_eq!(bit_string(&[0x01, 0x06]).unwrap(), (1, &[0x06][..]));
+        assert_eq!(bit_string(&[0x07, 0x80]).unwrap(), (7, &[0x80][..]));
+        for bad in [
+            &[][..],
+            &[0x01],
+            &[0x08, 0x00],
+            &[0x01, 0x01],
+            &[0x07, 0xc0],
+        ] {
+            assert!(bit_string(bad).is_err(), "{bad:02x?}");
+        }
+    }
+
+    #[test]
+    fn object_identifiers_are_checked_at_any_depth() {
+        check_object_identifier(&[0x2a, 0x86, 0x48]).unwrap();
+        assert!(check_object_identifier(&[0x2a, 0x80, 0x48]).is_err());
+        assert!(check_object_identifier(&[0x80, 0x2a]).is_err());
+        assert!(check_object_identifier(&[0x2a, 0x86]).is_err());
+        assert!(check_object_identifier(&[]).is_err());
+
+        // SEQUENCE { [0] { SET { OID 1.2.3 } }, OCTET STRING { OID, padded } }
+        let good = [
+            0x30, 0x0e, 0xa0, 0x06, 0x31, 0x04, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x04, 0x06, 0x02,
+            0x80, 0x03,
+        ];
+        check_object_identifiers(&good).unwrap();
+        let mut padded = good;
+        padded[8] = 0x80;
+        assert!(check_object_identifiers(&padded).is_err());
+        // An element that does not parse is an error, whatever its tag.
+        assert!(check_object_identifiers(&[0x30, 0x03, 0x04, 0x05, 0x00]).is_err());
+        check_object_identifiers(&[]).unwrap();
+        // Depth costs no stack.
+        let mut deep = vec![0x05, 0x00];
+        for _ in 0..2000 {
+            let mut outer = Vec::new();
+            push_element(&mut outer, TAG_SEQUENCE, &deep);
+            deep = outer;
+        }
+        check_object_identifiers(&deep).unwrap();
+    }
+
+    #[test]
+    fn an_ecdsa_signature_converts_between_its_two_forms() {
+        // r = 1, s = 0x80 (needs a sign byte in DER).
+        let der = [0x30, 0x07, 0x02, 0x01, 0x01, 0x02, 0x02, 0x00, 0x80];
+        let raw = ecdsa_der_to_raw(&der, 4).unwrap();
+        assert_eq!(raw, [0, 0, 0, 1, 0, 0, 0, 0x80]);
+        assert_eq!(ecdsa_raw_to_der(&raw).unwrap(), der);
+        // A full-width pair round-trips, with a long-form length for wide
+        // curves.
+        let wide = [0xffu8; 132];
+        let der = ecdsa_raw_to_der(&wide).unwrap();
+        assert_eq!(&der[..3], [0x30, 0x81, 0x8a]);
+        assert_eq!(ecdsa_der_to_raw(&der, 66).unwrap(), wide);
+    }
+
+    #[test]
+    fn a_non_canonical_ecdsa_signature_is_rejected() {
+        let cases: [&[u8]; 12] = [
+            // A needless leading zero on r.
+            &[0x30, 0x07, 0x02, 0x02, 0x00, 0x01, 0x02, 0x01, 0x01],
+            // A negative r.
+            &[0x30, 0x06, 0x02, 0x01, 0x80, 0x02, 0x01, 0x01],
+            // A zero s.
+            &[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x00],
+            // An empty integer.
+            &[0x30, 0x05, 0x02, 0x00, 0x02, 0x01, 0x01],
+            // Data after the sequence.
+            &[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01, 0x00],
+            // Data after s, inside the sequence.
+            &[0x30, 0x08, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01, 0x05, 0x00],
+            // A long-form length where the short form fits.
+            &[0x30, 0x81, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01],
+            // An indefinite length.
+            &[0x30, 0x80, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01, 0x00, 0x00],
+            // One integer only.
+            &[0x30, 0x03, 0x02, 0x01, 0x01],
+            // Not a sequence.
+            &[0x31, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01],
+            // An integer wider than the field.
+            &[0x30, 0x08, 0x02, 0x03, 0x01, 0x00, 0x00, 0x02, 0x01, 0x01],
+            &[],
+        ];
+        for der in cases {
+            assert!(ecdsa_der_to_raw(der, 2).is_err(), "{der:02x?}");
+        }
+        assert!(ecdsa_raw_to_der(&[]).is_err());
+        assert!(ecdsa_raw_to_der(&[1, 2, 3]).is_err());
+        assert!(ecdsa_raw_to_der(&[0, 0, 0, 1]).is_err());
+        assert!(ecdsa_raw_to_der(&[0, 1, 0, 0]).is_err());
     }
 }

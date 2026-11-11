@@ -174,7 +174,46 @@ pub fn authenticate(
     now: Instant,
     roots: &VendorRoots,
 ) -> Result<Authenticated, QuoteError> {
-    pending("quote::authenticate")
+    if evidence.format == crate::document::SEV_SNP_REPORT_V1_FORMAT {
+        let vcek = endorsements
+            .amd_vcek
+            .as_ref()
+            .ok_or_else(|| QuoteError::new("no amd-vcek endorsement collateral for the cpu"))?;
+        let crl = endorsements
+            .amd_crl
+            .as_ref()
+            .ok_or_else(|| QuoteError::new("no amd-crl endorsement collateral for the cpu"))?;
+        let quote = sev::authenticate(
+            sev::Evidence {
+                report: &evidence.report,
+                vcek_der: &vcek.vcek_der,
+                cert_chain_pem: &vcek.cert_chain_pem,
+                crl_der: &crl.crl_der,
+            },
+            now,
+            roots.amd(),
+        )?;
+        Ok(Authenticated::SevSnp(Box::new(quote)))
+    } else if evidence.format == crate::document::TDX_QUOTE_V1_FORMAT {
+        let pcs = endorsements
+            .intel_pcs
+            .as_ref()
+            .ok_or_else(|| QuoteError::new("no intel-pcs endorsement collateral for the cpu"))?;
+        let quote = tdx::authenticate(
+            tdx::Evidence {
+                quote: &evidence.report,
+                pcs: &pcs.responses,
+            },
+            now,
+            roots.intel(),
+        )?;
+        Ok(Authenticated::Tdx(Box::new(quote)))
+    } else {
+        Err(QuoteError::new(format!(
+            "unsupported cpu_evidence format {:?}",
+            evidence.format
+        )))
+    }
 }
 
 /// Reference values for one verification contract: what resolves the

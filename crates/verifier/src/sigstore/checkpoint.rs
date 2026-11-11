@@ -24,7 +24,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
 use super::SigstoreError;
-use crate::canonical::encode_lower_hex;
+use sha2::{Digest, Sha256};
+
 use crate::x509::{EcdsaHash, KeyAlgorithm, PublicKey, SignatureScheme};
 
 /// The most signature lines that a checkpoint may carry.
@@ -83,8 +84,9 @@ impl SignedCheckpoint {
     }
 
     /// Decodes a checkpoint envelope: the body, a blank line, and at least
-    /// one and at most [`MAX_NOTE_SIGNATURES`] signature lines. The
-    /// signature lines are what follows the last blank line.
+    /// one and at most [`MAX_NOTE_SIGNATURES`] signature lines, each ended
+    /// by a line feed. The signature lines are what follows the last blank
+    /// line.
     ///
     /// The body is kept as received, and signatures are verified over that
     /// text, never over a re-encoding of the decoded fields.
@@ -92,16 +94,16 @@ impl SignedCheckpoint {
         let (body, signature_lines) = envelope
             .rsplit_once("\n\n")
             .ok_or_else(|| error("checkpoint has no signature section"))?;
-        let signatures = signature_lines
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(NoteSignature::decode)
-            .collect::<Result<Vec<_>, _>>()?;
-        if signatures.is_empty() {
-            return Err(error("checkpoint has no signatures"));
-        }
-        if signatures.len() > MAX_NOTE_SIGNATURES {
-            return Err(error("checkpoint has too many signatures"));
+        let signature_lines = signature_lines
+            .strip_suffix('\n')
+            .filter(|lines| !lines.is_empty())
+            .ok_or_else(|| error("checkpoint has no signatures"))?;
+        let mut signatures = Vec::new();
+        for line in signature_lines.split('\n') {
+            if signatures.len() >= MAX_NOTE_SIGNATURES {
+                return Err(error("checkpoint has too many signatures"));
+            }
+            signatures.push(NoteSignature::decode(line)?);
         }
         Ok(Self {
             checkpoint: Checkpoint::decode(body)?,
@@ -110,32 +112,117 @@ impl SignedCheckpoint {
         })
     }
 
-    /// Verifies the checkpoint under a log's key.
+    /// Verifies a checkpoint that its log alone signs: every signature
+    /// line must be by `key`.
     ///
-    /// A signature line counts when its name is `name` and its key hint is
-    /// the first four bytes of `key_id`; lines of other signers, such as
-    /// witnesses, are ignored. The checkpoint verifies when one such line
-    /// carries a valid signature over the body as it was received: ECDSA
-    /// P-256 with SHA-256 in DER, or Ed25519.
-    pub fn verify_signature(
-        &self,
-        key: &PublicKey,
-        name: &str,
-        key_id: &[u8],
-    ) -> Result<(), SigstoreError> {
-        let hint = key_id.first_chunk::<4>();
+    /// Each line's key hint is the first four bytes of the SHA-256 of the
+    /// key's SubjectPublicKeyInfo, and each line carries a valid signature
+    /// over the body as it was received: ECDSA P-256 with SHA-256 in DER,
+    /// or Ed25519. A log with a key of any other kind, P-384 included, signs
+    /// no checkpoint of this form. The names on the lines are not compared.
+    /// One line of another signer, or one line that does not verify, fails
+    /// the whole checkpoint.
+    pub fn verify_every_signature(&self, key: &PublicKey) -> Result<(), SigstoreError> {
+        let hint = spki_key_hint(key);
+        let scheme = match key.algorithm() {
+            KeyAlgorithm::EcdsaP256 => SignatureScheme::EcdsaDer(EcdsaHash::Sha256),
+            KeyAlgorithm::Ed25519 => SignatureScheme::Ed25519,
+            other => return Err(error(format!("unsupported log key type {other:?}"))),
+        };
         for line in &self.signatures {
-            if line.name != name || hint != Some(&line.key_hint) {
-                continue;
+            if line.key_hint != hint {
+                return Err(error("checkpoint carries a signature line of another key"));
             }
-            if verify_log_signature(key, self.signed_text.as_bytes(), &line.signature).is_ok() {
-                return Ok(());
-            }
+            key.verify(scheme, self.signed_text.as_bytes(), &line.signature)
+                .map_err(|cause| error(format!("checkpoint signature: {cause}")))?;
         }
-        Err(error(format!(
-            "no valid checkpoint signature by {name} (key hint {})",
-            encode_lower_hex(hint.map(|hint| hint.as_slice()).unwrap_or_default())
-        )))
+        Ok(())
+    }
+
+    /// Verifies a checkpoint as a signed note that `name` signed with
+    /// `key`, possibly among other signers such as witnesses.
+    ///
+    /// The envelope holds no control character other than the line feed,
+    /// and every signer name is free of whitespace and `+`. A line counts
+    /// when its name is `name` and its key hint is the hint of `key` under
+    /// that name ([`note_key_hint`]); lines of other signers are ignored,
+    /// and a repeated line of this signer is read once. Every line that
+    /// counts must carry a valid signature over the body as it was
+    /// received: ECDSA in DER with the hash of the key's curve, or Ed25519.
+    /// At least one line must count.
+    pub fn verify_named_signature(&self, key: &PublicKey, name: &str) -> Result<(), SigstoreError> {
+        if !is_valid_name(name) {
+            return Err(error(format!("{name:?} is not a valid signer name")));
+        }
+        let controls = |text: &str| text.chars().any(|c| c < ' ' && c != '\n');
+        if controls(&self.signed_text) {
+            return Err(error("checkpoint contains a control character"));
+        }
+        if let Some(line) = self
+            .signatures
+            .iter()
+            .find(|line| !is_valid_name(&line.name) || controls(&line.name))
+        {
+            return Err(error(format!(
+                "checkpoint signer name {:?} is malformed",
+                line.name
+            )));
+        }
+        let hint = note_key_hint(key, name)?;
+        let scheme = match key.algorithm() {
+            KeyAlgorithm::EcdsaP256 => SignatureScheme::EcdsaDer(EcdsaHash::Sha256),
+            KeyAlgorithm::EcdsaP384 => SignatureScheme::EcdsaDer(EcdsaHash::Sha384),
+            KeyAlgorithm::Ed25519 => SignatureScheme::Ed25519,
+            other => return Err(error(format!("unsupported log key type {other:?}"))),
+        };
+        let Some(line) = self
+            .signatures
+            .iter()
+            .find(|line| line.name == name && line.key_hint == hint)
+        else {
+            return Err(error(format!("checkpoint is not signed by {name}")));
+        };
+        key.verify(scheme, self.signed_text.as_bytes(), &line.signature)
+            .map_err(|cause| error(format!("checkpoint signature by {name}: {cause}")))
+    }
+}
+
+/// Whether `name` can be the name of a note signer: not empty, without
+/// whitespace and without `+`.
+fn is_valid_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains(char::is_whitespace) && !name.contains('+')
+}
+
+/// The first four bytes of the SHA-256 of a key's SubjectPublicKeyInfo.
+fn spki_key_hint(key: &PublicKey) -> [u8; 4] {
+    let [a, b, c, d, ..] = key.spki_sha256();
+    [a, b, c, d]
+}
+
+/// The hint that identifies `key` on the signature lines of a note signed
+/// under `name`.
+///
+/// For an ECDSA key: the first four bytes of the SHA-256 of its
+/// SubjectPublicKeyInfo. For an Ed25519 key: the first four bytes of the
+/// SHA-256 of the name, a line feed, the byte `01` and the 32-byte key.
+/// The hint is always computed from the key; an identifier that a trusted
+/// root states for the log plays no part.
+pub fn note_key_hint(key: &PublicKey, name: &str) -> Result<[u8; 4], SigstoreError> {
+    match key.algorithm() {
+        KeyAlgorithm::EcdsaP256 | KeyAlgorithm::EcdsaP384 => Ok(spki_key_hint(key)),
+        KeyAlgorithm::Ed25519 => {
+            let raw = key
+                .spki_der()
+                .last_chunk::<32>()
+                .ok_or_else(|| error("Ed25519 key is too short"))?;
+            let mut hasher = Sha256::new();
+            hasher.update(name.as_bytes());
+            hasher.update(b"\n\x01");
+            hasher.update(raw);
+            let [a, b, c, d, ..] = <[u8; 32]>::from(hasher.finalize());
+            Ok([a, b, c, d])
+        }
+        other => Err(error(format!("unsupported log key type {other:?}"))),
     }
 }
 
@@ -197,8 +284,8 @@ impl Checkpoint {
 
 impl NoteSignature {
     /// Decodes a signature line: an em dash, the signer's non-empty name,
-    /// and the base64 of the key hint followed by the signature, separated
-    /// by single spaces.
+    /// and the base64 of the key hint followed by a non-empty signature,
+    /// separated by single spaces.
     fn decode(line: &str) -> Result<Self, SigstoreError> {
         let mut parts = line.split(' ');
         let (Some("\u{2014}"), Some(name), Some(encoded), None) =
@@ -214,7 +301,8 @@ impl NoteSignature {
             .map_err(|_| error("checkpoint signature is not base64"))?;
         let (key_hint, signature) = decoded
             .split_first_chunk::<4>()
-            .ok_or_else(|| error("checkpoint signature is too short for a key hint"))?;
+            .filter(|(_, signature)| !signature.is_empty())
+            .ok_or_else(|| error("checkpoint signature is too short"))?;
         Ok(Self {
             name: name.to_string(),
             key_hint: *key_hint,
@@ -230,23 +318,26 @@ impl NoteSignature {
     }
 }
 
-/// Verifies a signature made by a transparency log's key: ECDSA P-256 with
-/// SHA-256 and a DER signature, or Ed25519 with a 64-byte signature. Used
-/// for checkpoints and signed entry timestamps.
-pub(super) fn verify_log_signature(
+/// Verifies a Rekor v1 signed entry timestamp: ECDSA with SHA-256 and a
+/// DER signature, under a key on either curve. No other kind of key signs
+/// entry timestamps.
+pub(super) fn verify_entry_timestamp_signature(
     key: &PublicKey,
     message: &[u8],
     signature: &[u8],
 ) -> Result<(), SigstoreError> {
-    let scheme = match key.algorithm() {
-        KeyAlgorithm::EcdsaP256 => SignatureScheme::EcdsaDer(EcdsaHash::Sha256),
-        KeyAlgorithm::Ed25519 => SignatureScheme::Ed25519,
-        other => {
-            return Err(error(format!("unsupported log key type {other:?}")));
-        }
-    };
-    key.verify(scheme, message, signature)
-        .map_err(|cause| error(format!("log signature: {cause}")))
+    match key.algorithm() {
+        KeyAlgorithm::EcdsaP256 | KeyAlgorithm::EcdsaP384 => key
+            .verify(
+                SignatureScheme::EcdsaDer(EcdsaHash::Sha256),
+                message,
+                signature,
+            )
+            .map_err(|cause| error(format!("log signature: {cause}"))),
+        other => Err(error(format!(
+            "a {other:?} log key cannot sign an entry timestamp"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -380,6 +471,7 @@ mod tests {
             "- log.example.org AAAAAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
             "\u{2014} log.example.org",
             "\u{2014} log.example.org AAAA",
+            "\u{2014} log.example.org AAAAAA==",
             "\u{2014} log.example.org not-base64",
             "\u{2014}  AAAAAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
         ] {
@@ -416,6 +508,10 @@ mod tests {
         let checkpoint = body("Test Log", 42, 7, &[]);
         assert!(SignedCheckpoint::decode(&checkpoint.encode()).is_err());
         assert!(SignedCheckpoint::decode(&format!("{}\n", checkpoint.encode())).is_err());
+        // The last signature line ends with a line feed.
+        let one = line("log.example.org").encode();
+        let unterminated = format!("{}\n{}", checkpoint.encode(), one.trim_end());
+        assert!(SignedCheckpoint::decode(&unterminated).is_err());
         let lines = line("log.example.org").encode().repeat(MAX_NOTE_SIGNATURES);
         assert!(SignedCheckpoint::decode(&format!("{}\n{lines}", checkpoint.encode())).is_ok());
         let lines = line("log.example.org")
@@ -432,54 +528,78 @@ mod tests {
         proof.checkpoint.clone()
     }
 
-    fn production_checkpoint() -> (SignedCheckpoint, PublicKey, String, Vec<u8>) {
+    fn production_checkpoint() -> (SignedCheckpoint, PublicKey) {
         let bundle = testutil::bundle(testutil::REKOR_V1_BUNDLE);
         let entry = &bundle.tlog_entries[0];
         let proof = entry.inclusion_proof.as_ref().unwrap();
         let checkpoint = SignedCheckpoint::decode(&proof.checkpoint).unwrap();
         let log = testutil::log(testutil::PRODUCTION_TRUSTED_ROOT, &entry.log_id);
-        (checkpoint, log.key, log.name, entry.log_id.clone())
+        (checkpoint, log.key)
     }
 
     #[test]
     fn a_production_checkpoint_verifies_under_its_log_key() {
-        let (checkpoint, key, name, log_id) = production_checkpoint();
-        checkpoint.verify_signature(&key, &name, &log_id).unwrap();
+        let (checkpoint, key) = production_checkpoint();
+        checkpoint.verify_every_signature(&key).unwrap();
     }
 
     #[test]
-    fn a_checkpoint_with_another_key_hint_is_rejected() {
-        let (checkpoint, key, name, mut log_id) = production_checkpoint();
-        log_id[0] ^= 1;
-        assert!(checkpoint.verify_signature(&key, &name, &log_id).is_err());
-        assert!(checkpoint.verify_signature(&key, &name, &[]).is_err());
+    fn a_p384_key_signs_no_checkpoint_that_its_log_alone_signs() {
+        let (checkpoint, _) = production_checkpoint();
+        let authority = testutil::timestamp_authority(testutil::PRODUCTION_TRUSTED_ROOT);
+        let key = authority[0].public_key().unwrap();
+        assert_eq!(key.algorithm(), KeyAlgorithm::EcdsaP384);
+        let error = checkpoint.verify_every_signature(&key).unwrap_err();
+        assert!(error.to_string().contains("unsupported log key"), "{error}");
     }
 
     #[test]
-    fn a_checkpoint_with_another_signer_name_is_rejected() {
-        let (checkpoint, key, _, log_id) = production_checkpoint();
-        assert!(
-            checkpoint
-                .verify_signature(&key, "rekor.example.org", &log_id)
-                .is_err()
+    fn a_checkpoint_does_not_verify_under_another_key() {
+        let (checkpoint, _) = production_checkpoint();
+        let bundle = testutil::bundle(testutil::REKOR_V2_BUNDLE);
+        let other = testutil::log(
+            testutil::STAGING_TRUSTED_ROOT,
+            &bundle.tlog_entries[0].log_id,
         );
+        assert!(checkpoint.verify_every_signature(&other.key).is_err());
+    }
+
+    #[test]
+    fn a_line_of_another_signer_fails_a_checkpoint_that_its_log_alone_signs() {
+        let (_, key) = production_checkpoint();
+        let envelope = production_envelope();
+        let foreign = line("witness.example.org").encode();
+        let extended = SignedCheckpoint::decode(&format!("{envelope}{foreign}")).unwrap();
+        assert_eq!(extended.signatures.len(), 2);
+        let error = extended.verify_every_signature(&key).unwrap_err();
+        assert!(error.to_string().contains("another key"), "{error}");
+
+        // The log's own line a second time is still the log's.
+        let own = envelope.rsplit_once("\n\n").unwrap().1;
+        let doubled = SignedCheckpoint::decode(&format!("{envelope}{own}")).unwrap();
+        doubled.verify_every_signature(&key).unwrap();
+
+        // A line with the log's hint and another signature does not verify.
+        let mut forged = doubled.clone();
+        forged.signatures[1].signature[8] ^= 1;
+        assert!(forged.verify_every_signature(&key).is_err());
     }
 
     #[test]
     fn a_changed_checkpoint_body_is_rejected() {
-        let (checkpoint, key, name, log_id) = production_checkpoint();
+        let (checkpoint, key) = production_checkpoint();
         let envelope = production_envelope();
         let size = checkpoint.checkpoint.size;
         let changed = envelope.replacen(&format!("\n{size}\n"), &format!("\n{}\n", size + 1), 1);
         assert_ne!(changed, envelope);
         let changed = SignedCheckpoint::decode(&changed).unwrap();
         assert_eq!(changed.checkpoint.size, size + 1);
-        assert!(changed.verify_signature(&key, &name, &log_id).is_err());
+        assert!(changed.verify_every_signature(&key).is_err());
     }
 
     #[test]
     fn the_signature_covers_the_text_as_received() {
-        let (checkpoint, key, name, log_id) = production_checkpoint();
+        let (checkpoint, key) = production_checkpoint();
         let envelope = production_envelope();
         let body = checkpoint.checkpoint.encode();
         assert!(envelope.starts_with(&body));
@@ -493,7 +613,7 @@ mod tests {
             extended.checkpoint.root_hash,
             checkpoint.checkpoint.root_hash
         );
-        assert!(extended.verify_signature(&key, &name, &log_id).is_err());
+        assert!(extended.verify_every_signature(&key).is_err());
 
         // A size with a leading zero would decode to the same number; it is
         // rejected before any signature is looked at.
@@ -538,12 +658,49 @@ mod tests {
         let log = testutil::log(testutil::STAGING_TRUSTED_ROOT, &entry.log_id);
         assert_eq!(log.key.algorithm(), KeyAlgorithm::Ed25519);
         checkpoint
-            .verify_signature(&log.key, &log.name, &entry.log_id)
+            .verify_named_signature(&log.key, &log.name)
             .unwrap();
+        // The witnesses' lines are not the log's, so a checkpoint that must
+        // be signed by the log alone does not verify.
+        assert!(checkpoint.verify_every_signature(&log.key).is_err());
+        // Under another name the key has another hint.
         assert!(
             checkpoint
-                .verify_signature(&log.key, "witness.stagemole.eu", &entry.log_id)
+                .verify_named_signature(&log.key, "witness.stagemole.eu")
                 .is_err()
         );
+        assert_ne!(
+            note_key_hint(&log.key, &log.name).unwrap(),
+            note_key_hint(&log.key, "other.example").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_named_signer_line_that_does_not_verify_fails_the_note() {
+        let bundle = testutil::bundle(testutil::REKOR_V2_BUNDLE);
+        let entry = &bundle.tlog_entries[0];
+        let proof = entry.inclusion_proof.as_ref().unwrap();
+        let log = testutil::log(testutil::STAGING_TRUSTED_ROOT, &entry.log_id);
+        let mut checkpoint = SignedCheckpoint::decode(&proof.checkpoint).unwrap();
+        let hint = note_key_hint(&log.key, &log.name).unwrap();
+        let own = checkpoint
+            .signatures
+            .iter_mut()
+            .find(|line| line.key_hint == hint)
+            .unwrap();
+        own.signature[0] ^= 1;
+        assert!(
+            checkpoint
+                .verify_named_signature(&log.key, &log.name)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_note_signer_name_has_no_whitespace_or_plus() {
+        assert!(is_valid_name("rekor.sigstore.dev"));
+        for name in ["", "a b", "a+b", "a\tb", "a\u{a0}b"] {
+            assert!(!is_valid_name(name), "{name:?}");
+        }
     }
 }

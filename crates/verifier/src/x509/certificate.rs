@@ -4,11 +4,11 @@ use ::der::asn1::ObjectIdentifier;
 use ::der::{Decode, Encode, Tag, Tagged};
 use x509_cert::time::Time;
 
-use super::der::first_element_of_sequence;
+use super::der::{bit_string, first_element_of_sequence};
+use super::extension::{self, AlternativeNames};
 use super::key::{EcdsaHash, PublicKey, SignatureScheme};
 use super::{MAX_CERTIFICATE_SIZE, X509Error};
 use crate::instant::Instant;
-use crate::stub::pending;
 
 /// `ecdsa-with-SHA256`.
 const OID_ECDSA_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
@@ -62,8 +62,20 @@ pub struct KeyUsage {
     pub key_cert_sign: bool,
     /// `cRLSign`.
     pub crl_sign: bool,
-    /// Whether any other bit is set.
+    /// Whether any other of the nine defined bits is set.
     pub other: bool,
+}
+
+impl KeyUsage {
+    /// Whether none of the nine defined bits is set. Such an extension
+    /// restricts nothing: it is treated like an absent one.
+    pub fn is_empty(&self) -> bool {
+        !(self.digital_signature
+            || self.content_commitment
+            || self.key_cert_sign
+            || self.crl_sign
+            || self.other)
+    }
 }
 
 /// A parsed certificate together with the bytes it was parsed from.
@@ -107,7 +119,19 @@ impl Certificate {
     ///   [`parse_generalized_time`](super::der::parse_generalized_time)
     ///   without a fraction;
     /// - version 3 when extensions are present, and no extension twice;
-    /// - the serial number is not negative.
+    /// - the object identifiers of the signature algorithm, the key
+    ///   algorithm and every extension are in their shortest form;
+    /// - the serial number is not negative;
+    /// - every value of the subject and issuer names is a string of an
+    ///   accepted type whose contents fit the type
+    ///   ([`check_name`](super::extension::check_name));
+    /// - a key of a kind that [`PublicKey`] knows (ECDSA, Ed25519, RSA) is
+    ///   one that it accepts; keys of other kinds are left unparsed;
+    /// - a unique identifier has no unused bits that are set;
+    /// - every extension that this module knows is well formed, and a
+    ///   certificate with name constraints, policy mappings, policy
+    ///   constraints or an any-policy inhibitor is refused
+    ///   ([`check_extension`](super::extension::check_extension)).
     ///
     /// The signature is not verified here.
     pub fn from_der(der: &[u8]) -> Result<Self, X509Error> {
@@ -164,6 +188,48 @@ impl Certificate {
         let tbs = first_element_of_sequence(der)?.to_vec();
         let subject = parsed.tbs_certificate.subject.to_der()?;
         let issuer = parsed.tbs_certificate.issuer.to_der()?;
+        extension::check_name(&subject).map_err(|error| error.within("subject"))?;
+        extension::check_name(&issuer).map_err(|error| error.within("issuer"))?;
+        let spki = &tbs_certificate.subject_public_key_info;
+        if PublicKey::is_known_algorithm(spki.algorithm.oid) {
+            PublicKey::from_spki_der(&spki.to_der()?)
+                .map_err(|error| error.within("certificate public key"))?;
+        } else {
+            // The key is not parsed, but its bit string is still read.
+            bit_string(&bit_string_content(&spki.subject_public_key)?)?;
+        }
+        for unique_id in [
+            &tbs_certificate.issuer_unique_id,
+            &tbs_certificate.subject_unique_id,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bit_string(&bit_string_content(unique_id)?)
+                .map_err(|error| error.within("unique identifier"))?;
+        }
+        // The identifiers of the algorithms and extensions are in their
+        // shortest form; decoding alone does not establish that.
+        let identifiers = [
+            parsed.signature_algorithm.oid,
+            tbs_certificate.signature.oid,
+            spki.algorithm.oid,
+        ];
+        let extension_identifiers = tbs_certificate
+            .extensions
+            .iter()
+            .flatten()
+            .map(|extension| extension.extn_id);
+        for identifier in identifiers.into_iter().chain(extension_identifiers) {
+            extension::object_identifier(identifier.as_bytes())?;
+        }
+        for extension in tbs_certificate.extensions.iter().flatten() {
+            extension::check_extension(
+                extension.extn_id,
+                extension.critical,
+                extension.extn_value.as_bytes(),
+            )?;
+        }
         let not_before = instant_of(&parsed.tbs_certificate.validity.not_before)?;
         let not_after = instant_of(&parsed.tbs_certificate.validity.not_after)?;
         Ok(Self {
@@ -202,6 +268,15 @@ impl Certificate {
     /// sign padding.
     pub fn serial(&self) -> &[u8] {
         self.parsed.tbs_certificate.serial_number.as_bytes()
+    }
+
+    /// The certificate's version: 1, 2 or 3.
+    pub fn version(&self) -> u8 {
+        match self.parsed.tbs_certificate.version {
+            x509_cert::certificate::Version::V1 => 1,
+            x509_cert::certificate::Version::V2 => 2,
+            x509_cert::certificate::Version::V3 => 3,
+        }
     }
 
     /// The first instant at which the certificate is valid.
@@ -301,61 +376,63 @@ impl Certificate {
     /// a salt of 48 bytes. Names are not compared here; a chain walk
     /// compares them.
     pub fn verify_signed_by(&self, issuer_key: &PublicKey) -> Result<(), X509Error> {
-        let algorithm = &self.parsed.signature_algorithm;
-        let scheme = if algorithm.oid == OID_RSASSA_PSS {
-            check_pss_parameters(algorithm)?;
-            SignatureScheme::RsaPssSha384
-        } else {
-            let hash = if algorithm.oid == OID_ECDSA_SHA256 {
-                EcdsaHash::Sha256
-            } else if algorithm.oid == OID_ECDSA_SHA384 {
-                EcdsaHash::Sha384
-            } else if algorithm.oid == OID_ECDSA_SHA512 {
-                EcdsaHash::Sha512
-            } else {
-                return Err(X509Error::new(format!(
-                    "unsupported certificate signature algorithm {}",
-                    algorithm.oid
-                )));
-            };
-            if algorithm.parameters.is_some() {
-                return Err(X509Error::new(
-                    "ECDSA signature algorithm carries parameters",
-                ));
-            }
-            SignatureScheme::EcdsaDer(hash)
-        };
+        let scheme = signature_scheme(&self.parsed.signature_algorithm)?;
         issuer_key.verify(scheme, &self.tbs, self.signature())
     }
 
-    /// The basic constraints extension, if present. A malformed extension
-    /// is an error.
+    /// The basic constraints extension, if present. Parsing has already
+    /// rejected a malformed one.
     pub fn basic_constraints(&self) -> Result<Option<BasicConstraints>, X509Error> {
-        pending("x509::Certificate::basic_constraints")
+        self.extension(extension::OID_BASIC_CONSTRAINTS)
+            .map(|found| extension::basic_constraints(found.value))
+            .transpose()
     }
 
-    /// The key usage extension, if present. A malformed extension, or one
-    /// with unused bits set, is an error; trailing zero bits are accepted.
+    /// The key usage extension, if present. An extension with unused bits
+    /// set is malformed; trailing zero bits are accepted.
     pub fn key_usage(&self) -> Result<Option<KeyUsage>, X509Error> {
-        pending("x509::Certificate::key_usage")
+        self.extension(extension::OID_KEY_USAGE)
+            .map(|found| extension::key_usage(found.value))
+            .transpose()
     }
 
-    /// The purposes of the extended key usage extension, if present.
+    /// The purposes of the extended key usage extension, if present. The
+    /// list may be empty.
     pub fn extended_key_usage(&self) -> Result<Option<Vec<ObjectIdentifier>>, X509Error> {
-        pending("x509::Certificate::extended_key_usage")
+        self.extension(extension::OID_EXTENDED_KEY_USAGE)
+            .map(|found| extension::extended_key_usage(found.value))
+            .transpose()
     }
 
     /// The URIs of the subject alternative name, in order, and whether the
-    /// extension carries names of any other kind. A URI is an IA5String
-    /// without control characters.
+    /// extension carries names of any other kind. A certificate without the
+    /// extension has no URIs and no other names.
+    ///
+    /// A URI is printable ASCII in a narrow form: a scheme, no spaces,
+    /// well-formed percent escapes and, when it has an authority, a plain
+    /// host name with an optional numeric port. Parsing has already
+    /// rejected a certificate whose URI is outside that form.
     pub fn subject_alternative_uris(&self) -> Result<(Vec<String>, bool), X509Error> {
-        pending("x509::Certificate::subject_alternative_uris")
+        let names = self.alternative_names()?.unwrap_or_default();
+        let others = names.other_supported > 0 || names.unsupported > 0;
+        Ok((names.uris, others))
     }
 
-    /// The URIs of the CRL distribution points extension, in order. Names
-    /// of other kinds are skipped.
+    /// The decoded subject alternative name, if present.
+    pub(super) fn alternative_names(&self) -> Result<Option<AlternativeNames>, X509Error> {
+        self.extension(extension::OID_SUBJECT_ALT_NAME)
+            .map(|found| extension::subject_alternative_names(found.value))
+            .transpose()
+    }
+
+    /// The URIs of the CRL distribution points extension, in order: for
+    /// each distribution point with a full name, the URIs at the front of
+    /// that name. A certificate without the extension has none.
     pub fn crl_distribution_uris(&self) -> Result<Vec<String>, X509Error> {
-        pending("x509::Certificate::crl_distribution_uris")
+        self.extension(extension::OID_CRL_DISTRIBUTION_POINTS)
+            .map(|found| extension::crl_distribution_uris(found.value))
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 
     /// The parsed form, for the modules that read fields this type does not
@@ -363,6 +440,46 @@ impl Certificate {
     pub(crate) fn parsed(&self) -> &x509_cert::Certificate {
         &self.parsed
     }
+}
+
+/// The scheme of a certificate or revocation list signature, from its
+/// algorithm identifier: ECDSA with SHA-256, SHA-384 or SHA-512 and no
+/// parameters, or RSASSA-PSS with SHA-384, MGF1 with SHA-384 and a salt of
+/// 48 bytes.
+pub(super) fn signature_scheme(
+    algorithm: &x509_cert::spki::AlgorithmIdentifierOwned,
+) -> Result<SignatureScheme, X509Error> {
+    if algorithm.oid == OID_RSASSA_PSS {
+        check_pss_parameters(algorithm)?;
+        return Ok(SignatureScheme::RsaPssSha384);
+    }
+    let hash = if algorithm.oid == OID_ECDSA_SHA256 {
+        EcdsaHash::Sha256
+    } else if algorithm.oid == OID_ECDSA_SHA384 {
+        EcdsaHash::Sha384
+    } else if algorithm.oid == OID_ECDSA_SHA512 {
+        EcdsaHash::Sha512
+    } else {
+        return Err(X509Error::new(format!(
+            "unsupported signature algorithm {}",
+            algorithm.oid
+        )));
+    };
+    if algorithm.parameters.is_some() {
+        return Err(X509Error::new(
+            "ECDSA signature algorithm carries parameters",
+        ));
+    }
+    Ok(SignatureScheme::EcdsaDer(hash))
+}
+
+/// The contents octets of a BIT STRING: the count of unused bits, then the
+/// bytes.
+fn bit_string_content(bits: &::der::asn1::BitString) -> Result<Vec<u8>, X509Error> {
+    let mut content = Vec::with_capacity(bits.raw_bytes().len().saturating_add(1));
+    content.push(bits.unused_bits());
+    content.extend_from_slice(bits.raw_bytes());
+    Ok(content)
 }
 
 fn instant_of(time: &Time) -> Result<Instant, X509Error> {

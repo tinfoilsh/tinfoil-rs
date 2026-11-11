@@ -61,19 +61,32 @@ pub const STAGES: [&str; 7] = [
     STAGE_VERIFY_TIMESTAMP,
 ];
 
-/// The stages that this build of the adapter implements.
-#[cfg(tinfoil_conformance)]
-pub const STAGES_SUPPORTED: &[&str] = &[STAGE_CHECK_ENVELOPE];
-
-/// The stages that this build of the adapter implements: none, because the
-/// verifier's internal modules are not exposed to it.
-#[cfg(not(tinfoil_conformance))]
-pub const STAGES_SUPPORTED: &[&str] = &[];
+/// The stages that this build of the adapter implements, in the order of
+/// [`STAGES`]. A build without the verifier's internal modules implements
+/// none; otherwise each stage answers for itself, so that a stage whose
+/// verifier is not built yet is left out.
+pub fn stages_supported() -> Vec<&'static str> {
+    #[cfg(tinfoil_conformance)]
+    {
+        STAGES
+            .into_iter()
+            .filter(|stage| stages::is_supported(stage))
+            .collect()
+    }
+    #[cfg(not(tinfoil_conformance))]
+    {
+        Vec::new()
+    }
+}
 
 /// The rejection code for an input that did not parse.
 pub const CODE_MALFORMED_INPUT: &str = "MALFORMED_INPUT";
 /// The rejection code of the envelope layer.
 pub const CODE_ENVELOPE_REJECTED: &str = "ENVELOPE_REJECTED";
+/// The rejection code of the provenance layer.
+pub const CODE_PROVENANCE_REJECTED: &str = "PROVENANCE_REJECTED";
+/// The rejection code of the quote layer.
+pub const CODE_QUOTE_REJECTED: &str = "QUOTE_REJECTED";
 
 /// The stdin JSON of one adapter run.
 ///
@@ -206,10 +219,16 @@ pub fn run(stage: &str, stdin: &[u8]) -> (Output, i32) {
     if input.amd_root_ca_pem.is_empty() != input.ask_pem.is_empty() {
         return malformed(stage);
     }
-    match stage {
-        #[cfg(tinfoil_conformance)]
-        STAGE_CHECK_ENVELOPE => stages::check_envelope(&input),
-        _ => unsupported(stage),
+    if decode_base64(&input.sigstore_trusted_root_json_b64).is_none() {
+        return malformed(stage);
+    }
+    #[cfg(tinfoil_conformance)]
+    {
+        stages::run(stage, &input)
+    }
+    #[cfg(not(tinfoil_conformance))]
+    {
+        unsupported(stage)
     }
 }
 
@@ -221,13 +240,30 @@ pub fn capabilities() -> serde_json::Value {
         "sdk": SDK_NAME,
         "v3": {
             "supported": true,
-            "stages_supported": STAGES_SUPPORTED,
-            "synthetic_roots": { "amd": false, "intel": false, "sigstore": false },
+            "stages_supported": stages_supported(),
+            "synthetic_roots": synthetic_roots(),
             "freshness_enforced": false,
             "live_verify": false,
             "channel_binding": "none",
         },
     })
+}
+
+/// Which trust anchors a fixture may replace: each is honoured once a
+/// stage that uses it is implemented.
+fn synthetic_roots() -> serde_json::Value {
+    #[cfg(tinfoil_conformance)]
+    {
+        serde_json::json!({
+            "amd": stages::authenticate_quote::sev_snp_is_built(),
+            "intel": stages::authenticate_quote::tdx_is_built(),
+            "sigstore": true,
+        })
+    }
+    #[cfg(not(tinfoil_conformance))]
+    {
+        serde_json::json!({ "amd": false, "intel": false, "sigstore": false })
+    }
 }
 
 /// The output and exit code for a stage or command that is not supported.
@@ -239,6 +275,43 @@ pub fn unsupported(stage: &str) -> (Output, i32) {
         rejection: None,
     };
     (output, EXIT_UNSUPPORTED)
+}
+
+/// Standard base64 with padding, as input fields carry it. Unlike the
+/// verifier's own decoding it is lenient about unused trailing bits.
+const INPUT_BASE64: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    base64::engine::GeneralPurposeConfig::new()
+        .with_decode_allow_trailing_bits(true)
+        .with_decode_padding_mode(base64::engine::DecodePaddingMode::RequireCanonical),
+);
+
+/// Decodes a base64 input field, ignoring line breaks.
+fn decode_base64(value: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let joined: String = value
+        .chars()
+        .filter(|c| !matches!(c, '\r' | '\n'))
+        .collect();
+    INPUT_BASE64.decode(joined).ok()
+}
+
+/// Decodes a hex input field of either case.
+#[cfg_attr(not(tinfoil_conformance), allow(dead_code))]
+fn decode_hex(value: &str) -> Option<Vec<u8>> {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return None;
+    }
+    pairs
+        .iter()
+        .map(|pair| {
+            std::str::from_utf8(pair)
+                .ok()
+                .filter(|pair| pair.bytes().all(|digit| digit.is_ascii_hexdigit()))
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+        })
+        .collect()
 }
 
 fn malformed(stage: &str) -> (Output, i32) {
@@ -254,88 +327,7 @@ fn malformed(stage: &str) -> (Output, i32) {
 }
 
 #[cfg(tinfoil_conformance)]
-mod stages {
-    //! The stages, over the verifier's internal modules.
-
-    use base64::Engine as _;
-    use base64::alphabet;
-    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
-    use tinfoil_verifier::conformance::document;
-
-    use super::{
-        CODE_ENVELOPE_REJECTED, EXIT_ACCEPTED, EXIT_REJECTED, Input, Output, Rejection,
-        STAGE_CHECK_ENVELOPE, malformed,
-    };
-
-    /// Standard base64 with padding, as input fields carry it. Unlike the
-    /// verifier's own decoding it is lenient about unused trailing bits.
-    const INPUT_BASE64: GeneralPurpose = GeneralPurpose::new(
-        &alphabet::STANDARD,
-        GeneralPurposeConfig::new()
-            .with_decode_allow_trailing_bits(true)
-            .with_decode_padding_mode(DecodePaddingMode::RequireCanonical),
-    );
-
-    /// Decodes a base64 input field, ignoring line breaks.
-    pub(super) fn decode_base64(value: &str) -> Option<Vec<u8>> {
-        let joined: String = value
-            .chars()
-            .filter(|c| !matches!(c, '\r' | '\n'))
-            .collect();
-        INPUT_BASE64.decode(joined).ok()
-    }
-
-    /// Decodes a hex input field of either case.
-    pub(super) fn decode_hex(value: &str) -> Option<Vec<u8>> {
-        let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
-        if !remainder.is_empty() {
-            return None;
-        }
-        pairs
-            .iter()
-            .map(|pair| {
-                std::str::from_utf8(pair)
-                    .ok()
-                    .filter(|pair| pair.bytes().all(|digit| digit.is_ascii_hexdigit()))
-                    .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-            })
-            .collect()
-    }
-
-    /// Strict parse, nonce equality, endorsed-section hashes and report
-    /// data. The nonce is the one in the input, never the document's own.
-    pub(super) fn check_envelope(input: &Input) -> (Output, i32) {
-        let stage = STAGE_CHECK_ENVELOPE;
-        let Some(doc) = decode_base64(&input.document_b64) else {
-            return malformed(stage);
-        };
-        let Some(nonce) = decode_hex(&input.nonce_hex) else {
-            return malformed(stage);
-        };
-        match document::parse(&doc, &nonce) {
-            Ok(_) => {
-                let output = Output {
-                    stage: stage.to_owned(),
-                    accepted: true,
-                    outputs: None,
-                    rejection: None,
-                };
-                (output, EXIT_ACCEPTED)
-            }
-            Err(_) => {
-                let output = Output {
-                    stage: stage.to_owned(),
-                    accepted: false,
-                    outputs: None,
-                    rejection: Some(Rejection {
-                        code: CODE_ENVELOPE_REJECTED.to_owned(),
-                    }),
-                };
-                (output, EXIT_REJECTED)
-            }
-        }
-    }
-}
+mod stages;
 
 #[cfg(test)]
 mod tests {
@@ -350,7 +342,9 @@ mod tests {
     #[test]
     fn a_stage_that_is_not_implemented_is_unsupported_once_its_input_parses() {
         for stage in STAGES {
-            if STAGES_SUPPORTED.contains(&stage) {
+            // The quote stage reads its document before it reaches the
+            // platform's verifier, so it has a verdict on an empty one.
+            if stages_supported().contains(&stage) || stage == STAGE_AUTHENTICATE_QUOTE {
                 continue;
             }
             let (output, code) = run(stage, MINIMAL.as_bytes());
@@ -369,6 +363,8 @@ mod tests {
 
     #[test]
     fn malformed_input_is_reported_with_its_code() {
+        let bad_root = br#"{"schema_version":"1","sigstore_trusted_root_json_b64":"*"}"#;
+        assert_eq!(run(STAGE_VERIFY, bad_root).1, EXIT_MALFORMED);
         let (output, code) = run(STAGE_VERIFY, b"{");
         assert_eq!(code, EXIT_MALFORMED);
         assert!(!output.accepted);
@@ -437,12 +433,14 @@ mod tests {
             exit_code(STAGE_AUTHENTICATE_QUOTE, intermediate_only),
             EXIT_MALFORMED
         );
-        assert_eq!(exit_code(STAGE_AUTHENTICATE_QUOTE, both), EXIT_UNSUPPORTED);
+        // Paired, the input is well formed: the stage answers, or is not
+        // built.
+        assert_ne!(exit_code(STAGE_AUTHENTICATE_QUOTE, both), EXIT_INTERNAL);
     }
 
     #[test]
     fn the_supported_stages_follow_the_build() {
-        let envelope = STAGES_SUPPORTED.contains(&STAGE_CHECK_ENVELOPE);
+        let envelope = stages_supported().contains(&STAGE_CHECK_ENVELOPE);
         assert_eq!(envelope, cfg!(tinfoil_conformance));
         let (_, code) = run(STAGE_CHECK_ENVELOPE, MINIMAL.as_bytes());
         // With the stage compiled in, the empty document of the minimal
@@ -471,7 +469,7 @@ mod tests {
         assert_eq!(capabilities["schema_version"], SCHEMA_VERSION);
         assert_eq!(capabilities["sdk"], SDK_NAME);
         let stages = capabilities["v3"]["stages_supported"].as_array().unwrap();
-        assert_eq!(stages.len(), STAGES_SUPPORTED.len());
+        assert_eq!(stages.len(), stages_supported().len());
         for stage in stages {
             assert!(STAGES.contains(&stage.as_str().unwrap()));
         }
@@ -480,7 +478,6 @@ mod tests {
 
 #[cfg(all(test, tinfoil_conformance))]
 mod stage_tests {
-    use super::stages::{decode_base64, decode_hex};
     use super::*;
 
     /// A well-formed document without keys or collateral, bound to

@@ -105,6 +105,7 @@ pub fn bundle(text: &str) -> Bundle {
         .first()
         .unwrap();
     Bundle {
+        media_type: super::bundle::BUNDLE_V03_MEDIA_TYPE.to_string(),
         key_material: KeyMaterial::Certificate(bytes(certificate, "rawBytes")),
         tlog_entries,
         timestamps,

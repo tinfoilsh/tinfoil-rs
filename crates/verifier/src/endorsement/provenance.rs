@@ -82,7 +82,11 @@ impl ProvenanceClient {
     /// A client that trusts the given trusted root document
     /// ([`TrustedRoot::from_json`]).
     pub fn from_trusted_root_json(trusted_root: &[u8]) -> Result<Self, EndorsementError> {
-        pending("endorsement::provenance::ProvenanceClient::from_trusted_root_json")
+        let root = TrustedRoot::from_json(trusted_root)
+            .map_err(|cause| cause.within("parsing trust root"))?;
+        Ok(Self {
+            root: Arc::new(root),
+        })
     }
 
     /// The trusted root that the client verifies against.

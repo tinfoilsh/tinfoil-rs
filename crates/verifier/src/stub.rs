@@ -28,6 +28,7 @@ macro_rules! message_error {
         #[derive(Debug, Clone, PartialEq, Eq)]
         $vis struct $name {
             message: String,
+            not_implemented: bool,
         }
 
         impl $name {
@@ -35,12 +36,22 @@ macro_rules! message_error {
             pub(crate) fn new(message: impl Into<String>) -> Self {
                 Self {
                     message: message.into(),
+                    not_implemented: false,
                 }
             }
 
             /// The same error with `context` in front of its message.
             pub(crate) fn within(self, context: impl std::fmt::Display) -> Self {
-                Self::new(format!("{context}: {}", self.message))
+                Self {
+                    message: format!("{context}: {}", self.message),
+                    not_implemented: self.not_implemented,
+                }
+            }
+
+            /// Whether the error comes from a function that is specified
+            /// but not built yet, and so is no verdict on its input.
+            pub fn is_not_implemented(&self) -> bool {
+                self.not_implemented
             }
         }
 
@@ -54,7 +65,10 @@ macro_rules! message_error {
 
         impl From<$crate::stub::NotImplemented> for $name {
             fn from(error: $crate::stub::NotImplemented) -> Self {
-                Self::new(error.to_string())
+                Self {
+                    message: error.to_string(),
+                    not_implemented: true,
+                }
             }
         }
     };
@@ -79,6 +93,9 @@ mod tests {
     fn an_unbuilt_function_returns_an_error_that_names_it() {
         let error = unbuilt().unwrap_err();
         assert_eq!(error.to_string(), "example::unbuilt is not implemented");
+        assert!(error.is_not_implemented());
+        assert!(error.within("stage").is_not_implemented());
+        assert!(!ExampleError::new("bad length").is_not_implemented());
     }
 
     #[test]

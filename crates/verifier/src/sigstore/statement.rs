@@ -8,9 +8,9 @@ use base64::engine::general_purpose::STANDARD;
 use sha2::{Digest, Sha256};
 
 use super::SigstoreError;
+use super::wire::Members;
 use crate::canonical::encode_lower_hex;
-use crate::json::Value;
-use crate::stub::pending;
+use crate::json::{self, Value};
 use crate::x509::{KeyAlgorithm, PublicKey};
 
 /// The `_type` of an in-toto v1 statement.
@@ -19,8 +19,14 @@ pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
 pub const PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 /// The digest algorithm of statement subjects.
 pub const DIGEST_ALGORITHM: &str = "sha256";
-/// The largest statement that is read, in bytes.
+/// The largest approval statement that is read, in bytes. The bound is
+/// applied by the readers of approval statements, not by
+/// [`Statement::from_payload`].
 pub const MAX_STATEMENT_SIZE: usize = 128 << 10;
+/// The most subjects in a statement.
+pub const MAX_SUBJECTS: usize = 1024;
+/// The most digests of one subject.
+pub const MAX_SUBJECT_DIGESTS: usize = 32;
 
 /// A decoded in-toto statement.
 #[derive(Debug, PartialEq, Eq)]
@@ -53,15 +59,87 @@ impl Statement {
     /// names to strings. `null` reads as absent. Rules, each an error when
     /// broken:
     ///
-    /// - `_type` is [`STATEMENT_TYPE`];
-    /// - `predicate` is an object. Its members are not interpreted here and
-    ///   keep their number literals, so that an integer above 2^53 reaches
-    ///   the predicate's own decoder unchanged.
+    /// - there are at most [`MAX_SUBJECTS`] subjects, each with at most
+    ///   [`MAX_SUBJECT_DIGESTS`] digests;
+    /// - `predicate`, when present, is an object. Its members are not
+    ///   interpreted here and keep their number literals, so that an
+    ///   integer above 2^53 reaches the predicate's own decoder unchanged.
+    ///   An absent predicate reads as an empty object.
     ///
-    /// An empty `subject` array is accepted here; the verification
-    /// functions require the subject that they check.
+    /// The statement type is decoded and not judged: a caller that needs a
+    /// particular `_type` compares it. An empty `subject` array is accepted
+    /// here; the verification functions require the subject that they
+    /// check.
     pub fn from_payload(payload: &[u8]) -> Result<Self, SigstoreError> {
-        pending("sigstore::statement::Statement::from_payload")
+        let error = |message: String| SigstoreError::new(message);
+        let value =
+            json::parse(payload).map_err(|cause| error(format!("parsing statement: {cause}")))?;
+        let statement = Members::required(
+            Some(&value),
+            "statement",
+            &["_type", "subject", "predicateType", "predicate"],
+        )?;
+        let subject_values = statement.array("subject")?;
+        if subject_values.len() > MAX_SUBJECTS {
+            return Err(error(format!(
+                "statement has {} subjects, more than the {MAX_SUBJECTS} allowed",
+                subject_values.len()
+            )));
+        }
+        let mut subjects = Vec::with_capacity(subject_values.len());
+        for value in subject_values {
+            let subject = Members::required(Some(value), "subject", &["name", "digest"])?;
+            let mut digest = BTreeMap::new();
+            if let Some(Value::Object(digests)) = subject.get("digest") {
+                if digests.len() > MAX_SUBJECT_DIGESTS {
+                    return Err(error(format!(
+                        "subject has {} digests, more than the {MAX_SUBJECT_DIGESTS} allowed",
+                        digests.len()
+                    )));
+                }
+                for (algorithm, value) in digests.iter() {
+                    let value = match value {
+                        Value::String(value) => value.clone(),
+                        Value::Null => String::new(),
+                        other => {
+                            return Err(error(format!(
+                                "subject digest {algorithm:?}: cannot decode JSON {} as a string",
+                                other.kind()
+                            )));
+                        }
+                    };
+                    digest.insert(algorithm.to_string(), value);
+                }
+            } else if let Some(other) = subject.get("digest") {
+                return Err(error(format!(
+                    "subject digest: cannot decode JSON {} as an object",
+                    other.kind()
+                )));
+            }
+            subjects.push(Subject {
+                name: subject.string("name")?.unwrap_or_default().to_string(),
+                digest,
+            });
+        }
+        let predicate = match statement.get("predicate") {
+            None => json::parse(b"{}").map_err(|cause| error(cause.to_string()))?,
+            Some(Value::Object(_)) => predicate_of(payload)?,
+            Some(other) => {
+                return Err(error(format!(
+                    "statement predicate: cannot decode JSON {} as an object",
+                    other.kind()
+                )));
+            }
+        };
+        Ok(Self {
+            statement_type: statement.string("_type")?.unwrap_or_default().to_string(),
+            subjects,
+            predicate_type: statement
+                .string("predicateType")?
+                .unwrap_or_default()
+                .to_string(),
+            predicate,
+        })
     }
 
     /// The SHA-256 digest of the first subject, as written.
@@ -129,11 +207,113 @@ pub enum Canonical<'a> {
 /// the RFC 8785 canonical JSON encoding of `core`.
 ///
 /// Canonical encoding sorts object members by the UTF-16 code units of
-/// their names, writes no whitespace, and escapes in strings only `"`,
-/// `\`, and control characters below U+0020 (the short forms `\b`, `\t`,
-/// `\n`, `\f`, `\r` where they exist, `\u00XX` in lowercase hex otherwise).
+/// their names, writes no whitespace, and escapes in strings only the
+/// quotation mark, the backslash, and control characters below U+0020 (the
+/// two-character forms for backspace, tab, line feed, form feed and
+/// carriage return, and `u00XX` in lowercase hex after a backslash
+/// otherwise). A repeated member name, or nesting deeper than
+/// [`MAX_CANONICAL_DEPTH`], is an error.
 pub fn timestamp_input(domain: &str, core: &Canonical<'_>) -> Result<Vec<u8>, SigstoreError> {
-    pending("sigstore::statement::timestamp_input")
+    let mut out = domain.as_bytes().to_vec();
+    write_canonical(&mut out, core, 0)?;
+    Ok(out)
+}
+
+/// The deepest nesting of a [`Canonical`] value that is encoded.
+pub const MAX_CANONICAL_DEPTH: usize = 32;
+
+fn write_canonical(
+    out: &mut Vec<u8>,
+    value: &Canonical<'_>,
+    depth: usize,
+) -> Result<(), SigstoreError> {
+    if depth > MAX_CANONICAL_DEPTH {
+        return Err(SigstoreError::new("canonical value is nested too deeply"));
+    }
+    let deeper = depth.saturating_add(1);
+    match value {
+        Canonical::String(text) => write_canonical_string(out, text),
+        Canonical::Array(items) => {
+            out.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                write_canonical(out, item, deeper)?;
+            }
+            out.push(b']');
+        }
+        Canonical::Object(members) => {
+            let mut sorted: Vec<&(&str, Canonical<'_>)> = members.iter().collect();
+            sorted.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
+            if sorted.windows(2).any(|pair| match pair {
+                [(a, _), (b, _)] => a == b,
+                _ => false,
+            }) {
+                return Err(SigstoreError::new("canonical object repeats a member name"));
+            }
+            out.push(b'{');
+            for (index, (name, member)) in sorted.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                write_canonical_string(out, name);
+                out.push(b':');
+                write_canonical(out, member, deeper)?;
+            }
+            out.push(b'}');
+        }
+    }
+    Ok(())
+}
+
+fn write_canonical_string(out: &mut Vec<u8>, text: &str) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    const BACKSLASH: u8 = 0x5c;
+    out.push(b'"');
+    for byte in text.bytes() {
+        let short = match byte {
+            b'"' => Some(b'"'),
+            BACKSLASH => Some(BACKSLASH),
+            0x08 => Some(b'b'),
+            0x09 => Some(b't'),
+            0x0a => Some(b'n'),
+            0x0c => Some(b'f'),
+            0x0d => Some(b'r'),
+            _ => None,
+        };
+        match (short, byte) {
+            (Some(letter), _) => out.extend_from_slice(&[BACKSLASH, letter]),
+            (None, control @ 0x00..=0x1f) => {
+                out.extend_from_slice(&[BACKSLASH, b'u', b'0', b'0']);
+                for nibble in [control >> 4, control & 0x0f] {
+                    out.push(HEX.get(usize::from(nibble)).copied().unwrap_or(b'0'));
+                }
+            }
+            (None, other) => out.push(other),
+        }
+    }
+    out.push(b'"');
+}
+
+/// The `predicate` member of a statement, parsed on its own so that it can
+/// be owned apart from the rest of the statement.
+fn predicate_of(payload: &[u8]) -> Result<Value, SigstoreError> {
+    let value = json::parse(payload)
+        .map_err(|cause| SigstoreError::new(format!("parsing statement: {cause}")))?;
+    let Value::Object(_) = &value else {
+        return Err(SigstoreError::new("statement is not an object"));
+    };
+    let mut value = value;
+    let Value::Object(object) = &mut value else {
+        return Err(SigstoreError::new("statement is not an object"));
+    };
+    std::mem::take(object)
+        .into_members()
+        .into_iter()
+        .find(|(name, _)| name == "predicate")
+        .map(|(_, predicate)| predicate)
+        .ok_or_else(|| SigstoreError::new("statement has no predicate"))
 }
 
 #[cfg(test)]
