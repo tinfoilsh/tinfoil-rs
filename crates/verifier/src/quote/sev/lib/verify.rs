@@ -53,9 +53,11 @@ pub struct DocumentChain<'a> {
     pub ark_der: &'a [u8],
 }
 
-/// What a verified attestation establishes about its certificates.
+/// What a verified attestation establishes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedAttestation {
+    /// The report, decoded from the bytes whose signature was verified.
+    pub report: Report,
     /// The VCEK certificate that signed the report.
     pub vcek: Certificate,
     /// The VCEK's AMD extensions.
@@ -110,8 +112,12 @@ pub fn check_amd_name(
 /// and nothing in them is trusted or compared; the pinned `roots` decide.
 /// Everything is judged at `now`. In order:
 ///
-/// 1. the report's signer field names the VCEK as the signing key; a
-///    report signed by any other key is unsupported;
+/// 1. the report decodes from `report_bytes` ([`Report::parse`]). No
+///    separately decoded report is taken: the report in the result is the
+///    one whose bytes are verified below. Its CPUID field names the product
+///    line of `roots` ([`ProductLine::from_report`]), and its signer field
+///    names the VCEK as the signing key; a report signed by any other key
+///    is unsupported;
 /// 2. the VCEK certificate parses and has the AMD profile: X.509 version
 ///    3; signed with RSASSA-PSS and SHA-384; an ECDSA P-384 key; a subject
 ///    with AMD's fixed attributes and the common name [`VCEK_COMMON_NAME`]
@@ -123,14 +129,14 @@ pub fn check_amd_name(
 /// 4. the VCEK chains to the pinned ARK through the pinned ASK at `now`
 ///    ([`verify_chain`](crate::x509::verify_chain), with no purpose
 ///    requirement);
-/// 5. the revocation list is signed by the pinned ARK
+/// 5. the revocation list is current at `now`
+///    ([`Crl::check_validity`]), is signed by the pinned ARK
 ///    ([`Crl::verify_issued_by`]) and does not revoke the pinned ASK. The
 ///    pinned ASK must name a distribution point for the list, a URL whose
 ///    path ends in `/crl`;
-/// 6. the report's signature verifies under the VCEK's key
+/// 6. the signature of `report_bytes` verifies under the VCEK's key
 ///    ([`verify_report_signature`](super::abi::verify_report_signature)).
 pub fn verify_attestation(
-    report: &Report,
     report_bytes: &[u8],
     chain: &DocumentChain<'_>,
     crl: &Crl,

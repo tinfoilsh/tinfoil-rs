@@ -100,8 +100,24 @@ impl TrustedRoot {
     ///
     /// The document is strict JSON (no repeated member names, valid UTF-8,
     /// nothing after it), and every object is read with a closed set of
-    /// member names: an unknown member is an error at any depth. Rules, each
-    /// an error when broken:
+    /// member names: an unknown member is an error at any depth, and `null`
+    /// reads as absent. The members, with those that are read but not
+    /// interpreted marked "kept" or "ignored":
+    ///
+    /// - the document: `mediaType`, `tlogs`, `certificateAuthorities`,
+    ///   `ctlogs`, `timestampAuthorities`;
+    /// - a log (`tlogs`, `ctlogs`): `baseUrl` (kept), `hashAlgorithm`,
+    ///   `publicKey`, `logId`, `checkpointKeyId` (an object with `keyId`;
+    ///   ignored);
+    /// - `publicKey`: `rawBytes`, `keyDetails`, `validFor`;
+    /// - `logId`: `keyId`;
+    /// - an authority (`certificateAuthorities`, `timestampAuthorities`):
+    ///   `subject` (an object with the strings `organization` and
+    ///   `commonName`; ignored), `uri` (kept), `certChain`, `validFor`;
+    /// - `certChain`: `certificates`, each an object with `rawBytes`;
+    /// - `validFor`: `start`, `end`.
+    ///
+    /// Rules, each an error when broken:
     ///
     /// - `mediaType` is [`TRUSTED_ROOT_MEDIA_TYPE`];
     /// - `tlogs`, `ctlogs`, `certificateAuthorities` and

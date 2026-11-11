@@ -14,9 +14,12 @@
 //!
 //! Verification uses only what the bundle and the trusted root carry. Trust
 //! material is selected by the times that the bundle itself proves (a log's
-//! signed entry timestamp, an RFC 3161 timestamp), never by a clock. The one
-//! function that takes the appraisal instant is
-//! [`timestamp::verify_timestamp`], which bounds the age of an approval.
+//! signed entry timestamp, an RFC 3161 timestamp), never by a clock. No
+//! function of this module takes the appraisal instant:
+//! [`timestamp::verify_timestamp`] returns the time that a timestamp
+//! authenticates, and the caller that bounds an approval's age compares
+//! that time with a [`timestamp::AppraisalWindow`], which the endorsement
+//! module builds from the appraisal instant.
 
 pub mod bundle;
 pub mod certificate;

@@ -25,7 +25,10 @@ pub const MAX_LOG_RECEIPTS: usize = 8;
 ///   [`MAX_CERTIFICATE_SIZE`](crate::x509::MAX_CERTIFICATE_SIZE) bytes
 ///   that parses and whose key has a hint
 ///   ([`statement::key_hint`](super::statement::key_hint));
-/// - the envelope's key identifier is empty or equals that hint;
+/// - the envelope's key identifier is empty or equals that hint. The
+///   layout tolerates the hint here; signature verification does not (see
+///   [`verify_keyed_bundle`]), so in effect only an empty identifier
+///   verifies;
 /// - there are 1 to [`MAX_LOG_RECEIPTS`] log entries, each `hashedrekord`
 ///   0.0.2 with an inclusion proof, no inclusion promise and no integrated
 ///   time;
@@ -54,7 +57,11 @@ pub fn check_approval_layout(bundle: &Bundle) -> Result<(), SigstoreError> {
 ///    At least one entry must verify;
 /// 3. the envelope's key identifier is empty, and the signature verifies
 ///    under `key` over the pre-authentication encoding of the payload:
-///    ECDSA P-256 with SHA-256, in DER;
+///    ECDSA P-256 with SHA-256, in DER. A DSSE signature is tried only
+///    with a key whose own identifier matches a non-empty identifier of
+///    the signature, and a pinned key's identifier is never its hint, so a
+///    bundle whose identifier equals the hint passes the layout check and
+///    is rejected here;
 /// 4. the payload decodes as a statement and one of its subjects has
 ///    `artifact_digest` as its SHA-256 digest.
 ///

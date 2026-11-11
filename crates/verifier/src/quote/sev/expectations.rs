@@ -1,7 +1,7 @@
 //! The expected state of an SEV-SNP report.
 
 use super::authenticate::Quote;
-use super::lib::abi::{GuestPolicy, PlatformInfo, ProductLine};
+use super::lib::abi::{GuestPolicy, PlatformInfo};
 use super::lib::validate::Options;
 use crate::document::REPORT_DATA_SIZE;
 use crate::measurement::Register;

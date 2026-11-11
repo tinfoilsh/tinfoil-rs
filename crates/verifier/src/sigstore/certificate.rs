@@ -127,7 +127,8 @@ pub fn signing_identity(certificate: &Certificate) -> Result<SigningIdentity, Si
 /// 1. the bundle carries a certificate, not a key hint; the certificate
 ///    parses and its key is ECDSA P-256 or P-384; the envelope's payload
 ///    type is the in-toto statement type and the envelope's key identifier
-///    is empty;
+///    is empty (an identifier that names the certificate's key in another
+///    notation is not accepted either);
 /// 2. log entries. An entry whose log the trusted root does not list is
 ///    skipped. Every other entry must verify: its kind is `dsse` 0.0.1 or
 ///    `hashedrekord` 0.0.2; it is bound to this envelope and certificate

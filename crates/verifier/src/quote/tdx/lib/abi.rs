@@ -4,9 +4,26 @@
 use crate::quote::QuoteError;
 use crate::stub::pending;
 
-/// The smallest quote: header, body, and signed data without its variable
-/// parts.
-pub const QUOTE_MIN_SIZE: usize = 0x3FC;
+/// The smallest quote: the header, the body, the length of the signed
+/// data, and signed data whose QE authentication data and PCK certificate
+/// chain are both empty.
+pub const QUOTE_MIN_SIZE: usize = HEADER_SIZE
+    + TD_QUOTE_BODY_SIZE
+    + SIGNED_DATA_LENGTH_SIZE
+    + 2 * P256_PAIR_SIZE
+    + CERTIFICATION_HEADER_SIZE
+    + QE_REPORT_SIZE
+    + P256_PAIR_SIZE
+    + QE_AUTH_DATA_LENGTH_SIZE
+    + CERTIFICATION_HEADER_SIZE;
+/// The size of the field that states the length of the signed data.
+const SIGNED_DATA_LENGTH_SIZE: usize = 4;
+/// The size of a certification data header: a two-byte type and a
+/// four-byte length.
+const CERTIFICATION_HEADER_SIZE: usize = 6;
+/// The size of the field that states the length of the QE authentication
+/// data.
+const QE_AUTH_DATA_LENGTH_SIZE: usize = 2;
 /// The quote version that is read.
 pub const QUOTE_VERSION: u16 = 4;
 /// The attestation key type of ECDSA with P-256.
@@ -148,7 +165,9 @@ impl QuoteV4 {
     ///
     /// Rules, each an error when broken:
     ///
-    /// - at least [`QUOTE_MIN_SIZE`] bytes;
+    /// - at least [`QUOTE_MIN_SIZE`] bytes, and every fixed-size field is
+    ///   read only after its bytes are known to be there: a quote too short
+    ///   for a field is an error;
     /// - the header's version is [`QUOTE_VERSION`], its attestation key
     ///   type [`ATTESTATION_KEY_TYPE_ECDSA_P256`] and its TEE type
     ///   [`TEE_TYPE_TDX`];
@@ -166,5 +185,21 @@ impl QuoteV4 {
     /// judged here.
     pub fn parse(quote: &[u8]) -> Result<Self, QuoteError> {
         pending("quote::tdx::lib::abi::QuoteV4::parse")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_smallest_quote_holds_every_mandatory_field() {
+        // Header, body and length; then signature, key, certification
+        // header, QE report, QE report signature, authentication data
+        // length, and the nested certification header.
+        assert_eq!(0x30 + 0x248 + 4, 636);
+        assert_eq!(64 + 64 + 6 + 384 + 64 + 2 + 6, 590);
+        assert_eq!(QUOTE_MIN_SIZE, 636 + 590);
+        assert_eq!(QUOTE_MIN_SIZE, 0x4CA);
     }
 }

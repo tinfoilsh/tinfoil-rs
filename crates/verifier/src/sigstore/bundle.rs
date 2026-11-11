@@ -70,8 +70,9 @@ pub struct TlogEntry {
     /// The version of the kind, such as `0.0.1`.
     pub version: String,
     /// The log's claim of when it integrated the entry, in seconds since
-    /// the Unix epoch; zero when absent. It is authenticated only by the
-    /// inclusion promise.
+    /// the Unix epoch. Zero means that the entry states no time; the bundle
+    /// format does not distinguish an absent member from a zero. It is
+    /// authenticated only by the inclusion promise.
     pub integrated_time: i64,
     /// The log's signed entry timestamp, if the entry carries one.
     pub inclusion_promise: Option<Vec<u8>>,
@@ -127,8 +128,13 @@ impl Bundle {
     ///   error) with `payload`, `payloadType` and exactly one entry in
     ///   `signatures`, whose `sig` is not empty and whose `keyid` is
     ///   optional;
-    /// - 64-bit integers are JSON strings of decimal digits or JSON integer
-    ///   literals, without sign, fraction or exponent, in range;
+    /// - `logIndex` and `treeSize` are unsigned: JSON strings of decimal
+    ///   digits or JSON integer literals, without sign, fraction or
+    ///   exponent, below 2^63;
+    /// - `integratedTime` is a signed 64-bit integer in the same two forms,
+    ///   where a leading `-` is allowed. An absent `integratedTime` and an
+    ///   explicit zero are the same thing: both decode to zero, and "no
+    ///   integrated time" means zero;
     /// - byte strings are canonical padded standard base64.
     pub fn from_value(value: &Value) -> Result<Self, SigstoreError> {
         pending("sigstore::bundle::Bundle::from_value")

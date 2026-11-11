@@ -17,7 +17,9 @@ pub struct Expectations {
     options: Options,
     /// The lowest acceptable `tcbEvaluationDataNumber` of the Intel
     /// collateral. It is separate because it is not a field of the quote.
-    minimum_tcb_evaluation_data_number: u32,
+    /// It is wider than the quote's own number, so that every minimum that
+    /// a policy can state is kept exactly.
+    minimum_tcb_evaluation_data_number: u64,
 }
 
 /// Translates an endorsed policy into the expected state of a quote.
@@ -31,7 +33,12 @@ pub struct Expectations {
 ///    bytes) decode from hex;
 /// 3. MR_OWNER and MR_OWNER_CONFIG are expected to be zero, MR_CONFIG_ID to
 ///    be `config_id`, MRTD and the RTMRs to be those of `measurement`, and
-///    the report data to be `report_data`.
+///    the report data to be `report_data`;
+/// 4. the minimum `tcbEvaluationDataNumber` is the policy's, converted
+///    without loss: a valid policy states one that is not negative, and
+///    every such value fits the 64 unsigned bits it is kept in. It is never
+///    narrowed to the width of the quote's number, so a minimum above that
+///    width rejects every quote instead of wrapping to a small one.
 ///
 /// The QE and PCE security versions are not policy: quote verification
 /// already holds them to Intel's signed collateral.
@@ -50,7 +57,8 @@ impl Expectations {
     ///
     /// In order: the quote satisfies the options
     /// ([`validate`](super::lib::validate::validate)); the quote's
-    /// `tcbEvaluationDataNumber` is at least the minimum.
+    /// `tcbEvaluationDataNumber`, widened to 64 bits, is at least the
+    /// minimum.
     pub fn validate(&self, quote: &Quote) -> Result<(), AssemblyError> {
         pending("quote::tdx::Expectations::validate")
     }
