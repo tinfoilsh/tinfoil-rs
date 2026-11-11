@@ -125,7 +125,10 @@ impl Bundle {
     /// an error when broken:
     ///
     /// - the value is an object whose strings, names and numbers together
-    ///   are at most [`MAX_BUNDLE_SIZE`] bytes;
+    ///   are at most [`MAX_BUNDLE_SIZE`] bytes. This bounds the content of
+    ///   a value that is already in memory; it is not the size of the text
+    ///   that the value was parsed from, which only [`Bundle::from_json`]
+    ///   sees and bounds;
     /// - `mediaType` is [`BUNDLE_V03_MEDIA_TYPE`] or
     ///   [`BUNDLE_V03_LEGACY_MEDIA_TYPE`];
     /// - `verificationMaterial` has exactly one of `certificate` (with
@@ -134,8 +137,9 @@ impl Bundle {
     ///   is an error;
     /// - `tlogEntries` has 1 to [`MAX_TLOG_ENTRIES`] entries, and no two
     ///   share a log identifier and log index. Each has `logIndex`,
-    ///   `logId.keyId`, `kindVersion` with `kind` and `version`, and
-    ///   `canonicalizedBody`; `integratedTime`, `inclusionPromise` (with
+    ///   `logId.keyId`, a `kindVersion` object and `canonicalizedBody`; a
+    ///   missing `kind` or `version` reads as the empty string, which no
+    ///   verification function accepts; `integratedTime`, `inclusionPromise` (with
     ///   `signedEntryTimestamp`) and `inclusionProof` are optional, but one
     ///   of the last two is present, and at least one entry of the bundle
     ///   has an inclusion proof. An inclusion promise with an empty
@@ -148,12 +152,14 @@ impl Bundle {
     ///   most [`MAX_TIMESTAMPS`] entries, each with a non-empty
     ///   `signedTimestamp`;
     /// - `dsseEnvelope` is present (a `messageSignature` bundle is an
-    ///   error) with `payload`, `payloadType` and exactly one entry in
-    ///   `signatures`, whose `sig` is not empty and whose `keyid` is
-    ///   optional;
-    /// - `logIndex` and `treeSize` are unsigned: JSON strings of decimal
-    ///   digits or JSON integer literals, without sign, fraction, exponent
-    ///   or leading zero, below 2^63;
+    ///   error) with exactly one entry in `signatures`, whose `sig` is not
+    ///   empty and whose `keyid` is optional. A missing `payload` or
+    ///   `payloadType` reads as empty, which no verification function
+    ///   accepts;
+    /// - `logIndex` and `treeSize` are not negative: JSON strings of decimal
+    ///   digits or JSON integer literals, without fraction, exponent or
+    ///   leading zero, below 2^63. A minus sign is accepted in front of
+    ///   zero only;
     /// - `integratedTime` is a signed 64-bit integer in the same two forms,
     ///   where a leading `-` is allowed. An absent `integratedTime` and an
     ///   explicit zero are the same thing: both decode to zero, and "no

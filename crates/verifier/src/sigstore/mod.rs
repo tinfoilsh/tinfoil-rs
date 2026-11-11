@@ -24,6 +24,7 @@
 pub mod bundle;
 pub mod certificate;
 pub mod checkpoint;
+mod evidence;
 pub mod keyed;
 pub mod merkle;
 pub mod rekor;

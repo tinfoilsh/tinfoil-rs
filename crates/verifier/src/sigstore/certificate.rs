@@ -9,7 +9,8 @@ use ::der::asn1::Utf8StringRef;
 
 use super::SigstoreError;
 use super::bundle::Bundle;
-use super::keyed::{statement_for_digest, verify_envelope_signature, verify_log_entries};
+pub use super::evidence::{TimeSource, VerifiedTime};
+use super::evidence::{statement_for_digest, verify_envelope_signature, verify_log_entries};
 use super::rekor::EntrySigner;
 use super::sct::verify_scts;
 use super::statement::Statement;
@@ -65,25 +66,6 @@ pub struct SigningIdentity {
     pub subject_alternative_name: String,
     /// The Fulcio claims.
     pub extensions: FulcioExtensions,
-}
-
-/// Where a verified time comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimeSource {
-    /// A transparency log's integrated time, authenticated by the log's
-    /// signed entry timestamp.
-    TransparencyLog,
-    /// An RFC 3161 timestamp over the signature.
-    TimestampAuthority,
-}
-
-/// A time at which the bundle's signature is proven to have existed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VerifiedTime {
-    /// The evidence for the time.
-    pub source: TimeSource,
-    /// The time.
-    pub at: Instant,
 }
 
 /// What a certificate-signed bundle proves once verified.
