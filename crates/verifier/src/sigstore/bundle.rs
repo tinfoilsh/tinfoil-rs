@@ -136,16 +136,17 @@ impl Bundle {
     ///   The certificate chain form of older bundles (`x509CertificateChain`)
     ///   is an error;
     /// - `tlogEntries` has 1 to [`MAX_TLOG_ENTRIES`] entries, and no two
-    ///   share a log identifier and log index. Each has `logIndex`,
-    ///   `logId.keyId`, a `kindVersion` object and `canonicalizedBody`; a
+    ///   share a log identifier and log index. Each has `logId.keyId`, a
+    ///   `kindVersion` object and `canonicalizedBody`; a missing `logIndex`
+    ///   is index zero, which is how the encoding writes a zero; a
     ///   missing `kind` or `version` reads as the empty string, which no
     ///   verification function accepts; `integratedTime`, `inclusionPromise` (with
     ///   `signedEntryTimestamp`) and `inclusionProof` are optional, but one
     ///   of the last two is present, and at least one entry of the bundle
     ///   has an inclusion proof. An inclusion promise with an empty
     ///   `signedEntryTimestamp` does not count as present for this rule;
-    /// - an inclusion proof has `logIndex`, `treeSize`, a 32-byte
-    ///   `rootHash`, at most [`MAX_PROOF_HASHES`] 32-byte `hashes`, and a
+    /// - an inclusion proof has `treeSize`, a `logIndex` unless it is zero,
+    ///   a 32-byte `rootHash`, at most [`MAX_PROOF_HASHES`] 32-byte `hashes`, and a
     ///   non-empty `checkpoint.envelope` of at most [`MAX_CHECKPOINT_SIZE`]
     ///   bytes;
     /// - `timestampVerificationData.rfc3161Timestamps`, when present, has at
@@ -385,7 +386,7 @@ fn tlog_entry(value: &Value) -> Result<TlogEntry, SigstoreError> {
                 return Err(error("checkpoint size is outside allowed bounds"));
             }
             Some(InclusionProof {
-                log_index: proof.required_index("logIndex")?,
+                log_index: proof.index("logIndex")?,
                 root_hash: hash(
                     proof.required_bytes("rootHash")?,
                     "inclusion proof root hash",
@@ -403,7 +404,7 @@ fn tlog_entry(value: &Value) -> Result<TlogEntry, SigstoreError> {
         ));
     }
     Ok(TlogEntry {
-        log_index: entry.required_index("logIndex")?,
+        log_index: entry.index("logIndex")?,
         log_id: Members::required(entry.get("logId"), "logId", &["keyId"])?
             .required_bytes("keyId")?,
         kind: kind_version.string("kind")?.unwrap_or_default().to_string(),
