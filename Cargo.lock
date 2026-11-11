@@ -2394,9 +2394,17 @@ name = "tinfoil-verifier"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "cms",
+ "der",
+ "ecdsa",
+ "ed25519-dalek",
  "getrandom 0.3.4",
+ "p256",
+ "p384",
+ "rsa",
  "saphyr-parser",
  "sha2 0.10.9",
+ "x509-cert",
 ]
 
 [[package]]
