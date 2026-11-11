@@ -46,6 +46,7 @@ const MUST_PASS: &[&str] = &[
     "policy",
     "quote-sev",
     "frozen-time",
+    "quote-tdx",
 ];
 
 /// Without the stages compiled in, every fixture is skipped and none is

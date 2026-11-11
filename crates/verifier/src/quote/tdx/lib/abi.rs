@@ -2,7 +2,6 @@
 //! certificate chain.
 
 use crate::quote::QuoteError;
-use crate::stub::pending;
 
 /// The smallest quote: the header, the body, the length of the signed
 /// data, and signed data whose QE authentication data and PCK certificate
@@ -165,11 +164,12 @@ impl QuoteV4 {
     ///
     /// Rules, each an error when broken:
     ///
+    /// - the first two bytes state [`QUOTE_VERSION`];
     /// - at least [`QUOTE_MIN_SIZE`] bytes, and every fixed-size field is
     ///   read only after its bytes are known to be there: a quote too short
     ///   for a field is an error;
-    /// - the header's version is [`QUOTE_VERSION`], its attestation key
-    ///   type [`ATTESTATION_KEY_TYPE_ECDSA_P256`] and its TEE type
+    /// - the header's attestation key type is
+    ///   [`ATTESTATION_KEY_TYPE_ECDSA_P256`] and its TEE type
     ///   [`TEE_TYPE_TDX`];
     /// - the signed data length fits the quote; what follows the signed
     ///   data is kept as extra bytes;
@@ -184,7 +184,239 @@ impl QuoteV4 {
     /// Multi-byte integers are little-endian. Reserved bytes are not
     /// judged here.
     pub fn parse(quote: &[u8]) -> Result<Self, QuoteError> {
-        pending("quote::tdx::lib::abi::QuoteV4::parse")
+        let mut input = Fields::new(quote);
+        let version = Fields::new(quote)
+            .u16()
+            .ok_or_else(|| QuoteError::new("TDX quote is too short to state its version"))?;
+        if version != QUOTE_VERSION {
+            return Err(QuoteError::new(format!(
+                "TDX quote version {version} is not supported, want {QUOTE_VERSION}"
+            )));
+        }
+        if quote.len() < QUOTE_MIN_SIZE {
+            return Err(QuoteError::new(format!(
+                "TDX quote is {} bytes, shorter than the smallest quote of {QUOTE_MIN_SIZE}",
+                quote.len()
+            )));
+        }
+        let short = || QuoteError::new("TDX quote is too short for its fields");
+
+        let signed_bytes = quote
+            .get(..HEADER_SIZE.saturating_add(TD_QUOTE_BODY_SIZE))
+            .ok_or_else(short)?
+            .to_vec();
+        let header = Header::read(&mut input).ok_or_else(short)?;
+        if header.attestation_key_type != ATTESTATION_KEY_TYPE_ECDSA_P256 {
+            return Err(QuoteError::new(format!(
+                "TDX quote attestation key type {} is not supported",
+                header.attestation_key_type
+            )));
+        }
+        if header.tee_type != TEE_TYPE_TDX {
+            return Err(QuoteError::new(format!(
+                "quote TEE type {:#x} is not TDX",
+                header.tee_type
+            )));
+        }
+        let body = TdQuoteBody::read(&mut input).ok_or_else(short)?;
+
+        let signed_data_size = input.length_u32().ok_or_else(short)?;
+        let signed = input.take(signed_data_size).ok_or_else(|| {
+            QuoteError::new(format!(
+                "TDX quote states {signed_data_size} bytes of signed data, more than it holds"
+            ))
+        })?;
+        let extra_bytes = input.rest().to_vec();
+        let signed_data = SignedData::read(signed)?;
+
+        Ok(QuoteV4 {
+            header,
+            body,
+            signed_data,
+            extra_bytes,
+            signed_bytes,
+        })
+    }
+}
+
+/// Reads fixed-size fields from the front of a byte string. Every read is
+/// checked: a field that is not wholly there is `None`.
+struct Fields<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> Fields<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { rest: bytes }
+    }
+
+    fn take(&mut self, count: usize) -> Option<&'a [u8]> {
+        let (field, rest) = self.rest.split_at_checked(count)?;
+        self.rest = rest;
+        Some(field)
+    }
+
+    fn array<const N: usize>(&mut self) -> Option<[u8; N]> {
+        self.take(N)?.try_into().ok()
+    }
+
+    fn u16(&mut self) -> Option<u16> {
+        self.array().map(u16::from_le_bytes)
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        self.array().map(u32::from_le_bytes)
+    }
+
+    /// A 32-bit length, as a count of bytes.
+    fn length_u32(&mut self) -> Option<usize> {
+        usize::try_from(self.u32()?).ok()
+    }
+
+    fn rest(&self) -> &'a [u8] {
+        self.rest
+    }
+}
+
+impl Header {
+    fn read(input: &mut Fields<'_>) -> Option<Self> {
+        Some(Header {
+            version: input.u16()?,
+            attestation_key_type: input.u16()?,
+            tee_type: input.u32()?,
+            pce_svn: input.array()?,
+            qe_svn: input.array()?,
+            qe_vendor_id: input.array()?,
+            user_data: input.array()?,
+        })
+    }
+}
+
+impl TdQuoteBody {
+    fn read(input: &mut Fields<'_>) -> Option<Self> {
+        Some(TdQuoteBody {
+            tee_tcb_svn: input.array()?,
+            mr_seam: input.array()?,
+            mr_signer_seam: input.array()?,
+            seam_attributes: input.array()?,
+            td_attributes: input.array()?,
+            xfam: input.array()?,
+            mr_td: input.array()?,
+            mr_config_id: input.array()?,
+            mr_owner: input.array()?,
+            mr_owner_config: input.array()?,
+            rtmrs: [
+                input.array()?,
+                input.array()?,
+                input.array()?,
+                input.array()?,
+            ],
+            report_data: input.array()?,
+        })
+    }
+}
+
+impl SignedData {
+    /// Decodes the signed data, which must be accounted for to its last
+    /// byte by the lengths that it states.
+    fn read(signed: &[u8]) -> Result<Self, QuoteError> {
+        let short = || QuoteError::new("TDX quote signed data is too short for its fields");
+        let mut input = Fields::new(signed);
+        let signature = input.array().ok_or_else(short)?;
+        let attestation_key = input.array().ok_or_else(short)?;
+
+        let certification_type = input.u16().ok_or_else(short)?;
+        let certification_size = input.length_u32().ok_or_else(short)?;
+        if input.rest().len() != certification_size {
+            return Err(QuoteError::new(format!(
+                "TDX quote certification data is {} bytes, but states {certification_size}",
+                input.rest().len()
+            )));
+        }
+        if certification_type != CERTIFICATION_TYPE_QE_REPORT {
+            return Err(QuoteError::new(format!(
+                "TDX quote certification data type is {certification_type}, want {CERTIFICATION_TYPE_QE_REPORT}"
+            )));
+        }
+
+        let qe_report_bytes: [u8; QE_REPORT_SIZE] = input.array().ok_or_else(short)?;
+        let qe_report = EnclaveReport::read(&qe_report_bytes).ok_or_else(short)?;
+        let qe_report_signature = input.array().ok_or_else(short)?;
+
+        let qe_auth_data_size = usize::from(input.u16().ok_or_else(short)?);
+        let qe_auth_data = input
+            .take(qe_auth_data_size)
+            .ok_or_else(|| {
+                QuoteError::new(format!(
+                    "TDX quote states {qe_auth_data_size} bytes of QE authentication data, more than it holds"
+                ))
+            })?
+            .to_vec();
+
+        let chain_type = input.u16().ok_or_else(short)?;
+        let chain_size = input.length_u32().ok_or_else(short)?;
+        if chain_type != CERTIFICATION_TYPE_PCK_CHAIN {
+            return Err(QuoteError::new(format!(
+                "TDX quote PCK certificate chain data type is {chain_type}, want {CERTIFICATION_TYPE_PCK_CHAIN}"
+            )));
+        }
+        if input.rest().len() != chain_size {
+            return Err(QuoteError::new(format!(
+                "TDX quote PCK certificate chain is {} bytes, but states {chain_size}",
+                input.rest().len()
+            )));
+        }
+        let pck_cert_chain = input.rest().to_vec();
+
+        Ok(SignedData {
+            signature,
+            attestation_key,
+            qe_report_bytes,
+            qe_report,
+            qe_report_signature,
+            qe_auth_data,
+            pck_cert_chain,
+        })
+    }
+}
+
+/// The sizes of the areas of a QE report that are not read, in order.
+/// The first two are reserved. The third holds 32 reserved bytes and the
+/// 64-byte CONFIGID. The fourth holds CONFIGSVN, 42 reserved bytes and
+/// ISVFAMILYID.
+const QE_SKIPPED_1_SIZE: usize = 28;
+const QE_SKIPPED_2_SIZE: usize = 32;
+const QE_SKIPPED_3_SIZE: usize = 96;
+const QE_SKIPPED_4_SIZE: usize = 60;
+
+impl EnclaveReport {
+    fn read(report: &[u8; QE_REPORT_SIZE]) -> Option<Self> {
+        let mut input = Fields::new(report);
+        let cpu_svn = input.array()?;
+        let misc_select = input.u32()?;
+        input.take(QE_SKIPPED_1_SIZE)?;
+        let attributes = input.array()?;
+        let mr_enclave = input.array()?;
+        input.take(QE_SKIPPED_2_SIZE)?;
+        let mr_signer = input.array()?;
+        input.take(QE_SKIPPED_3_SIZE)?;
+        let isv_prod_id = input.u16()?;
+        let isv_svn = input.u16()?;
+        input.take(QE_SKIPPED_4_SIZE)?;
+        let report_data = input.array()?;
+        if !input.rest().is_empty() {
+            return None;
+        }
+        Some(EnclaveReport {
+            cpu_svn,
+            misc_select,
+            attributes,
+            mr_enclave,
+            mr_signer,
+            isv_prod_id,
+            isv_svn,
+            report_data,
+        })
     }
 }
 
