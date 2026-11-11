@@ -245,14 +245,15 @@ fn recorded_evidence_gets_its_recorded_verdict() {
 }
 
 /// The recorded cases that authenticate.
-const EXPECTED_ACCEPTED: usize = 362;
+const EXPECTED_ACCEPTED: usize = 348;
 
 /// The recorded cases that authenticate elsewhere and not here, by class.
-const EXPECTED_STRICTER: [(&str, usize); 7] = [
+const EXPECTED_STRICTER: [(&str, usize); 8] = [
     ("PEM with text outside blocks, headers or spaces", 9),
     ("VCEK certificate in PEM form", 2),
     ("distribution point URL with an unusual authority", 9),
     ("pinned certificate signature algorithm", 2),
+    ("report with reserved bits set in the CPUID stepping", 14),
     ("revocation list signature algorithm", 2),
     ("revocation list with a critical extension", 2),
     ("revocation list with trailing data", 3),

@@ -38,9 +38,8 @@ pub const MAX_REPORT_VERSION: u32 = 5;
 /// The first report version that carries the CPUID family, model and
 /// stepping.
 pub const REPORT_VERSION_WITH_CPUID: u32 = 3;
-/// The offset of the CPUID stepping byte.
-const CPUID_STEPPING_OFFSET: usize = 0x18A;
-/// The bits of the CPUID stepping byte that hold the stepping.
+/// The bits of the CPUID stepping byte that hold the stepping; the other
+/// four are reserved.
 const CPUID_STEPPING_MASK: u8 = 0x0F;
 
 /// Bit 17 of the guest policy is reserved and always set.
@@ -94,8 +93,8 @@ pub struct Report {
     /// REPORTED_TCB.
     pub reported_tcb: u64,
     /// The CPUID family, model and stepping; `None` before version 3, and
-    /// when all three are zero. Only the low four bits of the stepping byte
-    /// are read.
+    /// when all three are zero. The high four bits of the stepping byte are
+    /// reserved, and a report that sets any of them does not decode.
     pub cpuid: Option<Cpuid>,
     /// CHIP_ID.
     pub chip_id: [u8; CHIP_ID_SIZE],
@@ -129,7 +128,7 @@ pub struct Cpuid {
     pub family: u8,
     /// The model.
     pub model: u8,
-    /// The stepping: the low four bits of the stepping byte.
+    /// The stepping, 0 to 15.
     pub stepping: u8,
 }
 
@@ -420,7 +419,11 @@ impl Report {
         let mut cpuid = None;
         if version >= REPORT_VERSION_WITH_CPUID {
             let [family, model, stepping] = fields.array()?;
-            let stepping = stepping & CPUID_STEPPING_MASK;
+            if stepping & !CPUID_STEPPING_MASK != 0 {
+                return Err(error(format!(
+                    "CPUID stepping byte {stepping:#04x} sets reserved bits"
+                )));
+            }
             if (family, model, stepping) != (0, 0, 0) {
                 cpuid = Some(Cpuid {
                     family,
@@ -517,12 +520,8 @@ fn signature_components(report: &[u8]) -> Result<[u8; 2 * SCALAR_SIZE], QuoteErr
 /// [`MIN_REPORT_VERSION`] to [`MAX_REPORT_VERSION`]; its guest policy
 /// decodes; its signature algorithm is ECDSA P-384 with SHA-384; and the
 /// signature verifies over the bytes before [`SIGNATURE_OFFSET`].
-///
-/// From version 3 the high four bits of the CPUID stepping byte are taken
-/// as zero in the signed bytes, as they are when the report is decoded: a
-/// report that differs from a signed one only in those bits verifies and
-/// decodes to the same [`Report`], and a report that was signed with any
-/// of them set does not verify.
+/// Every one of those bytes is covered: no bit of the report can change
+/// without the signature failing.
 pub fn verify_report_signature(report: &[u8], vcek_key: &PublicKey) -> Result<(), QuoteError> {
     let parsed = Report::parse(report)?;
     if !(MIN_REPORT_VERSION..=MAX_REPORT_VERSION).contains(&parsed.version) {
@@ -538,19 +537,13 @@ pub fn verify_report_signature(report: &[u8], vcek_key: &PublicKey) -> Result<()
         )));
     }
     let signature = signature_components(report)?;
-    let mut signed = report
+    let signed = report
         .get(..SIGNATURE_OFFSET)
-        .ok_or_else(|| error("report is truncated"))?
-        .to_vec();
-    if parsed.version >= REPORT_VERSION_WITH_CPUID
-        && let Some(stepping) = signed.get_mut(CPUID_STEPPING_OFFSET)
-    {
-        *stepping &= CPUID_STEPPING_MASK;
-    }
+        .ok_or_else(|| error("report is truncated"))?;
     vcek_key
         .verify(
             SignatureScheme::EcdsaRaw(EcdsaHash::Sha384),
-            &signed,
+            signed,
             &signature,
         )
         .map_err(|cause| error(format!("report signature: {cause}")))
@@ -698,21 +691,31 @@ mod tests {
     }
 
     #[test]
-    fn the_high_bits_of_the_stepping_byte_are_not_part_of_what_is_signed() {
+    fn a_stepping_byte_with_reserved_bits_set_is_refused() {
         let key = vcek_key();
         let mut report = TURIN_REPORT.to_vec();
         assert_eq!(report[0x18A], 0x01);
         for high in [0x10, 0x30, 0x80, 0xF0] {
             report[0x18A] = 0x01 | high;
-            verify_report_signature(&report, &key).unwrap();
-            assert_eq!(
-                Report::parse(&report).unwrap(),
-                Report::parse(TURIN_REPORT).unwrap()
-            );
+            let message = Report::parse(&report).unwrap_err().to_string();
+            assert!(message.contains("reserved bits"), "{message}");
+            assert!(verify_report_signature(&report, &key).is_err());
         }
         // The low bits are signed.
         report[0x18A] = 0x02;
+        Report::parse(&report).unwrap();
         assert!(verify_report_signature(&report, &key).is_err());
+    }
+
+    #[test]
+    fn every_bit_before_the_signature_is_signed() {
+        let key = vcek_key();
+        verify_report_signature(TURIN_REPORT, &key).unwrap();
+        for bit in 0..SIGNATURE_OFFSET * 8 {
+            let mut report = TURIN_REPORT.to_vec();
+            report[bit / 8] ^= 1 << (bit % 8);
+            assert!(verify_report_signature(&report, &key).is_err(), "bit {bit}");
+        }
     }
 
     #[test]
@@ -817,11 +820,13 @@ mod tests {
         assert_eq!(ProductLine::Genoa.name(), "Genoa");
         assert_eq!(ProductLine::Turin.name(), "Turin");
 
-        report[0x18A] = 0x12;
+        report[0x18A] = 0x0F;
         assert_eq!(
             Report::parse(&report).unwrap().cpuid.unwrap().stepping,
-            0x02
+            0x0F
         );
+        report[0x18A] = 0x12;
+        assert!(Report::parse(&report).is_err());
 
         let blank = Report::parse(&blank_report(3)).unwrap();
         assert_eq!(blank.cpuid, None);
