@@ -17,6 +17,8 @@ pub mod crl;
 pub mod der;
 pub mod extension;
 pub mod key;
+#[cfg(test)]
+mod probe_tests;
 
 use crate::stub::message_error;
 

@@ -89,8 +89,8 @@ pub fn object_identifier(content: &[u8]) -> Result<ObjectIdentifier, X509Error> 
 /// Decodes a basic constraints extension value.
 ///
 /// `SEQUENCE { cA BOOLEAN OPTIONAL, pathLenConstraint INTEGER OPTIONAL }`,
-/// with a path length that is not negative. A path length above 255 is
-/// reported as 255, which no path can reach.
+/// with a path length that is not negative and is below 2^63. A path
+/// length above 255 is reported as 255, which no path can reach.
 pub fn basic_constraints(value: &[u8]) -> Result<BasicConstraints, X509Error> {
     let invalid = || error("invalid basic constraints");
     let sequence = single_element(value).map_err(|_| invalid())?;
@@ -118,6 +118,14 @@ pub fn basic_constraints(value: &[u8]) -> Result<BasicConstraints, X509Error> {
                 .copied()
                 .skip_while(|byte| *byte == 0)
                 .collect();
+            // A path length must fit a signed 64-bit integer.
+            let fits = match magnitude.as_slice() {
+                [first, rest @ ..] if rest.len() == 7 => first & 0x80 == 0,
+                other => other.len() < 8,
+            };
+            if !fits {
+                return Err(invalid());
+            }
             Some(match magnitude.as_slice() {
                 [] => 0,
                 [value] => *value,
@@ -573,6 +581,13 @@ mod tests {
             read(&[0x30, 0x07, 0x01, 0x01, 0xff, 0x02, 0x02, 0x01, 0x00]).unwrap(),
             (true, Some(255))
         );
+        // The largest path length that is read, and the first beyond it.
+        let mut wide = vec![0x30, 0x0a, 0x02, 0x08, 0x7f];
+        wide.extend_from_slice(&[0xff; 7]);
+        assert_eq!(read(&wide).unwrap(), (false, Some(255)));
+        let mut too_wide = vec![0x30, 0x0b, 0x02, 0x09, 0x00, 0x80];
+        too_wide.extend_from_slice(&[0x00; 7]);
+        assert!(read(&too_wide).is_err());
         for bad in [
             &[0x30, 0x03, 0x01, 0x01, 0x01][..],
             &[0x30, 0x03, 0x02, 0x01, 0xff],

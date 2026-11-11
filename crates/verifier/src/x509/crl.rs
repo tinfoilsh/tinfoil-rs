@@ -93,7 +93,8 @@ impl Crl {
     /// - at most [`MAX_CRL_SIZE`] bytes of canonical DER with nothing after
     ///   it, and nothing unread inside it;
     /// - version 2;
-    /// - the inner and outer signature algorithms are identical;
+    /// - the inner and outer signature algorithms are identical, and the
+    ///   algorithm's object identifier is in its shortest form;
     /// - the issuer name has the form that certificates require
     ///   ([`check_name`](super::extension::check_name));
     /// - `nextUpdate` is present, and `thisUpdate` is not after it; both
@@ -146,6 +147,7 @@ impl Crl {
             ));
         }
         AlgorithmIdentifierOwned::from_der(inner_algorithm.encoded)?;
+        object_identifier(inner_algorithm.reader().expect(TAG_OID)?.content)?;
         let issuer = fields.expect(TAG_SEQUENCE)?;
         extension::check_name(issuer.encoded).map_err(|cause| cause.within("issuer"))?;
         let this_update = time(&mut fields)?;

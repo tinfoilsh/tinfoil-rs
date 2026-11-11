@@ -417,6 +417,48 @@ pub fn bit_string(content: &[u8]) -> Result<(u8, &[u8]), X509Error> {
     }
 }
 
+/// Checks that an OBJECT IDENTIFIER's contents are in the shortest form:
+/// not empty, no sub-identifier that starts with a padding octet, and a
+/// last sub-identifier that ends.
+pub fn check_object_identifier(content: &[u8]) -> Result<(), X509Error> {
+    let mut at_start = true;
+    for byte in content {
+        if at_start && *byte == 0x80 {
+            return Err(X509Error::new(
+                "DER OBJECT IDENTIFIER is not in its shortest form",
+            ));
+        }
+        at_start = byte & 0x80 == 0;
+    }
+    if content.is_empty() || !at_start {
+        return Err(X509Error::new("malformed DER OBJECT IDENTIFIER"));
+    }
+    Ok(())
+}
+
+/// Checks every OBJECT IDENTIFIER inside a DER value, at any depth of its
+/// constructed elements ([`check_object_identifier`]).
+///
+/// A decoder that keeps an identifier as the bytes it read does not notice
+/// a padded sub-identifier, and an identifier in two spellings would then
+/// compare as two identifiers. This walk rules the second spelling out for
+/// a whole value at once. It does not look inside primitive elements, such
+/// as an OCTET STRING that wraps a further value, and it uses no recursion.
+pub fn check_object_identifiers(der: &[u8]) -> Result<(), X509Error> {
+    let mut pending = vec![DerReader::new(der)];
+    while let Some(mut reader) = pending.pop() {
+        while !reader.is_empty() {
+            let element = reader.element()?;
+            if element.tag == TAG_OID {
+                check_object_identifier(element.content)?;
+            } else if element.tag & 0x20 != 0 {
+                pending.push(element.reader());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The magnitude of one integer of an ECDSA signature: positive, in its
 /// shortest form, and no wider than `field_len` bytes.
 fn ecdsa_integer(content: &[u8], field_len: usize) -> Result<&[u8], X509Error> {
@@ -486,7 +528,7 @@ pub(crate) fn push_element(out: &mut Vec<u8>, tag: u8, content: &[u8]) {
 /// bytes, big-endian) to canonical DER. An odd length, an empty input or a
 /// zero integer is an error.
 pub fn ecdsa_raw_to_der(raw: &[u8]) -> Result<Vec<u8>, X509Error> {
-    if raw.is_empty() || raw.len() % 2 != 0 {
+    if raw.is_empty() || !raw.len().is_multiple_of(2) {
         return Err(X509Error::new(
             "fixed-width ECDSA signature has an odd or zero length",
         ));
@@ -691,8 +733,8 @@ mod tests {
         let mut reader = sequence.reader();
         assert!(reader.optional(TAG_OID).unwrap().is_none());
         assert_eq!(reader.expect(TAG_INTEGER).unwrap().content, [5]);
-        assert!(reader.clone().finish().is_err());
-        assert!(reader.clone().expect(TAG_INTEGER).is_err());
+        assert!(reader.finish().is_err());
+        assert!({ reader }.expect(TAG_INTEGER).is_err());
         assert!(boolean(reader.expect(TAG_BOOLEAN).unwrap().content).unwrap());
         reader.finish().unwrap();
         assert!(single_element(&[0x05, 0x00, 0x00]).is_err());
@@ -721,6 +763,36 @@ mod tests {
         ] {
             assert!(bit_string(bad).is_err(), "{bad:02x?}");
         }
+    }
+
+    #[test]
+    fn object_identifiers_are_checked_at_any_depth() {
+        check_object_identifier(&[0x2a, 0x86, 0x48]).unwrap();
+        assert!(check_object_identifier(&[0x2a, 0x80, 0x48]).is_err());
+        assert!(check_object_identifier(&[0x80, 0x2a]).is_err());
+        assert!(check_object_identifier(&[0x2a, 0x86]).is_err());
+        assert!(check_object_identifier(&[]).is_err());
+
+        // SEQUENCE { [0] { SET { OID 1.2.3 } }, OCTET STRING { OID, padded } }
+        let good = [
+            0x30, 0x0e, 0xa0, 0x06, 0x31, 0x04, 0x06, 0x02, 0x2a, 0x03, 0x04, 0x04, 0x06, 0x02,
+            0x80, 0x03,
+        ];
+        check_object_identifiers(&good).unwrap();
+        let mut padded = good;
+        padded[8] = 0x80;
+        assert!(check_object_identifiers(&padded).is_err());
+        // An element that does not parse is an error, whatever its tag.
+        assert!(check_object_identifiers(&[0x30, 0x03, 0x04, 0x05, 0x00]).is_err());
+        check_object_identifiers(&[]).unwrap();
+        // Depth costs no stack.
+        let mut deep = vec![0x05, 0x00];
+        for _ in 0..2000 {
+            let mut outer = Vec::new();
+            push_element(&mut outer, TAG_SEQUENCE, &deep);
+            deep = outer;
+        }
+        check_object_identifiers(&deep).unwrap();
     }
 
     #[test]

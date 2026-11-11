@@ -119,6 +119,8 @@ impl Certificate {
     ///   [`parse_generalized_time`](super::der::parse_generalized_time)
     ///   without a fraction;
     /// - version 3 when extensions are present, and no extension twice;
+    /// - the object identifiers of the signature algorithm, the key
+    ///   algorithm and every extension are in their shortest form;
     /// - the serial number is not negative;
     /// - every value of the subject and issuer names is a string of an
     ///   accepted type whose contents fit the type
@@ -205,6 +207,21 @@ impl Certificate {
         {
             bit_string(&bit_string_content(unique_id)?)
                 .map_err(|error| error.within("unique identifier"))?;
+        }
+        // The identifiers of the algorithms and extensions are in their
+        // shortest form; decoding alone does not establish that.
+        let identifiers = [
+            parsed.signature_algorithm.oid,
+            tbs_certificate.signature.oid,
+            spki.algorithm.oid,
+        ];
+        let extension_identifiers = tbs_certificate
+            .extensions
+            .iter()
+            .flatten()
+            .map(|extension| extension.extn_id);
+        for identifier in identifiers.into_iter().chain(extension_identifiers) {
+            extension::object_identifier(identifier.as_bytes())?;
         }
         for extension in tbs_certificate.extensions.iter().flatten() {
             extension::check_extension(
