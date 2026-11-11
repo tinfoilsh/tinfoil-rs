@@ -38,7 +38,13 @@ const FACTS: [&str; 7] = [
 /// Vector directories whose fixtures must all pass, not merely not fail.
 /// A directory is added here when the stages behind it are implemented.
 #[cfg(tinfoil_conformance)]
-const MUST_PASS: &[&str] = &["envelope", "approval-bundle", "rfc3161"];
+const MUST_PASS: &[&str] = &[
+    "envelope",
+    "approval-bundle",
+    "rfc3161",
+    "provenance",
+    "policy",
+];
 
 /// Without the stages compiled in, every fixture is skipped and none is
 /// required to pass; a fixture that runs must still not fail.
