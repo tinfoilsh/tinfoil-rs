@@ -44,6 +44,8 @@ const MUST_PASS: &[&str] = &[
     "rfc3161",
     "provenance",
     "policy",
+    "quote-sev",
+    "frozen-time",
 ];
 
 /// Without the stages compiled in, every fixture is skipped and none is
