@@ -42,6 +42,8 @@ mod semver;
 mod sigstore;
 #[allow(dead_code, unused_macros, unused_imports)]
 mod stub;
+#[allow(dead_code, unused_imports)]
+mod trust;
 #[allow(dead_code, unused_imports, unused_variables)]
 mod x509;
 

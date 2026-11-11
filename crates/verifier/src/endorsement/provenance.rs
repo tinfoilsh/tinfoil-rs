@@ -76,7 +76,7 @@ impl ProvenanceClient {
     /// A client that trusts the Sigstore trusted root embedded in the
     /// crate. An error only if the embedded root does not parse.
     pub fn embedded() -> Result<Self, EndorsementError> {
-        pending("endorsement::provenance::ProvenanceClient::embedded")
+        Self::from_trusted_root_json(crate::trust::SIGSTORE_TRUSTED_ROOT_JSON)
     }
 
     /// A client that trusts the given trusted root document

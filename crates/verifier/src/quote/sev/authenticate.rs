@@ -75,6 +75,15 @@ impl Quote {
     }
 }
 
+/// The AMD certificate chain embedded in the crate for a product line: the
+/// ASK and then the ARK, PEM.
+pub fn embedded_cert_chain_pem(product_line: ProductLine) -> &'static [u8] {
+    match product_line {
+        ProductLine::Genoa => crate::trust::AMD_GENOA_CERT_CHAIN_PEM,
+        ProductLine::Turin => crate::trust::AMD_TURIN_CERT_CHAIN_PEM,
+    }
+}
+
 /// Verifies a report's signature chain up to the pinned AMD root, and the
 /// chain against the supplied revocation list.
 ///
@@ -94,8 +103,9 @@ impl Quote {
 /// 4. the report's CPUID field names a supported product line: Genoa or
 ///    Turin ([`ProductLine::from_report`]). A report without the field
 ///    (version 2) is an error;
-/// 5. the trust anchor is the embedded chain of that product line, or
-///    `root_pem`: exactly two certificates, ASK then ARK
+/// 5. the trust anchor is the embedded chain of that product line
+///    ([`embedded_cert_chain_pem`]), or `root_pem`: exactly two
+///    certificates, ASK then ARK
 ///    ([`parse_product_cert_chain`](super::lib::kds::parse_product_cert_chain));
 /// 6. the attestation verifies
 ///    ([`verify_attestation`](super::lib::verify::verify_attestation)):
