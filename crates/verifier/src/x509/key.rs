@@ -10,6 +10,7 @@ use ::der::Decode;
 use ::der::asn1::ObjectIdentifier;
 use ecdsa::signature::hazmat::PrehashVerifier;
 use rsa::pkcs8::DecodePublicKey;
+use rsa::traits::PublicKeyParts;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use x509_cert::spki::SubjectPublicKeyInfoRef;
 
@@ -29,6 +30,10 @@ const OID_RSA_ENCRYPTION: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.8
 
 /// The salt length of every RSA-PSS signature that the verifier accepts.
 pub const RSA_PSS_SALT_LEN: usize = 48;
+
+/// The smallest RSA modulus that is accepted, in bits. Smaller keys can be
+/// factored and are rejected when the key is parsed.
+pub const RSA_MIN_MODULUS_BITS: usize = 1024;
 
 /// The kind of a [`PublicKey`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,8 +108,9 @@ impl PublicKey {
     ///
     /// Accepted keys: ECDSA on P-256 or P-384 with a named curve and an
     /// uncompressed point, Ed25519 without parameters, and RSA
-    /// (`rsaEncryption`). The DER must be canonical with nothing after it,
-    /// and the key bit string must have no unused bits.
+    /// (`rsaEncryption`) with a modulus of [`RSA_MIN_MODULUS_BITS`] to 4096
+    /// bits. The DER must be canonical with nothing after it, and the key
+    /// bit string must have no unused bits.
     pub fn from_spki_der(der: &[u8]) -> Result<Self, X509Error> {
         let spki = SubjectPublicKeyInfoRef::from_der(der)?;
         let bits = spki
@@ -147,10 +153,15 @@ impl PublicKey {
                     .map_err(|_| X509Error::new("invalid Ed25519 public key"))?,
             )
         } else if algorithm == OID_RSA_ENCRYPTION {
-            Key::Rsa(
-                rsa::RsaPublicKey::from_public_key_der(der)
-                    .map_err(|_| X509Error::new("invalid RSA public key"))?,
-            )
+            let key = rsa::RsaPublicKey::from_public_key_der(der)
+                .map_err(|_| X509Error::new("invalid RSA public key"))?;
+            let bits = key.n().bits();
+            if bits < RSA_MIN_MODULUS_BITS {
+                return Err(X509Error::new(format!(
+                    "RSA public key has {bits} bits, fewer than the {RSA_MIN_MODULUS_BITS} required"
+                )));
+            }
+            Key::Rsa(key)
         } else {
             return Err(X509Error::new(format!(
                 "unsupported public key algorithm {algorithm}"
@@ -326,6 +337,49 @@ AaYalIJmBZ8yyezPjTqhxrKBpMnaocVtLJBI1eM3uXnQzQGAJdJ4gs9Fyw==\n\
         ];
         let error = PublicKey::from_spki_der(&der).unwrap_err();
         assert!(error.to_string().contains("unsupported"), "{error}");
+    }
+
+    /// A DER header: the tag, then the length in its shortest form.
+    fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        match content.len() {
+            len @ 0..=0x7f => out.push(len as u8),
+            len @ 0x80..=0xff => out.extend_from_slice(&[0x81, len as u8]),
+            len => out.extend_from_slice(&[0x82, (len >> 8) as u8, len as u8]),
+        }
+        out.extend_from_slice(content);
+        out
+    }
+
+    /// The SubjectPublicKeyInfo of an RSA key whose modulus has `bits` bits
+    /// and whose exponent is 65537. The modulus is not a product of two
+    /// primes; parsing does not need it to be.
+    fn rsa_spki(bits: usize) -> Vec<u8> {
+        let mut modulus = vec![0xff; bits / 8];
+        modulus.insert(0, 0x00);
+        let mut key = tlv(0x02, &modulus);
+        key.extend_from_slice(&tlv(0x02, &[0x01, 0x00, 0x01]));
+        let mut bit_string = vec![0x00];
+        bit_string.extend_from_slice(&tlv(0x30, &key));
+        let rsa_encryption = [
+            0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
+        ];
+        let mut spki = tlv(0x30, &rsa_encryption);
+        spki.extend_from_slice(&tlv(0x03, &bit_string));
+        tlv(0x30, &spki)
+    }
+
+    #[test]
+    fn an_rsa_key_below_the_minimum_size_is_rejected() {
+        for bits in [512, 768, 1016] {
+            let error = PublicKey::from_spki_der(&rsa_spki(bits)).unwrap_err();
+            assert!(error.to_string().contains("fewer than"), "{bits}: {error}");
+        }
+        for bits in [1024, 2048, 4096] {
+            let key = PublicKey::from_spki_der(&rsa_spki(bits)).unwrap();
+            assert_eq!(key.algorithm(), KeyAlgorithm::Rsa);
+        }
+        assert!(PublicKey::from_spki_der(&rsa_spki(8192)).is_err());
     }
 
     #[test]

@@ -131,6 +131,36 @@ impl Certificate {
         if parsed.signature.unused_bits() != 0 {
             return Err(X509Error::new("certificate signature has unused bits"));
         }
+        let tbs_certificate = &parsed.tbs_certificate;
+        if let Some(extensions) = &tbs_certificate.extensions {
+            if tbs_certificate.version != x509_cert::certificate::Version::V3 {
+                return Err(X509Error::new(
+                    "certificate carries extensions but is not version 3",
+                ));
+            }
+            // A lookup by identifier returns the first match, so a second
+            // extension with the same identifier would never be read.
+            let mut seen: Vec<&ObjectIdentifier> = Vec::with_capacity(extensions.len());
+            for extension in extensions {
+                if seen.contains(&&extension.extn_id) {
+                    return Err(X509Error::new(format!(
+                        "certificate carries extension {} twice",
+                        extension.extn_id
+                    )));
+                }
+                seen.push(&extension.extn_id);
+            }
+        }
+        // The serial number INTEGER is two's complement: a set high bit in
+        // its first byte makes it negative.
+        if tbs_certificate
+            .serial_number
+            .as_bytes()
+            .first()
+            .is_some_and(|first| first & 0x80 != 0)
+        {
+            return Err(X509Error::new("certificate serial number is negative"));
+        }
         let tbs = first_element_of_sequence(der)?.to_vec();
         let subject = parsed.tbs_certificate.subject.to_der()?;
         let issuer = parsed.tbs_certificate.issuer.to_der()?;
@@ -503,6 +533,57 @@ mod tests {
         assert!(Certificate::from_der(&der).is_err());
         assert!(Certificate::from_der(&vec![0x30; MAX_CERTIFICATE_SIZE + 1]).is_err());
         assert!(Certificate::from_der(&[]).is_err());
+    }
+
+    /// The leaf certificate after a change to its parsed form, encoded
+    /// again. Its signature no longer verifies, which parsing does not check.
+    fn changed_leaf(change: impl FnOnce(&mut x509_cert::Certificate)) -> Vec<u8> {
+        let mut parsed =
+            x509_cert::Certificate::from_der(certificate(FULCIO_LEAF_PEM).der()).unwrap();
+        change(&mut parsed);
+        parsed.to_der().unwrap()
+    }
+
+    #[test]
+    fn an_extension_may_appear_only_once() {
+        assert!(Certificate::from_der(&changed_leaf(|_| {})).is_ok());
+        let der = changed_leaf(|certificate| {
+            let extensions = certificate.tbs_certificate.extensions.as_mut().unwrap();
+            let first = extensions[0].clone();
+            extensions.push(first);
+        });
+        let error = Certificate::from_der(&der).unwrap_err();
+        assert!(error.to_string().contains("twice"), "{error}");
+    }
+
+    #[test]
+    fn extensions_need_version_3() {
+        for version in [
+            x509_cert::certificate::Version::V1,
+            x509_cert::certificate::Version::V2,
+        ] {
+            let der = changed_leaf(|certificate| certificate.tbs_certificate.version = version);
+            let error = Certificate::from_der(&der).unwrap_err();
+            assert!(error.to_string().contains("not version 3"), "{error}");
+        }
+        // Without extensions, an older version is not an error of form.
+        let der = changed_leaf(|certificate| {
+            certificate.tbs_certificate.version = x509_cert::certificate::Version::V1;
+            certificate.tbs_certificate.extensions = None;
+        });
+        assert!(Certificate::from_der(&der).is_ok());
+    }
+
+    #[test]
+    fn a_negative_serial_number_is_rejected() {
+        let mut der = certificate(FULCIO_LEAF_PEM).der().to_vec();
+        // The serial number is the 20-byte INTEGER at offset 13; set its
+        // sign bit.
+        assert_eq!(&der[13..15], [0x02, 0x14]);
+        assert!(der[15] < 0x80);
+        der[15] |= 0x80;
+        let error = Certificate::from_der(&der).unwrap_err();
+        assert!(error.to_string().contains("serial"), "{error}");
     }
 
     #[test]
