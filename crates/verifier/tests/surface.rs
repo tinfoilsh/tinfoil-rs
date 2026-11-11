@@ -7,21 +7,23 @@
 //! The second test compares the public items of the crate with the listing
 //! in `tests/public_api.txt`. The items are read from the source: the names
 //! that `lib.rs` exports, and for each exported type its public methods and
-//! fields. A new, renamed or removed item changes the listing, which makes
-//! a change of the surface visible in review. Set `UPDATE_PUBLIC_API=1` to
-//! rewrite the listing.
+//! fields. A new, renamed or removed item changes the listing, so that a
+//! change of the surface is also a change of that file. Set
+//! `UPDATE_PUBLIC_API=1` to rewrite the listing.
 //!
 //! The listing is read with a line scanner, not a compiler, so it has blind
 //! spots: trait implementations, enum variants, the types in a signature,
 //! and items that a macro would generate. The first test covers the
 //! signatures.
 
-// Test tooling: a panic is how a test fails, and slices of source lines are
-// taken at positions that the scanner itself found.
+// Test tooling: a panic is how a test fails, slices of source lines are
+// taken at positions that the scanner itself found, and the signatures are
+// spelled out in full because they are what the test pins.
 #![allow(
     clippy::arithmetic_side_effects,
     clippy::indexing_slicing,
     clippy::panic,
+    clippy::type_complexity,
     clippy::unwrap_used
 )]
 
@@ -415,7 +417,7 @@ fn the_public_items_are_the_listed_ones() {
         .collect();
     assert!(
         added.is_empty() && removed.is_empty(),
-        "the public surface changed; review it and rerun with UPDATE_PUBLIC_API=1\n\
+        "the public surface changed; if that is intended, rerun with UPDATE_PUBLIC_API=1\n\
          added: {added:#?}\nremoved: {removed:#?}"
     );
 }

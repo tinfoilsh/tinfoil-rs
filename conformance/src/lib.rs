@@ -439,12 +439,9 @@ mod tests {
 
     #[test]
     fn output_omits_absent_members() {
-        let (output, _) = run(STAGE_VERIFY, MINIMAL.as_bytes());
+        let (output, _) = run("v3-no-such-stage", MINIMAL.as_bytes());
         let json = serde_json::to_string(&output).unwrap();
-        assert_eq!(
-            json,
-            r#"{"stage":"verify-attestation-v3","accepted":false}"#
-        );
+        assert_eq!(json, r#"{"stage":"v3-no-such-stage","accepted":false}"#);
     }
 
     #[test]

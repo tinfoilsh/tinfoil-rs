@@ -22,7 +22,7 @@
 //! let nonce = random_nonce()?;
 //! let document = fetch(&nonce);
 //! let verifier = Verifier::new();
-//! match verifier.verify_v3(&document, &nonce, "tinfoilsh/confidential-model-router") {
+//! match verifier.verify_v3(&document, &nonce, "owner/repository") {
 //!     Ok(verified) => println!("TLS key: {:?}", verified.tls_public_key_fp()),
 //!     Err(Error::Verification(rejected)) => println!("rejected at {}", rejected.layer()),
 //!     Err(other) => return Err(other.into()),

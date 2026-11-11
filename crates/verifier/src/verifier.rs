@@ -282,7 +282,7 @@ pub(crate) fn freshness_expiration(
 
 /// The tag that a runtime version is released at: the version without its
 /// build metadata.
-fn release_tag(version: &str) -> String {
+pub(crate) fn release_tag(version: &str) -> String {
     semver::parse(version)
         .map(|version| {
             format!(
@@ -306,6 +306,11 @@ impl Verifier {
     /// A verifier with the defaults: the trust anchors embedded in the
     /// crate, Tinfoil's public config and artifact signing keys, and a
     /// freshness bound of seven days.
+    ///
+    /// This cannot fail: the only thing that could is loading the trust
+    /// material that is compiled into the crate, which the crate's tests
+    /// prove to load. Were it ever not to, every verification would return
+    /// a usage error that says so.
     pub fn new() -> Self {
         VerifierBuilder::build_default()
     }

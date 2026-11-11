@@ -35,18 +35,23 @@ const FACTS: [&str; 7] = [
     "timestamp",
 ];
 
-/// Vector directories whose fixtures must all pass, not merely not fail.
-/// A directory is added here when the stages behind it are implemented.
+/// Vector directories whose fixtures must all pass, not merely not fail:
+/// every directory of the suite.
 #[cfg(tinfoil_conformance)]
 const MUST_PASS: &[&str] = &[
-    "envelope",
     "approval-bundle",
-    "rfc3161",
-    "provenance",
-    "policy",
-    "quote-sev",
+    "embedded-roots",
+    "envelope",
+    "freshness",
     "frozen-time",
+    "golden",
+    "golden-tdx",
+    "policy",
+    "provenance",
+    "quote-sev",
     "quote-tdx",
+    "real-frozen",
+    "rfc3161",
 ];
 
 /// Without the stages compiled in, every fixture is skipped and none is

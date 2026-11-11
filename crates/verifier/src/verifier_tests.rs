@@ -1098,6 +1098,22 @@ fn a_config_authorizer_sees_the_material_of_the_document() {
     }
 }
 
+#[test]
+fn an_embedded_runtime_is_recorded_at_its_release_tag() {
+    use crate::verifier::release_tag;
+    for (version, tag) in [
+        ("v0.15.0", "v0.15.0"),
+        ("v0.15.0+gpu", "v0.15.0"),
+        ("v0.15.0+containers.initrd-1", "v0.15.0"),
+        ("v1.2.3-rc.1", "v1.2.3-rc.1"),
+        ("v1.2.3-rc.1+build", "v1.2.3-rc.1"),
+        ("0.15.0", ""),
+        ("", ""),
+    ] {
+        assert_eq!(release_tag(version), tag, "{version}");
+    }
+}
+
 fn at(text: &str) -> Instant {
     Instant::parse_rfc3339(text).unwrap()
 }
