@@ -19,6 +19,8 @@ macro_rules! message_error {
             }
 
             /// The same error with `context` in front of its message.
+            // Not every module error is given context.
+            #[allow(dead_code)]
             pub(crate) fn within(self, context: impl std::fmt::Display) -> Self {
                 Self {
                     message: format!("{context}: {}", self.message),

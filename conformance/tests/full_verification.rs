@@ -131,12 +131,11 @@ fn changed(mut input: Value, changes: &[Value]) -> Value {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    // The adapter has no hash of its own; the verifier's envelope stage is
-    // not a substitute, so the test carries a small SHA-256.
     sha256::digest(bytes)
 }
 
-/// SHA-256, for the comparison of a changed document with its record.
+/// SHA-256, for the comparison of a changed document with its record. The
+/// adapter depends on no hash function, so the test carries one.
 mod sha256 {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -162,10 +161,10 @@ mod sha256 {
             padded.push(0);
         }
         padded.extend_from_slice(&(message.len() as u64 * 8).to_be_bytes());
-        for block in padded.chunks_exact(64) {
+        for block in padded.as_chunks::<64>().0 {
             let mut w = [0u32; 64];
-            for (i, word) in block.chunks_exact(4).enumerate() {
-                w[i] = u32::from_be_bytes(word.try_into().unwrap());
+            for (slot, word) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+                *slot = u32::from_be_bytes(*word);
             }
             for i in 16..64 {
                 let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);

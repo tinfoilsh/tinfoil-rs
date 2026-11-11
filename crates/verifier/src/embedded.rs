@@ -5,9 +5,7 @@ use sha2::{Digest, Sha256};
 use crate::canonical;
 use crate::endorsement::approval::parse_name;
 use crate::policy::{self, ARTIFACT_FORMAT_V2, Artifact};
-use crate::runtime::{
-    MAX_CONFIG_SIZE, RuntimeReference, decode_manifest, parse_manifest, runtime_from_config,
-};
+use crate::runtime::{self, MAX_CONFIG_SIZE, decode_manifest, parse_manifest, runtime_from_config};
 
 /// The size of a SHA-256 digest in bytes.
 const SHA256_SIZE: usize = 32;
@@ -29,6 +27,19 @@ pub struct EmbeddedReferences {
     pub runtime: Option<Vec<u8>>,
     /// A platform policy artifact in the `platform-endorsements/v2` format.
     pub platform: Option<Vec<u8>>,
+}
+
+/// An immutable pin of one runtime release: what a config's `cvm-version`
+/// names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeReference {
+    /// The repository of the runtime, `tinfoilsh/cvmimage`.
+    pub repo: String,
+    /// The release tag: a full semantic version with a leading `v`, such as
+    /// `v0.15.0`.
+    pub tag: String,
+    /// The SHA-256 of the runtime manifest, 64 lowercase hex digits.
+    pub digest: String,
 }
 
 /// A config that the caller authorizes without a registry endorsement.
@@ -65,7 +76,7 @@ pub(crate) struct ConfigReference {
     /// The SHA-256 of the config, lowercase hex.
     pub(crate) digest: String,
     /// The runtime that the config pins.
-    pub(crate) runtime: RuntimeReference,
+    pub(crate) runtime: runtime::RuntimeReference,
 }
 
 /// A caller-supplied platform policy artifact.
@@ -115,7 +126,11 @@ impl Embedded {
             }) => Some(ConfigReference {
                 name,
                 digest,
-                runtime,
+                runtime: runtime::RuntimeReference {
+                    repo: runtime.repo,
+                    tag: runtime.tag,
+                    digest: runtime.digest,
+                },
             }),
             Some(EmbeddedConfig::Bytes { bytes, name }) => {
                 if bytes.is_empty() || bytes.len() > MAX_CONFIG_SIZE {
