@@ -20,6 +20,8 @@
 mod canonical;
 #[allow(dead_code, unused_imports)]
 mod document;
+#[allow(dead_code, unused_imports, unused_variables)]
+mod endorsement;
 mod error;
 #[allow(dead_code)]
 mod instant;
