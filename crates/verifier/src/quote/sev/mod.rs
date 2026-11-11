@@ -3,6 +3,8 @@
 //! expectations.
 
 pub mod authenticate;
+#[cfg(test)]
+mod differential_tests;
 pub mod expectations;
 pub mod identity;
 pub mod lib;

@@ -37,7 +37,11 @@ pub const MIN_REPORT_VERSION: u32 = 2;
 pub const MAX_REPORT_VERSION: u32 = 5;
 /// The first report version that carries the CPUID family, model and
 /// stepping.
-const REPORT_VERSION_WITH_CPUID: u32 = 3;
+pub const REPORT_VERSION_WITH_CPUID: u32 = 3;
+/// The offset of the CPUID stepping byte.
+const CPUID_STEPPING_OFFSET: usize = 0x18A;
+/// The bits of the CPUID stepping byte that hold the stepping.
+const CPUID_STEPPING_MASK: u8 = 0x0F;
 
 /// Bit 17 of the guest policy is reserved and always set.
 const POLICY_RESERVED_ONE_BIT: u32 = 17;
@@ -90,7 +94,8 @@ pub struct Report {
     /// REPORTED_TCB.
     pub reported_tcb: u64,
     /// The CPUID family, model and stepping; `None` before version 3, and
-    /// when all three are zero.
+    /// when all three are zero. Only the low four bits of the stepping byte
+    /// are read.
     pub cpuid: Option<Cpuid>,
     /// CHIP_ID.
     pub chip_id: [u8; CHIP_ID_SIZE],
@@ -124,7 +129,7 @@ pub struct Cpuid {
     pub family: u8,
     /// The model.
     pub model: u8,
-    /// The stepping, at most 15.
+    /// The stepping: the low four bits of the stepping byte.
     pub stepping: u8,
 }
 
@@ -374,7 +379,6 @@ impl Report {
     ///
     /// - the guest policy decodes ([`GuestPolicy::parse`]) and the signer
     ///   field decodes ([`SignerInfo::parse`]);
-    /// - from version 3, the stepping is at most 15;
     /// - the reserved ranges are zero: `[0x4C, 0x50)`; `[0x188, 0x1A0)`
     ///   before version 3 and `[0x18B, 0x1A0)` from version 3; `0x1EB`;
     ///   `0x1EF`; `[0x208, 0x2A0)`; and, for an ECDSA P-384 signature, the
@@ -416,11 +420,7 @@ impl Report {
         let mut cpuid = None;
         if version >= REPORT_VERSION_WITH_CPUID {
             let [family, model, stepping] = fields.array()?;
-            if stepping > 0x0F {
-                return Err(error(format!(
-                    "report CPUID stepping {stepping:#x} is out of range"
-                )));
-            }
+            let stepping = stepping & CPUID_STEPPING_MASK;
             if (family, model, stepping) != (0, 0, 0) {
                 cpuid = Some(Cpuid {
                     family,
@@ -517,6 +517,12 @@ fn signature_components(report: &[u8]) -> Result<[u8; 2 * SCALAR_SIZE], QuoteErr
 /// [`MIN_REPORT_VERSION`] to [`MAX_REPORT_VERSION`]; its guest policy
 /// decodes; its signature algorithm is ECDSA P-384 with SHA-384; and the
 /// signature verifies over the bytes before [`SIGNATURE_OFFSET`].
+///
+/// From version 3 the high four bits of the CPUID stepping byte are taken
+/// as zero in the signed bytes, as they are when the report is decoded: a
+/// report that differs from a signed one only in those bits verifies and
+/// decodes to the same [`Report`], and a report that was signed with any
+/// of them set does not verify.
 pub fn verify_report_signature(report: &[u8], vcek_key: &PublicKey) -> Result<(), QuoteError> {
     let parsed = Report::parse(report)?;
     if !(MIN_REPORT_VERSION..=MAX_REPORT_VERSION).contains(&parsed.version) {
@@ -532,13 +538,19 @@ pub fn verify_report_signature(report: &[u8], vcek_key: &PublicKey) -> Result<()
         )));
     }
     let signature = signature_components(report)?;
-    let signed = report
+    let mut signed = report
         .get(..SIGNATURE_OFFSET)
-        .ok_or_else(|| error("report is truncated"))?;
+        .ok_or_else(|| error("report is truncated"))?
+        .to_vec();
+    if parsed.version >= REPORT_VERSION_WITH_CPUID
+        && let Some(stepping) = signed.get_mut(CPUID_STEPPING_OFFSET)
+    {
+        *stepping &= CPUID_STEPPING_MASK;
+    }
     vcek_key
         .verify(
             SignatureScheme::EcdsaRaw(EcdsaHash::Sha384),
-            signed,
+            &signed,
             &signature,
         )
         .map_err(|cause| error(format!("report signature: {cause}")))
@@ -550,6 +562,14 @@ pub(crate) mod testdata {
     pub const TURIN_REPORT: &[u8] = include_bytes!("../../../../tests/data/sev/turin_report.bin");
     /// The VCEK certificate that signed [`TURIN_REPORT`], DER.
     pub const TURIN_VCEK_DER: &[u8] = include_bytes!("../../../../tests/data/sev/turin_vcek.der");
+    /// The revocation list that AMD published for Turin on 27 October 2026,
+    /// valid until 9 December 2026, DER.
+    pub const TURIN_CRL_DER: &[u8] = include_bytes!("../../../../tests/data/sev/turin_crl.der");
+    /// An instant inside the validity of [`TURIN_CRL_DER`] and of
+    /// [`TURIN_VCEK_DER`]: 1 November 2026.
+    pub const TURIN_NOW_UNIX: i64 = 1_793_491_200;
+    /// The CHIP_ID of [`TURIN_REPORT`] in hex.
+    pub const TURIN_CHIP_ID: &str = "6bb1229b7692b7100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// A report of the given version that is zero wherever a field may be,
     /// with the reserved guest policy bit set.
@@ -678,6 +698,24 @@ mod tests {
     }
 
     #[test]
+    fn the_high_bits_of_the_stepping_byte_are_not_part_of_what_is_signed() {
+        let key = vcek_key();
+        let mut report = TURIN_REPORT.to_vec();
+        assert_eq!(report[0x18A], 0x01);
+        for high in [0x10, 0x30, 0x80, 0xF0] {
+            report[0x18A] = 0x01 | high;
+            verify_report_signature(&report, &key).unwrap();
+            assert_eq!(
+                Report::parse(&report).unwrap(),
+                Report::parse(TURIN_REPORT).unwrap()
+            );
+        }
+        // The low bits are signed.
+        report[0x18A] = 0x02;
+        assert!(verify_report_signature(&report, &key).is_err());
+    }
+
+    #[test]
     fn every_byte_of_a_signature_component_counts() {
         let key = vcek_key();
         for offset in [0x2A0 + 48, 0x2A0 + 71, 0x2A0 + 72 + 48, 0x2A0 + 143] {
@@ -779,8 +817,11 @@ mod tests {
         assert_eq!(ProductLine::Genoa.name(), "Genoa");
         assert_eq!(ProductLine::Turin.name(), "Turin");
 
-        report[0x18A] = 0x10;
-        assert!(Report::parse(&report).is_err());
+        report[0x18A] = 0x12;
+        assert_eq!(
+            Report::parse(&report).unwrap().cpuid.unwrap().stepping,
+            0x02
+        );
 
         let blank = Report::parse(&blank_report(3)).unwrap();
         assert_eq!(blank.cpuid, None);

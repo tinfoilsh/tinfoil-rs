@@ -6,7 +6,6 @@ use ::der::asn1::{Ia5StringRef, ObjectIdentifier, OctetStringRef, UintRef};
 
 use super::abi::ProductLine;
 use crate::quote::QuoteError;
-use crate::stub::pending;
 use crate::x509::Certificate;
 
 /// The VCEK extension for the layout version of the TCB and hardware
@@ -97,11 +96,19 @@ pub struct TcbParts {
     pub fmc_spl: u8,
 }
 
+/// The highest value of every level other than the microcode level.
+const MAX_SPL: u8 = 127;
+
+/// The bits of a [`TcbLayout::V1`] TCB version that are reserved: bytes 4
+/// to 6.
+const V1_RESERVED_BITS: u64 = 0x00ff_ffff_0000_0000;
+
 impl TcbParts {
-    /// The levels of a policy floor for a product line: `fmc_spl` is given
-    /// exactly for product lines whose layout has it. Every level other
-    /// than the microcode level is at most 127, the reserved levels are
-    /// zero, and the levels fit the layout ([`TcbParts::compose`]).
+    /// The levels of a policy floor for a product line. An absent FMC level
+    /// counts as zero; whether a product line requires or forbids one is
+    /// the caller's rule. The reserved levels are zero, and the levels must
+    /// form a valid TCB version in the product line's layout
+    /// ([`TcbParts::compose`]).
     pub fn for_product_line(
         product_line: ProductLine,
         fmc_spl: Option<u8>,
@@ -110,13 +117,61 @@ impl TcbParts {
         snp_spl: u8,
         ucode_spl: u8,
     ) -> Result<Self, QuoteError> {
-        pending("quote::sev::lib::kds::TcbParts::for_product_line")
+        let parts = Self {
+            layout: TcbLayout::of(product_line),
+            bl_spl,
+            tee_spl,
+            spl_4: 0,
+            spl_5: 0,
+            spl_6: 0,
+            spl_7: 0,
+            snp_spl,
+            ucode_spl,
+            fmc_spl: fmc_spl.unwrap_or(0),
+        };
+        parts.compose()?;
+        Ok(parts)
     }
 
     /// Splits a 64-bit TCB version by a layout. Under [`TcbLayout::V1`]
-    /// the reserved bytes 4 to 6 must be zero.
+    /// the reserved bytes 4 to 6 must be zero. No level is range-checked
+    /// here; [`TcbParts::compose`] does that.
     pub fn decompose(layout: TcbLayout, tcb: u64) -> Result<Self, QuoteError> {
-        pending("quote::sev::lib::kds::TcbParts::decompose")
+        let [b0, b1, b2, b3, b4, b5, b6, b7] = tcb.to_le_bytes();
+        match layout {
+            TcbLayout::V0 => Ok(Self {
+                layout,
+                bl_spl: b0,
+                tee_spl: b1,
+                spl_4: b2,
+                spl_5: b3,
+                spl_6: b4,
+                spl_7: b5,
+                snp_spl: b6,
+                ucode_spl: b7,
+                fmc_spl: 0,
+            }),
+            TcbLayout::V1 => {
+                let reserved = tcb & V1_RESERVED_BITS;
+                if reserved != 0 {
+                    return Err(error(format!(
+                        "non-zero reserved bits in TCB version: {reserved:#x}"
+                    )));
+                }
+                Ok(Self {
+                    layout,
+                    bl_spl: b1,
+                    tee_spl: b2,
+                    spl_4: 0,
+                    spl_5: 0,
+                    spl_6: 0,
+                    spl_7: 0,
+                    snp_spl: b3,
+                    ucode_spl: b7,
+                    fmc_spl: b0,
+                })
+            }
+        }
     }
 
     /// Packs the levels into a 64-bit TCB version. Every level other than
@@ -124,7 +179,58 @@ impl TcbParts {
     /// FMC level must be zero, and under [`TcbLayout::V1`] the reserved
     /// levels must be zero.
     pub fn compose(&self) -> Result<u64, QuoteError> {
-        pending("quote::sev::lib::kds::TcbParts::compose")
+        for (name, value) in [
+            ("SNP", self.snp_spl),
+            ("reserved 7", self.spl_7),
+            ("reserved 6", self.spl_6),
+            ("reserved 5", self.spl_5),
+            ("reserved 4", self.spl_4),
+            ("TEE", self.tee_spl),
+            ("bootloader", self.bl_spl),
+            ("FMC", self.fmc_spl),
+        ] {
+            if value > MAX_SPL {
+                return Err(error(format!(
+                    "{name} security patch level is {value}, want 0 to {MAX_SPL}"
+                )));
+            }
+        }
+        match self.layout {
+            TcbLayout::V0 => {
+                if self.fmc_spl != 0 {
+                    return Err(error(
+                        "the FMC security patch level is not defined for this TCB layout",
+                    ));
+                }
+                Ok(u64::from_le_bytes([
+                    self.bl_spl,
+                    self.tee_spl,
+                    self.spl_4,
+                    self.spl_5,
+                    self.spl_6,
+                    self.spl_7,
+                    self.snp_spl,
+                    self.ucode_spl,
+                ]))
+            }
+            TcbLayout::V1 => {
+                if self.spl_4 != 0 || self.spl_5 != 0 || self.spl_6 != 0 || self.spl_7 != 0 {
+                    return Err(error(
+                        "reserved security patch levels must be zero in this TCB layout",
+                    ));
+                }
+                Ok(u64::from_le_bytes([
+                    self.fmc_spl,
+                    self.bl_spl,
+                    self.tee_spl,
+                    self.snp_spl,
+                    0,
+                    0,
+                    0,
+                    self.ucode_spl,
+                ]))
+            }
+        }
     }
 
     /// Whether every level of `self` is at most the same level of `other`,
@@ -146,7 +252,8 @@ impl TcbParts {
 /// The AMD extensions of a VCEK certificate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Extensions {
-    /// The product name, such as `Genoa` or `Turin-B1`.
+    /// The product name, such as `Genoa` or `Turin-B1`. It is recorded and
+    /// not interpreted: the product line comes from the report.
     pub product_name: String,
     /// The hardware identifier of the chip: [`HWID_SIZE_V0`] or
     /// [`HWID_SIZE_V1`] bytes, by layout.
@@ -162,13 +269,18 @@ impl Extensions {
     }
 }
 
+/// `id-ce-authorityKeyIdentifier`, the one extension of a VCEK certificate
+/// that is not AMD's own.
+const OID_AUTHORITY_KEY_IDENTIFIER: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.35");
+
 /// Reads the AMD extensions of a VCEK certificate.
 ///
 /// Every extension of the certificate other than the authority key
-/// identifier must be one of the AMD extensions above, each at most once.
-/// Rules, each an error when broken:
+/// identifier must be one of the AMD extensions above. Rules, each an
+/// error when broken:
 ///
-/// - the struct version is 0 ([`TcbLayout::V0`]) or 1 ([`TcbLayout::V1`]);
+/// - the struct version is an INTEGER, 0 ([`TcbLayout::V0`]) or 1
+///   ([`TcbLayout::V1`]);
 /// - the product name is an IA5String;
 /// - the hardware identifier is present and has the size of the layout:
 ///   either the bare bytes or an OCTET STRING of them;
@@ -178,7 +290,91 @@ impl Extensions {
 ///   absent, and under `V1` the reverse; each is an INTEGER from 0 to 255;
 /// - the levels form a valid TCB version ([`TcbParts::compose`]).
 pub fn vcek_extensions(vcek: &Certificate) -> Result<Extensions, QuoteError> {
-    pending("quote::sev::lib::kds::vcek_extensions")
+    const KNOWN: [ObjectIdentifier; 13] = [
+        OID_STRUCT_VERSION,
+        OID_PRODUCT_NAME,
+        OID_BL_SPL,
+        OID_TEE_SPL,
+        OID_SNP_SPL,
+        OID_SPL_4,
+        OID_SPL_5,
+        OID_SPL_6,
+        OID_SPL_7,
+        OID_UCODE_SPL,
+        OID_FMC_SPL,
+        OID_HWID,
+        OID_CSP_ID,
+    ];
+    for (oid, _) in vcek.extensions() {
+        if oid != OID_AUTHORITY_KEY_IDENTIFIER && !KNOWN.contains(&oid) {
+            return Err(error(format!(
+                "certificate has an extension that is not an AMD extension: {oid}"
+            )));
+        }
+    }
+    let layout = match extension_u8(vcek, OID_STRUCT_VERSION, "struct version")? {
+        0 => TcbLayout::V0,
+        1 => TcbLayout::V1,
+        other => {
+            return Err(error(format!(
+                "unsupported certificate struct version {other}"
+            )));
+        }
+    };
+    let product_name = extension_ia5_string(vcek, OID_PRODUCT_NAME, "product name")?;
+    if vcek.extension(OID_CSP_ID).is_some() {
+        return Err(error(
+            "certificate carries a cloud service provider identifier",
+        ));
+    }
+    let hwid_size = match layout {
+        TcbLayout::V0 => HWID_SIZE_V0,
+        TcbLayout::V1 => HWID_SIZE_V1,
+    };
+    let hwid = extension_octets(vcek, OID_HWID, "hardware identifier", hwid_size)?;
+    let bl_spl = extension_u8(vcek, OID_BL_SPL, "bootloader level")?;
+    let tee_spl = extension_u8(vcek, OID_TEE_SPL, "TEE level")?;
+    let snp_spl = extension_u8(vcek, OID_SNP_SPL, "SNP level")?;
+    let spl_5 = extension_u8(vcek, OID_SPL_5, "reserved level 5")?;
+    let spl_6 = extension_u8(vcek, OID_SPL_6, "reserved level 6")?;
+    let spl_7 = extension_u8(vcek, OID_SPL_7, "reserved level 7")?;
+    let ucode_spl = extension_u8(vcek, OID_UCODE_SPL, "microcode level")?;
+    let (spl_4, fmc_spl) = match layout {
+        TcbLayout::V0 => {
+            if vcek.extension(OID_FMC_SPL).is_some() {
+                return Err(error(
+                    "certificate carries an FMC level, which its struct version does not define",
+                ));
+            }
+            (extension_u8(vcek, OID_SPL_4, "reserved level 4")?, 0)
+        }
+        TcbLayout::V1 => {
+            if vcek.extension(OID_SPL_4).is_some() {
+                return Err(error(
+                    "certificate carries reserved level 4, which its struct version does not define",
+                ));
+            }
+            (0, extension_u8(vcek, OID_FMC_SPL, "FMC level")?)
+        }
+    };
+    let tcb = TcbParts {
+        layout,
+        bl_spl,
+        tee_spl,
+        spl_4,
+        spl_5,
+        spl_6,
+        spl_7,
+        snp_spl,
+        ucode_spl,
+        fmc_spl,
+    };
+    tcb.compose()?;
+    Ok(Extensions {
+        product_name,
+        hwid,
+        tcb,
+    })
 }
 
 /// The value of an extension that holds a DER INTEGER from 0 to 255 with
@@ -240,20 +436,37 @@ pub fn extension_octets(
     Ok(octets.as_bytes().to_vec())
 }
 
+/// The last line of every certificate block.
+const PEM_CERTIFICATE_END: &[u8] = b"-----END CERTIFICATE-----";
+
 /// Splits an AMD certificate chain (the `cert_chain` of the key
 /// distribution service) into the ASK and the ARK certificate, DER.
 ///
-/// The text is exactly two `CERTIFICATE` blocks, the ASK and then the ARK,
-/// with nothing after the second
-/// ([`pem_certificates`](crate::x509::der::pem_certificates)).
+/// The text is exactly two `CERTIFICATE` blocks, the ASK and then the ARK
+/// ([`pem_certificates`](crate::x509::der::pem_certificates)). Nothing
+/// follows the second block but the end of its last line: a further line,
+/// even an empty one, is an error.
 pub fn parse_product_cert_chain(pem: &[u8]) -> Result<(Vec<u8>, Vec<u8>), QuoteError> {
     let mut certificates = crate::x509::der::pem_certificates(pem)?;
-    match (certificates.pop(), certificates.pop(), certificates.pop()) {
-        (Some(ark), Some(ask), None) => Ok((ask, ark)),
-        _ => Err(error(
-            "certificate chain must carry exactly the ASK and ARK certificates",
-        )),
+    let (ask, ark) = match (certificates.pop(), certificates.pop(), certificates.pop()) {
+        (Some(ark), Some(ask), None) => (ask, ark),
+        _ => {
+            return Err(error(
+                "certificate chain must carry exactly the ASK and ARK certificates",
+            ));
+        }
+    };
+    let tail = pem
+        .windows(PEM_CERTIFICATE_END.len())
+        .rposition(|window| window == PEM_CERTIFICATE_END)
+        .and_then(|start| start.checked_add(PEM_CERTIFICATE_END.len()))
+        .and_then(|end| pem.get(end..))
+        .unwrap_or_default();
+    let line_rest = tail.strip_suffix(b"\n").unwrap_or(tail);
+    if line_rest.iter().any(|byte| !b" \t\r".contains(byte)) {
+        return Err(error("certificate chain carries trailing data"));
     }
+    Ok((ask, ark))
 }
 
 #[cfg(test)]
@@ -340,6 +553,223 @@ mod tests {
             ..base
         };
         assert!(!base.all_at_most(&other_layout));
+    }
+
+    const TURIN_TCB: u64 = 0x5200_0000_0401_0101;
+
+    fn parts(layout: TcbLayout) -> TcbParts {
+        TcbParts {
+            layout,
+            bl_spl: 0,
+            tee_spl: 0,
+            spl_4: 0,
+            spl_5: 0,
+            spl_6: 0,
+            spl_7: 0,
+            snp_spl: 0,
+            ucode_spl: 0,
+            fmc_spl: 0,
+        }
+    }
+
+    #[test]
+    fn the_newer_layout_splits_and_packs() {
+        let split = TcbParts::decompose(TcbLayout::V1, TURIN_TCB).unwrap();
+        assert_eq!(
+            split,
+            TcbParts {
+                fmc_spl: 1,
+                bl_spl: 1,
+                tee_spl: 1,
+                snp_spl: 4,
+                ucode_spl: 82,
+                ..parts(TcbLayout::V1)
+            }
+        );
+        assert_eq!(split.compose().unwrap(), TURIN_TCB);
+    }
+
+    #[test]
+    fn the_older_layout_splits_and_packs() {
+        let tcb = 0x9270_0504_0302_7f1f;
+        let split = TcbParts::decompose(TcbLayout::V0, tcb).unwrap();
+        assert_eq!(
+            split,
+            TcbParts {
+                bl_spl: 0x1f,
+                tee_spl: 0x7f,
+                spl_4: 2,
+                spl_5: 3,
+                spl_6: 4,
+                spl_7: 5,
+                snp_spl: 0x70,
+                ucode_spl: 0x92,
+                ..parts(TcbLayout::V0)
+            }
+        );
+        assert_eq!(split.compose().unwrap(), tcb);
+        // The same bits under the other layout are another TCB.
+        assert!(TcbParts::decompose(TcbLayout::V1, tcb).is_err());
+    }
+
+    #[test]
+    fn reserved_bits_of_the_newer_layout_must_be_zero() {
+        for bit in 32..56 {
+            let error = TcbParts::decompose(TcbLayout::V1, 1 << bit).unwrap_err();
+            assert!(error.to_string().contains("reserved bits"), "{error}");
+        }
+        for bit in (0..32).chain(56..64) {
+            TcbParts::decompose(TcbLayout::V1, 1 << bit).unwrap();
+        }
+        for bit in 0..64 {
+            TcbParts::decompose(TcbLayout::V0, 1 << bit).unwrap();
+        }
+    }
+
+    #[test]
+    fn splitting_does_not_judge_levels_and_packing_does() {
+        // Every byte of a version splits, whatever its value.
+        let split = TcbParts::decompose(TcbLayout::V0, u64::MAX).unwrap();
+        assert_eq!(split.bl_spl, 0xff);
+        assert!(split.compose().is_err());
+
+        let fields: [fn(&mut TcbParts) -> &mut u8; 7] = [
+            |parts| &mut parts.bl_spl,
+            |parts| &mut parts.tee_spl,
+            |parts| &mut parts.spl_4,
+            |parts| &mut parts.spl_5,
+            |parts| &mut parts.spl_6,
+            |parts| &mut parts.spl_7,
+            |parts| &mut parts.snp_spl,
+        ];
+        for field in fields {
+            let mut at_limit = parts(TcbLayout::V0);
+            *field(&mut at_limit) = 127;
+            at_limit.compose().unwrap();
+            let mut over = parts(TcbLayout::V0);
+            *field(&mut over) = 128;
+            let error = over.compose().unwrap_err();
+            assert!(error.to_string().contains("want 0 to 127"), "{error}");
+        }
+        let microcode = TcbParts {
+            ucode_spl: 255,
+            ..parts(TcbLayout::V0)
+        };
+        assert_eq!(microcode.compose().unwrap(), 0xff << 56);
+        let fmc = TcbParts {
+            fmc_spl: 128,
+            ..parts(TcbLayout::V1)
+        };
+        assert!(fmc.compose().is_err());
+    }
+
+    #[test]
+    fn a_layout_has_only_its_own_levels() {
+        let fmc_in_older = TcbParts {
+            fmc_spl: 1,
+            ..parts(TcbLayout::V0)
+        };
+        assert!(fmc_in_older.compose().is_err());
+        for reserved in [
+            TcbParts {
+                spl_4: 1,
+                ..parts(TcbLayout::V1)
+            },
+            TcbParts {
+                spl_5: 1,
+                ..parts(TcbLayout::V1)
+            },
+            TcbParts {
+                spl_6: 1,
+                ..parts(TcbLayout::V1)
+            },
+            TcbParts {
+                spl_7: 1,
+                ..parts(TcbLayout::V1)
+            },
+        ] {
+            assert!(reserved.compose().is_err());
+        }
+    }
+
+    #[test]
+    fn a_policy_floor_takes_the_layout_of_its_product_line() {
+        let turin = TcbParts::for_product_line(ProductLine::Turin, Some(1), 1, 1, 4, 82).unwrap();
+        assert_eq!(turin.layout, TcbLayout::V1);
+        assert_eq!(turin.compose().unwrap(), TURIN_TCB);
+        let genoa = TcbParts::for_product_line(ProductLine::Genoa, None, 7, 0, 14, 72).unwrap();
+        assert_eq!(genoa.layout, TcbLayout::V0);
+        assert_eq!(genoa.compose().unwrap(), 0x480e_0000_0000_0007);
+
+        // An absent FMC level counts as zero in either layout.
+        let without = TcbParts::for_product_line(ProductLine::Turin, None, 1, 1, 4, 82).unwrap();
+        assert_eq!(without.fmc_spl, 0);
+        TcbParts::for_product_line(ProductLine::Genoa, Some(0), 7, 0, 14, 72).unwrap();
+        assert!(TcbParts::for_product_line(ProductLine::Genoa, Some(1), 7, 0, 14, 72).is_err());
+        assert!(TcbParts::for_product_line(ProductLine::Genoa, None, 128, 0, 0, 0).is_err());
+        assert!(TcbParts::for_product_line(ProductLine::Turin, Some(128), 0, 0, 0, 0).is_err());
+        TcbParts::for_product_line(ProductLine::Turin, Some(127), 127, 127, 127, 255).unwrap();
+    }
+
+    #[test]
+    fn floors_of_different_layouts_do_not_compare() {
+        let older = TcbParts::for_product_line(ProductLine::Genoa, None, 0, 0, 0, 0).unwrap();
+        let newer = TcbParts::for_product_line(ProductLine::Turin, None, 0, 0, 0, 0).unwrap();
+        assert!(!older.all_at_most(&newer));
+        assert!(!newer.all_at_most(&older));
+        assert!(older.all_at_most(&older));
+    }
+
+    #[test]
+    fn the_extensions_of_a_captured_vcek_are_read() {
+        let extensions = vcek_extensions(&vcek()).unwrap();
+        assert_eq!(extensions.product_name, "Turin");
+        assert_eq!(extensions.hwid.len(), HWID_SIZE_V1);
+        assert_eq!(
+            crate::canonical::encode_lower_hex(&extensions.hwid),
+            "6bb1229b7692b710"
+        );
+        assert_eq!(extensions.tcb.layout, TcbLayout::V1);
+        assert_eq!(extensions.tcb_version().unwrap(), TURIN_TCB);
+    }
+
+    #[test]
+    fn a_certificate_without_amd_extensions_has_none_to_read() {
+        let other = crate::x509::certificate::testdata::certificate(
+            crate::x509::certificate::testdata::FULCIO_INTERMEDIATE_PEM,
+        );
+        let error = vcek_extensions(&other).unwrap_err();
+        assert!(
+            error.to_string().contains("not an AMD extension"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_chain_ends_with_the_last_line_of_its_second_block() {
+        let block = |byte: u8| {
+            format!(
+                "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----",
+                crate::sigstore::testutil::to_b64(&[byte; 3])
+            )
+        };
+        let chain = |tail: &str| format!("{}\n{}{tail}", block(1), block(2));
+        for tail in ["", "\n", "\r\n"] {
+            parse_product_cert_chain(chain(tail).as_bytes()).unwrap();
+        }
+        for tail in ["\n\n", "\n \n", "\r\n\r\n", "\nx", "\n\t"] {
+            assert!(
+                parse_product_cert_chain(chain(tail).as_bytes()).is_err(),
+                "{tail:?}"
+            );
+        }
+        // Blank lines before and between the blocks are not trailing data.
+        let spaced = format!("\n{}\n\n{}\n", block(1), block(2));
+        parse_product_cert_chain(spaced.as_bytes()).unwrap();
+        for product_line in [ProductLine::Genoa, ProductLine::Turin] {
+            let embedded = crate::quote::sev::authenticate::embedded_cert_chain_pem(product_line);
+            parse_product_cert_chain(embedded).unwrap();
+        }
     }
 
     #[test]
