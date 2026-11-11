@@ -259,82 +259,119 @@ fn recorded_signing_certificates_get_their_recorded_verdicts() {
     assert_eq!(outcome, (12, 0));
 }
 
+/// Verifies the config endorsement of a case and compares what it
+/// establishes with the record.
+fn verify_config(
+    fixture: &Fixture,
+    case: &Object,
+    reference: &Object,
+) -> Result<(), EndorsementError> {
+    let id = text(case, "id");
+    let pinned = keys(case, "keys");
+    let verifier = if flag(case, "registry") {
+        ConfigVerifier::for_registry(fixture.root(case), &pinned)
+    } else {
+        ConfigVerifier::new(fixture.root(case), &pinned)
+    }
+    .unwrap();
+    let config = match (
+        optional_text(case, "config_b64"),
+        count(case, "config_zeros"),
+    ) {
+        (Some(config), _) => Some(STANDARD.decode(config).unwrap()),
+        (None, 0) => None,
+        (None, zeros) => Some(vec![0; zeros]),
+    };
+    let recorded_policy = member(case, "policy");
+    let pin =
+        |name: &str| Some(text(recorded_policy, name).to_string()).filter(|pin| !pin.is_empty());
+    let policy = ConfigPolicy {
+        identity: pin("identity"),
+        revision: pin("revision"),
+        digest: pin("digest"),
+        now: Instant::from_unix(
+            integer(recorded_policy.get("now").unwrap()),
+            u32::try_from(integer(recorded_policy.get("now_nanos").unwrap())).unwrap(),
+        )
+        .unwrap(),
+        max_age: seconds(recorded_policy, "max_age"),
+        future_skew: seconds(recorded_policy, "future_skew"),
+        registry_ids: recorded_policy
+            .get("registry_ids")
+            .filter(|list| !list.is_null())
+            .map(strings),
+    };
+    let bundle = case.get("bundle").unwrap();
+    let verified = if flag(case, "certified") {
+        let issuer = STANDARD.decode(text(case, "issuer_b64")).unwrap();
+        verifier.verify_certified(config.as_deref(), bundle, &issuer, &policy)?
+    } else {
+        verifier.verify(config.as_deref(), bundle, &policy)?
+    };
+    assert_eq!(verified.name, text(reference, "name"), "{id}");
+    assert_eq!(verified.digest, text(reference, "digest"), "{id}");
+    assert_eq!(verified.reference, text(reference, "reference"), "{id}");
+    assert_eq!(verified.signing_key_hint, text(reference, "hint"), "{id}");
+    assert_eq!(
+        verified.approval_time,
+        instant(reference.get("approval_time").unwrap()),
+        "{id}"
+    );
+    assert_eq!(
+        verified.registry_id.as_deref().unwrap_or_default(),
+        text(reference, "registry_id"),
+        "{id}"
+    );
+    assert_eq!(
+        verified
+            .runtime
+            .map(|runtime| vec![runtime.repo, runtime.tag, runtime.digest]),
+        reference.get("runtime").map(strings),
+        "{id}"
+    );
+    assert_eq!(
+        verified.signature_time,
+        reference.get("signature_time").map(instant),
+        "{id}"
+    );
+    Ok(())
+}
+
 #[test]
 fn recorded_config_endorsements_get_their_recorded_outcomes() {
     let fixture = Fixture::load();
     let outcome = replay(&fixture, "config", |case, reference| {
-        let id = text(case, "id");
-        let pinned = keys(case, "keys");
-        let verifier = if flag(case, "registry") {
-            ConfigVerifier::for_registry(fixture.root(case), &pinned)
-        } else {
-            ConfigVerifier::new(fixture.root(case), &pinned)
-        }
-        .unwrap();
-        let config = match (
-            optional_text(case, "config_b64"),
-            count(case, "config_zeros"),
-        ) {
-            (Some(config), _) => Some(STANDARD.decode(config).unwrap()),
-            (None, 0) => None,
-            (None, zeros) => Some(vec![0; zeros]),
-        };
-        let recorded_policy = member(case, "policy");
-        let pin = |name: &str| {
-            Some(text(recorded_policy, name).to_string()).filter(|pin| !pin.is_empty())
-        };
-        let policy = ConfigPolicy {
-            identity: pin("identity"),
-            revision: pin("revision"),
-            digest: pin("digest"),
-            now: Instant::from_unix(
-                integer(recorded_policy.get("now").unwrap()),
-                u32::try_from(integer(recorded_policy.get("now_nanos").unwrap())).unwrap(),
-            )
-            .unwrap(),
-            max_age: seconds(recorded_policy, "max_age"),
-            future_skew: seconds(recorded_policy, "future_skew"),
-            registry_ids: recorded_policy
-                .get("registry_ids")
-                .filter(|list| !list.is_null())
-                .map(strings),
-        };
-        let bundle = case.get("bundle").unwrap();
-        let verified = if flag(case, "certified") {
-            let issuer = STANDARD.decode(text(case, "issuer_b64")).unwrap();
-            verifier.verify_certified(config.as_deref(), bundle, &issuer, &policy)?
-        } else {
-            verifier.verify(config.as_deref(), bundle, &policy)?
-        };
-        assert_eq!(verified.name, text(reference, "name"), "{id}");
-        assert_eq!(verified.digest, text(reference, "digest"), "{id}");
-        assert_eq!(verified.reference, text(reference, "reference"), "{id}");
-        assert_eq!(verified.signing_key_hint, text(reference, "hint"), "{id}");
-        assert_eq!(
-            verified.approval_time,
-            instant(reference.get("approval_time").unwrap()),
-            "{id}"
-        );
-        assert_eq!(
-            verified.registry_id.as_deref().unwrap_or_default(),
-            text(reference, "registry_id"),
-            "{id}"
-        );
-        assert_eq!(
-            verified
-                .runtime
-                .map(|runtime| vec![runtime.repo, runtime.tag, runtime.digest]),
-            reference.get("runtime").map(strings),
-            "{id}"
-        );
-        assert_eq!(
-            verified.signature_time,
-            reference.get("signature_time").map(instant),
-            "{id}"
-        );
-        Ok(())
+        verify_config(&fixture, case, reference)
     });
-    assert_eq!(outcome, (45, 0));
+    assert_eq!(outcome, (48, 0));
+}
+
+#[test]
+fn the_signature_time_of_a_certified_endorsement_is_within_the_window() {
+    // In each case the inner timestamp is inside the window, so the
+    // verdict turns on the time of the signature alone.
+    let fixture = Fixture::load();
+    let verdict = |id: &str| {
+        let case = fixture
+            .cases("config")
+            .find(|case| text(case, "id") == id)
+            .unwrap_or_else(|| panic!("no case {id}"));
+        verify_config(&fixture, case, member(case, "reference")).is_ok()
+    };
+    for (id, accepted) in [
+        ("certified/signature-age-edge", true),
+        ("certified/signature-age-over-1ns", false),
+        ("certified/signature-age-over-1s", false),
+        ("certified/signature-custom-age-edge", true),
+        ("certified/signature-custom-age-over-1s", false),
+        ("certified/signature-custom-age-over-30s", false),
+        ("certified/signature-skew-edge", true),
+        ("certified/signature-skew-over-1ns", false),
+        ("certified/signature-skew-over-1s", false),
+        ("certified/signature-skew-over-20s", false),
+    ] {
+        assert_eq!(verdict(id), accepted, "{id}");
+    }
 }
 
 #[test]
