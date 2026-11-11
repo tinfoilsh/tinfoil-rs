@@ -352,6 +352,29 @@ fn an_entry_without_a_promise_proves_no_time() {
 }
 
 #[test]
+fn an_entry_with_neither_promise_nor_proof_is_never_counted() {
+    // Decoding refuses such an entry, so it is built in memory: the case
+    // verifies with its timestamp, and no longer does once the entry has
+    // lost the proof that authenticated it.
+    let fixture = Fixture::load();
+    let case = fixture.case("m-v1-no-promise-ts");
+    let root = TrustedRoot::from_json(case.root_text().as_bytes()).unwrap();
+    let mut bundle = Bundle::from_json(case.bundle_text().as_bytes()).unwrap();
+    let digest: [u8; 32] = decode_hex(text(case.fields, "digest"))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(verify_fulcio_bundle(&root, &bundle, &digest).is_ok());
+    for entry in &mut bundle.tlog_entries {
+        entry.inclusion_proof = None;
+    }
+    let message = verify_fulcio_bundle(&root, &bundle, &digest)
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("inclusion proof"), "{message}");
+}
+
+#[test]
 fn an_entry_of_a_tiled_log_needs_a_timestamp() {
     let message = rejected("m-v2-no-ts");
     assert!(message.contains("timestamps"), "{message}");

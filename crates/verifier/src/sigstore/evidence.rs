@@ -57,7 +57,8 @@ pub(super) struct LogEvidence {
 /// signer ([`verify_body_binding`]). Then, per entry and in order:
 ///
 /// 1. an entry whose log the trusted root does not list is skipped;
-/// 2. a `hashedrekord` 0.0.2 entry must have an inclusion proof;
+/// 2. an entry must have a signed entry timestamp or an inclusion proof,
+///    and a `hashedrekord` 0.0.2 entry must have an inclusion proof;
 /// 3. an entry with a signed entry timestamp is skipped unless the
 ///    timestamp verifies: the entry is a `dsse` 0.0.1 entry, the integrated
 ///    time is within the period of the log's key, and the signature
@@ -91,6 +92,13 @@ pub(super) fn verify_log_entries(
         }
         let integrated = integrated_time(entry);
         let promised = entry.signed_entry_timestamp().is_some();
+        // Decoding already refuses such an entry; a bundle that was built
+        // in memory must not get an unauthenticated entry counted either.
+        if !promised && entry.inclusion_proof.is_none() {
+            return Err(error(
+                "a log entry must have a signed entry timestamp or an inclusion proof",
+            ));
+        }
         if promised {
             let trusted_at_time = integrated.is_some_and(|at| log.valid_for.contains(at));
             if is_tiled
