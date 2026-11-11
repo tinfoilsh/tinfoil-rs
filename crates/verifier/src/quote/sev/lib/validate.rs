@@ -370,7 +370,7 @@ fn check_chip_id(chip_id: &[u8; CHIP_ID_SIZE], hwid: &[u8]) -> Result<(), Assemb
 /// 3. the VMPL equals the options';
 /// 4. the CHIP_ID is the certificate's hardware identifier: the whole
 ///    field for a 64-byte identifier, its first 8 bytes for an 8-byte one.
-///    An all-zero CHIP_ID skips this comparison.
+///    An all-zero CHIP_ID identifies no chip and is an error.
 pub fn validate(
     report: &Report,
     extensions: &Extensions,

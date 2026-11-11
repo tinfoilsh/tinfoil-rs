@@ -373,7 +373,7 @@ fn recorded_policies_stop_where_they_are_recorded_to_stop() {
             Instant::from_unix(integer(base.get("now").unwrap()), 0).unwrap(),
             Some(text(base, "root_pem").as_bytes()),
         )
-        .ok()
+        .map_err(|error| error.to_string())
     });
     let quotes: BTreeMap<_, _> = distinct.into_iter().zip(quotes).collect();
 
@@ -384,6 +384,18 @@ fn recorded_policies_stop_where_they_are_recorded_to_stop() {
         let base = object(bases.get(text(case, "base")).unwrap());
         let bytes = |name: &str| edited_bytes(&b64(text(base, name)), case.get(name));
         let quote = quotes.get(&evidence(case)).unwrap().as_ref();
+        // The only evidence of this record that does not authenticate is a
+        // report without a chip identity.
+        let quote = match quote {
+            Ok(quote) => Some(quote),
+            Err(message) => {
+                assert!(
+                    message.contains("CHIP_ID is all zeros"),
+                    "{name}: {message}"
+                );
+                None
+            }
+        };
         let base_policy = object(base.get("policy").unwrap());
         let changes = case.get("policy").map(object);
         let policy = policy_from(|path| {
