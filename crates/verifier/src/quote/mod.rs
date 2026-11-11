@@ -19,6 +19,8 @@ pub mod legacy;
 pub mod resolve;
 pub mod sev;
 pub mod tdx;
+#[cfg(test)]
+mod tests;
 
 use crate::document::collateral::CpuEndorsements;
 use crate::document::{CpuEvidence, Document, REPORT_DATA_SIZE};
