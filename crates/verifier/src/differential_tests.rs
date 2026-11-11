@@ -536,6 +536,12 @@ fn replay(fixture: &Fixture, case: &Object) -> Outcome {
         return Outcome::Skipped;
     };
     let nonce = decode_hex(text(case, "nonce_hex")).unwrap();
+    // A few recorded times lie before the first instant that the system
+    // time of some platforms can hold; the verification's own record of
+    // its time has no value there.
+    if instant(case).to_system_time().is_none() {
+        return Outcome::Skipped;
+    }
     let result = verifier.verify_at(&document, &nonce, repo, instant(case));
     let verdict = text(recorded, "verdict");
     let got = match &result {
