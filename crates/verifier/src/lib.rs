@@ -22,6 +22,8 @@ mod canonical;
 mod document;
 mod error;
 #[allow(dead_code)]
+mod instant;
+#[allow(dead_code)]
 mod json;
 mod measurement;
 #[allow(dead_code, unused_imports)]
@@ -32,6 +34,8 @@ mod probes;
 mod runtime;
 #[allow(dead_code)]
 mod semver;
+#[allow(dead_code, unused_macros, unused_imports)]
+mod stub;
 
 pub use document::{NONCE_SIZE, random_nonce};
 pub use error::{Error, Layer, UsageError, VerificationError};
