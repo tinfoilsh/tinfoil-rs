@@ -52,8 +52,9 @@ pub fn check_approval_layout(bundle: &Bundle) -> Result<(), SigstoreError> {
 ///    payload; and the entry is in the log at a checkpoint signed by the
 ///    log ([`rekor::verify_inclusion`](super::rekor::verify_inclusion)).
 ///    At least one entry must verify;
-/// 3. the signature verifies under `key` over the pre-authentication
-///    encoding of the payload: ECDSA P-256 with SHA-256, in DER;
+/// 3. the envelope's key identifier is empty, and the signature verifies
+///    under `key` over the pre-authentication encoding of the payload:
+///    ECDSA P-256 with SHA-256, in DER;
 /// 4. the payload decodes as a statement and one of its subjects has
 ///    `artifact_digest` as its SHA-256 digest.
 ///
