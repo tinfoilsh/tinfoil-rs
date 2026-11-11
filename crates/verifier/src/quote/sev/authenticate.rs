@@ -115,8 +115,10 @@ pub fn embedded_cert_chain_pem(product_line: ProductLine) -> &'static [u8] {
 ///    pinned ASK and ARK at `now`; the revocation list is signed by the
 ///    ARK and does not revoke the ASK; the report's signature verifies
 ///    under the VCEK; and the report's version is supported;
-/// 7. the report does not mask its CHIP_ID: a masked platform identity is
-///    unsupported;
+/// 7. the report does not set MASK_CHIP_KEY. A CHIP_ID that the host
+///    masked reads as zeros with that flag clear, and is not refused
+///    here: it authenticates with the all-zero identity, and passes later
+///    only if the platform policy names a machine with that identity;
 /// 8. the identity is the CHIP_ID ([`identity`]) and the measurement is
 ///    the report's launch measurement.
 ///
@@ -172,7 +174,7 @@ pub fn authenticate(
     let report = verified.report;
     if report.signer_info.mask_chip_key {
         return Err(QuoteError::new(
-            "report masks CHIP_ID; masked platform identities are unsupported",
+            "report sets MASK_CHIP_KEY; a report that is not signed with the chip key is unsupported",
         ));
     }
     Ok(Quote {
@@ -406,7 +408,7 @@ mod tests {
             ("report-version-6", false),
             ("report-cpuid-19-01-01", false),
             ("report-cpuid-00-00-00", false),
-            // Only a VCEK-signed report with an unmasked CHIP_ID.
+            // Only a VCEK-signed report without MASK_CHIP_KEY.
             ("report-signer-info-0x0", true),
             ("report-signer-info-0x1", true),
             ("report-signer-info-0x2", false),
