@@ -380,26 +380,29 @@ impl SignedData {
     }
 }
 
-/// The sizes of the reserved areas of a QE report, in order.
-const QE_RESERVED_1_SIZE: usize = 28;
-const QE_RESERVED_2_SIZE: usize = 32;
-const QE_RESERVED_3_SIZE: usize = 96;
-const QE_RESERVED_4_SIZE: usize = 60;
+/// The sizes of the areas of a QE report that are not read, in order.
+/// The first two are reserved. The third holds 32 reserved bytes and the
+/// 64-byte CONFIGID. The fourth holds CONFIGSVN, 42 reserved bytes and
+/// ISVFAMILYID.
+const QE_SKIPPED_1_SIZE: usize = 28;
+const QE_SKIPPED_2_SIZE: usize = 32;
+const QE_SKIPPED_3_SIZE: usize = 96;
+const QE_SKIPPED_4_SIZE: usize = 60;
 
 impl EnclaveReport {
     fn read(report: &[u8; QE_REPORT_SIZE]) -> Option<Self> {
         let mut input = Fields::new(report);
         let cpu_svn = input.array()?;
         let misc_select = input.u32()?;
-        input.take(QE_RESERVED_1_SIZE)?;
+        input.take(QE_SKIPPED_1_SIZE)?;
         let attributes = input.array()?;
         let mr_enclave = input.array()?;
-        input.take(QE_RESERVED_2_SIZE)?;
+        input.take(QE_SKIPPED_2_SIZE)?;
         let mr_signer = input.array()?;
-        input.take(QE_RESERVED_3_SIZE)?;
+        input.take(QE_SKIPPED_3_SIZE)?;
         let isv_prod_id = input.u16()?;
         let isv_svn = input.u16()?;
-        input.take(QE_RESERVED_4_SIZE)?;
+        input.take(QE_SKIPPED_4_SIZE)?;
         let report_data = input.array()?;
         if !input.rest().is_empty() {
             return None;
