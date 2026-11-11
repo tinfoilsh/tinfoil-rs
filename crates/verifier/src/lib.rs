@@ -24,6 +24,12 @@ mod error;
 #[allow(dead_code)]
 mod json;
 mod measurement;
+#[allow(dead_code, unused_imports)]
+mod policy;
+#[cfg(test)]
+mod probes;
+#[allow(dead_code, unused_imports)]
+mod runtime;
 #[allow(dead_code)]
 mod semver;
 

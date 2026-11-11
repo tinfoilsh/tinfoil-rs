@@ -725,6 +725,15 @@ pub mod decode {
         }
     }
 
+    /// A boolean; `null` is `false`.
+    pub fn bool(value: &Value, path: &str) -> Result<bool, DecodeError> {
+        match value {
+            Value::Null => Ok(false),
+            Value::Bool(value) => Ok(*value),
+            other => Err(mismatch(path, other, "a boolean")),
+        }
+    }
+
     /// An object; `null` is `None`.
     pub fn object(mut value: Value, path: &str) -> Result<Option<Object>, DecodeError> {
         match &mut value {
@@ -1031,6 +1040,8 @@ mod tests {
         assert_eq!(decode::array(Value::Null, "f").unwrap(), None);
         assert_eq!(decode::strings(Value::Null, "f").unwrap(), None);
         assert_eq!(decode::u64(&Value::Null, "f").unwrap(), 0);
+        assert!(!decode::bool(&Value::Null, "f").unwrap());
+        assert!(decode::bool(&Value::Bool(true), "f").unwrap());
         assert_eq!(
             decode::strings(parse_str(r#"["a",null]"#).unwrap(), "f").unwrap(),
             Some(vec!["a".to_owned(), String::new()])
@@ -1050,6 +1061,8 @@ mod tests {
         assert!(decode::array(value("{}"), "f").is_err());
         assert!(decode::strings(value("[1]"), "f").is_err());
         assert!(decode::u64(&value("\"1\""), "f").is_err());
+        assert!(decode::bool(&value("1"), "f").is_err());
+        assert!(decode::bool(&value("\"true\""), "f").is_err());
         assert_eq!(
             decode::u8(&value("256"), "f").unwrap_err().to_string(),
             "f: JSON number 256 is not an unsigned 8-bit integer"
