@@ -10,9 +10,17 @@ repository.workspace = true
 
 [dependencies]
 base64 = "0.22"
+cms = { version = "0.2", default-features = false, features = ["std"] }
+der = { version = "0.7", default-features = false, features = ["std", "oid", "derive"] }
+ecdsa = { version = "0.16", default-features = false, features = ["verifying", "der", "std"] }
+ed25519-dalek = { version = "3", default-features = false }
 getrandom = { version = "0.3", features = ["std"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+p384 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+rsa = { version = "0.9", default-features = false, features = ["std"] }
 saphyr-parser = "0.3.3"
 sha2 = "0.10"
+x509-cert = { version = "0.2", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

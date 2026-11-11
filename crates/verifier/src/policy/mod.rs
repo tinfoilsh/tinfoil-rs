@@ -21,7 +21,7 @@ use crate::canonical;
 use crate::json::decode::{self, DecodeError};
 use crate::json::{JsonError, Value};
 
-pub use artifact::{Artifact, PlatformMeasurement, Policy, parse};
+pub use artifact::{Artifact, PlatformMeasurement, Policy, parse, parse_value};
 pub use sev::{GuestPolicy, SevSnpPolicy, SnpPlatform, Tcb, parse_policy_version};
 pub use shape::{Shape, Stack, satisfies};
 pub use tdx::TdxPolicy;
