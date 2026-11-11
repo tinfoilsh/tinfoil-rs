@@ -51,21 +51,21 @@ const VECTORS_ENV: &str = "TINFOIL_CONFORMANCE_VECTORS";
 /// each with the rule that makes this crate the stricter one.
 const STRICTER: &[(&str, &str)] = &[];
 
-struct Fixture {
+pub(crate) struct Fixture {
     value: Value,
 }
 
-fn object(value: &Value) -> &Object {
+pub(crate) fn object(value: &Value) -> &Object {
     value.as_object().expect("an object")
 }
 
-fn member<'a>(object: &'a Object, name: &str) -> &'a Value {
+pub(crate) fn member<'a>(object: &'a Object, name: &str) -> &'a Value {
     object
         .get(name)
         .unwrap_or_else(|| panic!("member {name} is missing"))
 }
 
-fn text<'a>(object: &'a Object, name: &str) -> &'a str {
+pub(crate) fn text<'a>(object: &'a Object, name: &str) -> &'a str {
     object.get(name).and_then(Value::as_str).unwrap_or("")
 }
 
@@ -86,7 +86,7 @@ fn index(value: &Value) -> usize {
 }
 
 impl Fixture {
-    fn load() -> Self {
+    pub(crate) fn load() -> Self {
         Self {
             value: json::parse(CASES).unwrap(),
         }
@@ -94,6 +94,22 @@ impl Fixture {
 
     fn root_object(&self) -> &Object {
         object(&self.value)
+    }
+
+    /// The case called `name`.
+    pub(crate) fn case(&self, name: &str) -> &Object {
+        member(self.root_object(), "cases")
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(object)
+            .find(|case| text(case, "name") == name)
+            .unwrap_or_else(|| panic!("no case {name}"))
+    }
+
+    /// The nonce of a case.
+    pub(crate) fn nonce(case: &Object) -> Vec<u8> {
+        decode_hex(text(case, "nonce_hex")).unwrap()
     }
 
     fn string(&self, at: usize) -> &str {
@@ -111,7 +127,7 @@ impl Fixture {
         }
     }
 
-    fn root(&self, name: &str) -> Option<Vec<u8>> {
+    pub(crate) fn root(&self, name: &str) -> Option<Vec<u8>> {
         if name.is_empty() {
             return None;
         }
@@ -121,7 +137,7 @@ impl Fixture {
 
     /// The bytes of a document; `None` for a document of the shared
     /// vectors when no checkout is at hand.
-    fn document(&self, name: &str) -> Option<Vec<u8>> {
+    pub(crate) fn document(&self, name: &str) -> Option<Vec<u8>> {
         let stored = object(member(
             object(member(self.root_object(), "documents")),
             name,
@@ -155,13 +171,13 @@ impl Fixture {
         )
     }
 
-    fn blob(&self, object: &Object, name: &str) -> Option<Vec<u8>> {
+    pub(crate) fn blob(&self, object: &Object, name: &str) -> Option<Vec<u8>> {
         let encoded = object.get(name)?.as_str()?;
         Some(STANDARD.decode(self.resolve(encoded)).unwrap())
     }
 
     /// Builds the verifier of a case, with the options in a fixed order.
-    fn verifier(&self, case: &Object) -> Result<Verifier, Error> {
+    pub(crate) fn verifier(&self, case: &Object) -> Result<Verifier, Error> {
         let options = object(member(case, "options"));
         let mut builder = Verifier::builder();
         if let Some(pins) = options.get("pins").and_then(Value::as_object) {
@@ -258,7 +274,7 @@ impl Fixture {
 
 /// The instant of a case: seconds since the epoch, which may be negative,
 /// and nanoseconds.
-fn instant(case: &Object) -> Instant {
+pub(crate) fn instant(case: &Object) -> Instant {
     let nanos = u32::try_from(integer(case, "time_nanos")).unwrap();
     Instant::from_unix(integer(case, "time_unix"), nanos).unwrap()
 }

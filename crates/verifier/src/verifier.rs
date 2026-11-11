@@ -267,7 +267,7 @@ fn endorsed_artifact(
 /// the earliest of the authenticated times. `None` when there is no such
 /// time. The deadline rests on authenticated times only, never on the
 /// local appraisal time.
-fn freshness_expiration(
+pub(crate) fn freshness_expiration(
     max_age: Duration,
     times: &[Option<Instant>],
 ) -> Result<Option<Instant>, EndorsementError> {

@@ -42,12 +42,14 @@
 //! in a build for the conformance adapter, which passes
 //! `--cfg tinfoil_conformance` to the compiler.
 //!
-//! ```compile_fail
+#![cfg_attr(not(tinfoil_conformance), doc = "```compile_fail")]
+#![cfg_attr(tinfoil_conformance, doc = "```no_run")]
 //! // An ordinary build has no way to supply a Sigstore trusted root.
 //! let _ = tinfoil_verifier::Verifier::builder().dangerous_test_only_sigstore_root(b"{}");
 //! ```
 //!
-//! ```compile_fail
+#![cfg_attr(not(tinfoil_conformance), doc = "```compile_fail")]
+#![cfg_attr(tinfoil_conformance, doc = "```no_run")]
 //! // Nor a vendor root.
 //! let _ = tinfoil_verifier::Verifier::builder().dangerous_test_only_vendor_roots(None, None);
 //! ```
@@ -76,6 +78,8 @@ mod semver;
 mod stub;
 mod verification;
 mod verifier;
+#[cfg(test)]
+mod verifier_tests;
 
 // The verifier drives the modules below, and each of them also has items
 // that only the single-layer stages of the conformance adapter and the unit
