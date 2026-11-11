@@ -36,6 +36,8 @@ mod runtime;
 mod semver;
 #[allow(dead_code, unused_macros, unused_imports)]
 mod stub;
+#[allow(dead_code, unused_imports, unused_variables)]
+mod x509;
 
 pub use document::{NONCE_SIZE, random_nonce};
 pub use error::{Error, Layer, UsageError, VerificationError};
