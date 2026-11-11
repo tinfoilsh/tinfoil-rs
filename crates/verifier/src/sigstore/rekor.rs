@@ -73,6 +73,17 @@ fn has_tree_id(origin: &str) -> bool {
     })
 }
 
+/// Whether `origin` is exactly `log_name`, the separator and a tree
+/// identifier of digits.
+fn is_shard_of(origin: &str, log_name: &str) -> bool {
+    origin
+        .strip_prefix(log_name)
+        .and_then(|rest| rest.strip_prefix(" - "))
+        .is_some_and(|tree_id| {
+            !tree_id.is_empty() && tree_id.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
 /// Verifies that an entry is in its log.
 ///
 /// In order: the entry has an inclusion proof; the proof's checkpoint
@@ -86,7 +97,8 @@ fn has_tree_id(origin: &str) -> bool {
 /// tells:
 ///
 /// - an origin with a tree identifier (`<name> - <digits>`) is a log made
-///   of shards. The proof's root hash equals the checkpoint's. The proof's
+///   of shards, and `<name>` is `log_name`. The proof's root hash equals
+///   the checkpoint's. The proof's
 ///   index counts within the shard while the entry's index counts across
 ///   the whole log, so the two are not compared, and the proof's tree size
 ///   is not compared with the checkpoint's;
@@ -105,7 +117,7 @@ pub fn verify_inclusion(
         .ok_or_else(|| error("log entry has no inclusion proof"))?;
     let signed = SignedCheckpoint::decode(&proof.checkpoint)?;
     signed.verify_signature(log_key, log_name, &entry.log_id)?;
-    let checkpoint = &signed.checkpoint;
+    let checkpoint = signed.checkpoint();
     // The checkpoint is what the log signed, so the proof must lead to its
     // root, not merely to the root that the proof itself states.
     if checkpoint.root_hash != proof.root_hash {
@@ -113,7 +125,16 @@ pub fn verify_inclusion(
             "inclusion proof root hash differs from the signed checkpoint",
         ));
     }
-    if !has_tree_id(&checkpoint.origin) {
+    if has_tree_id(&checkpoint.origin) {
+        // The shard still belongs to this log: the tree identifier follows
+        // the log's own name.
+        if !is_shard_of(&checkpoint.origin, log_name) {
+            return Err(error(format!(
+                "checkpoint origin is {:?}, want a shard of {log_name:?}",
+                checkpoint.origin
+            )));
+        }
+    } else {
         if checkpoint.origin != log_name {
             return Err(error(format!(
                 "checkpoint origin is {:?}, want {log_name:?}",
@@ -468,7 +489,7 @@ mod tests {
         let entry = &bundle.tlog_entries[0];
         let proof = entry.inclusion_proof.as_ref().unwrap();
         let checkpoint = SignedCheckpoint::decode(&proof.checkpoint).unwrap();
-        assert!(has_tree_id(&checkpoint.checkpoint.origin));
+        assert!(has_tree_id(&checkpoint.checkpoint().origin));
         assert_ne!(proof.log_index, entry.log_index);
         included(&bundle, &log).unwrap();
     }
@@ -479,9 +500,9 @@ mod tests {
         let entry = &bundle.tlog_entries[0];
         let proof = entry.inclusion_proof.as_ref().unwrap();
         let checkpoint = SignedCheckpoint::decode(&proof.checkpoint).unwrap();
-        assert!(!has_tree_id(&checkpoint.checkpoint.origin));
-        assert_eq!(checkpoint.checkpoint.origin, log.name);
-        assert_eq!(proof.tree_size, checkpoint.checkpoint.size);
+        assert!(!has_tree_id(&checkpoint.checkpoint().origin));
+        assert_eq!(checkpoint.checkpoint().origin, log.name);
+        assert_eq!(proof.tree_size, checkpoint.checkpoint().size);
         assert_eq!(proof.log_index, entry.log_index);
 
         // Another index for the entry, with the proof left as it verifies.
@@ -568,5 +589,24 @@ mod tests {
             .replacen(r#""kind":"dsse""#, r#""kind":"dsse","kind":"dsse""#, 1)
             .into_bytes();
         assert!(bind(&bundle).is_err());
+    }
+
+    #[test]
+    fn a_shard_origin_names_its_own_log() {
+        assert!(is_shard_of("log.example - 7", "log.example"));
+        for (origin, log_name) in [
+            ("other.example - 7", "log.example"),
+            ("log.example - 7", "log.exampl"),
+            ("log.example.evil - 7", "log.example"),
+            ("log.example - x - 7", "log.example"),
+            ("log.example - ", "log.example"),
+            ("log.example", "log.example"),
+            ("log.example -7", "log.example"),
+        ] {
+            assert!(
+                !is_shard_of(origin, log_name),
+                "{origin:?} for {log_name:?}"
+            );
+        }
     }
 }

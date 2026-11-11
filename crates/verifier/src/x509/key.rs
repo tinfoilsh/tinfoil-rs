@@ -35,6 +35,9 @@ pub const RSA_PSS_SALT_LEN: usize = 48;
 /// factored and are rejected when the key is parsed.
 pub const RSA_MIN_MODULUS_BITS: usize = 1024;
 
+/// The largest RSA modulus, in bits, that a public key may have.
+pub const RSA_MAX_MODULUS_BITS: usize = 4096;
+
 /// The kind of a [`PublicKey`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAlgorithm {
@@ -108,7 +111,7 @@ impl PublicKey {
     ///
     /// Accepted keys: ECDSA on P-256 or P-384 with a named curve and an
     /// uncompressed point, Ed25519 without parameters, and RSA
-    /// (`rsaEncryption`) with a modulus of [`RSA_MIN_MODULUS_BITS`] to 4096
+    /// (`rsaEncryption`) with a modulus of [`RSA_MIN_MODULUS_BITS`] to [`RSA_MAX_MODULUS_BITS`]
     /// bits. The DER must be canonical with nothing after it, and the key
     /// bit string must have no unused bits.
     pub fn from_spki_der(der: &[u8]) -> Result<Self, X509Error> {
@@ -159,6 +162,11 @@ impl PublicKey {
             if bits < RSA_MIN_MODULUS_BITS {
                 return Err(X509Error::new(format!(
                     "RSA public key has {bits} bits, fewer than the {RSA_MIN_MODULUS_BITS} required"
+                )));
+            }
+            if bits > RSA_MAX_MODULUS_BITS {
+                return Err(X509Error::new(format!(
+                    "RSA public key has {bits} bits, more than the {RSA_MAX_MODULUS_BITS} allowed"
                 )));
             }
             Key::Rsa(key)

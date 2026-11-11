@@ -33,10 +33,10 @@ pub const MAX_NOTE_SIGNATURES: usize = 100;
 /// A checkpoint and the signatures over it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedCheckpoint {
-    /// The signed body.
-    pub checkpoint: Checkpoint,
+    /// The signed body, decoded from `signed_text`.
+    checkpoint: Checkpoint,
     /// The signature lines, in order.
-    pub signatures: Vec<NoteSignature>,
+    signatures: Vec<NoteSignature>,
     /// The body exactly as it was received, with its final line end: the
     /// text that the signatures cover.
     signed_text: String,
@@ -71,6 +71,17 @@ fn error(message: impl Into<String>) -> SigstoreError {
 }
 
 impl SignedCheckpoint {
+    /// The signed body. It cannot be changed after decoding, so it always
+    /// is what the signatures cover.
+    pub fn checkpoint(&self) -> &Checkpoint {
+        &self.checkpoint
+    }
+
+    /// The signature lines, in order.
+    pub fn signatures(&self) -> &[NoteSignature] {
+        &self.signatures
+    }
+
     /// Decodes a checkpoint envelope: the body, a blank line, and at least
     /// one and at most [`MAX_NOTE_SIGNATURES`] signature lines. The
     /// signature lines are what follows the last blank line.
