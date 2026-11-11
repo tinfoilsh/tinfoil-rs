@@ -137,6 +137,32 @@ fn agrees_with_the_recorded_probes() {
 }
 
 #[test]
+fn an_artifact_reads_the_same_from_a_predicate_inside_a_statement() {
+    // The artifact as the predicate member of a larger signed document,
+    // with an integer above 2^53 that a float could not carry.
+    let big = sample_text().replacen(
+        "\"minimum_launch_mitigation_vector\": 0",
+        "\"minimum_launch_mitigation_vector\": 9007199254740993",
+        1,
+    );
+    assert!(big.contains("9007199254740993"));
+    let statement = format!(r#"{{"predicateType":"x","predicate":{big}}}"#);
+    let parsed = crate::json::parse(statement.as_bytes()).unwrap();
+    let mut members = decode::object(parsed, "statement")
+        .unwrap()
+        .unwrap()
+        .into_members();
+    let (_, predicate) = members.pop().unwrap();
+    assert_eq!(
+        parse_value(predicate).unwrap(),
+        parse(big.as_bytes()).unwrap()
+    );
+
+    let not_an_object = crate::json::parse(b"[]").unwrap();
+    assert!(parse_value(not_an_object).is_err());
+}
+
+#[test]
 fn parses_the_sample_artifact() {
     let artifact = sample();
     assert_eq!(artifact.format, ARTIFACT_FORMAT);

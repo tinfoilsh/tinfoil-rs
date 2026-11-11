@@ -176,11 +176,21 @@ impl PlatformMeasurement {
 /// compared exactly, and so is a repeated member name. A `null` member is
 /// read as an absent one.
 pub fn parse(data: &[u8]) -> Result<Artifact, PolicyError> {
+    parse_value(json::parse(data)?)
+}
+
+/// Decodes and validates a policy artifact from parsed JSON, by the rules of
+/// [`parse`].
+///
+/// A parsed value keeps every number as its literal, so this reads exactly
+/// what [`parse`] would read from the text that the value came from. It is
+/// how an artifact is read out of a signed statement's predicate.
+pub fn parse_value(value: Value) -> Result<Artifact, PolicyError> {
     let mut format = String::new();
     let mut measurements = BTreeMap::new();
     let mut machines = BTreeMap::new();
     let mut decoded_policies = BTreeMap::new();
-    let document = decode::object(json::parse(data)?, "policy artifact")?;
+    let document = decode::object(value, "policy artifact")?;
     for (name, value) in document.map(json::Object::into_members).unwrap_or_default() {
         match name.as_str() {
             "format" => format = decode::string(value, &name)?,
