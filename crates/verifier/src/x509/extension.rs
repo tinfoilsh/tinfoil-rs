@@ -25,8 +25,7 @@ pub const OID_BASIC_CONSTRAINTS: ObjectIdentifier = ObjectIdentifier::new_unwrap
 /// `id-ce-nameConstraints`.
 pub const OID_NAME_CONSTRAINTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.30");
 /// `id-ce-cRLDistributionPoints`.
-pub const OID_CRL_DISTRIBUTION_POINTS: ObjectIdentifier =
-    ObjectIdentifier::new_unwrap("2.5.29.31");
+pub const OID_CRL_DISTRIBUTION_POINTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.31");
 /// `id-ce-certificatePolicies`.
 pub const OID_CERTIFICATE_POLICIES: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.32");
 /// `id-ce-policyMappings`.
@@ -69,7 +68,9 @@ fn error(message: impl Into<String>) -> X509Error {
 }
 
 /// Decodes the contents of an OBJECT IDENTIFIER, which must be in the
-/// shortest form: no sub-identifier starts with a padding octet.
+/// shortest form: no sub-identifier starts with a padding octet. An
+/// identifier of fewer than three or more than 39 content bytes is not
+/// supported and is an error.
 pub fn object_identifier(content: &[u8]) -> Result<ObjectIdentifier, X509Error> {
     let malformed = || error("malformed OBJECT IDENTIFIER");
     let mut at_start = true;
@@ -104,7 +105,11 @@ pub fn basic_constraints(value: &[u8]) -> Result<BasicConstraints, X509Error> {
     let path_len = match fields.optional(TAG_INTEGER).map_err(|_| invalid())? {
         Some(integer) => {
             check_integer(integer.content).map_err(|_| invalid())?;
-            if integer.content.first().is_some_and(|first| first & 0x80 != 0) {
+            if integer
+                .content
+                .first()
+                .is_some_and(|first| first & 0x80 != 0)
+            {
                 return Err(invalid());
             }
             let magnitude: Vec<u8> = integer
@@ -217,14 +222,12 @@ fn is_plain_uri(uri: &[u8]) -> bool {
     };
     port.iter().all(u8::is_ascii_digit)
         && !host.is_empty()
-        && host
-            .split(|byte| *byte == b'.')
-            .all(|label| {
-                !label.is_empty()
-                    && label
-                        .iter()
-                        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
-            })
+        && host.split(|byte| *byte == b'.').all(|label| {
+            !label.is_empty()
+                && label
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        })
 }
 
 /// Decodes a subject alternative name extension value.
@@ -468,8 +471,20 @@ fn is_printable(byte: u8) -> bool {
     byte.is_ascii_alphanumeric()
         || matches!(
             byte,
-            b'\'' | b'(' | b')' | b'+' | b',' | b'-' | b'.' | b'/' | b' ' | b':' | b'=' | b'?'
-                | b'*' | b'&'
+            b'\''
+                | b'('
+                | b')'
+                | b'+'
+                | b','
+                | b'-'
+                | b'.'
+                | b'/'
+                | b' '
+                | b':'
+                | b'='
+                | b'?'
+                | b'*'
+                | b'&'
         )
 }
 
@@ -625,7 +640,10 @@ mod tests {
     #[test]
     fn alternative_names_are_sorted_by_kind() {
         let value = general_names(&[
-            (NAME_URI, b"https://github.com/o/r/.github/workflows/w.yml@refs/tags/v1"),
+            (
+                NAME_URI,
+                b"https://github.com/o/r/.github/workflows/w.yml@refs/tags/v1",
+            ),
             (NAME_DNS, b"example.com"),
             (0xa0, &[0x06, 0x01, 0x2a]),
             (NAME_IP, &[10, 0, 0, 1]),
@@ -637,7 +655,10 @@ mod tests {
         assert!(is_processed(OID_SUBJECT_ALT_NAME, Some(&names)));
 
         let other_only = subject_alternative_names(&general_names(&[(0xa0, &[0x05, 0x00])]));
-        assert!(!is_processed(OID_SUBJECT_ALT_NAME, other_only.ok().as_ref()));
+        assert!(!is_processed(
+            OID_SUBJECT_ALT_NAME,
+            other_only.ok().as_ref()
+        ));
         assert!(!is_processed(OID_SUBJECT_ALT_NAME, None));
     }
 
@@ -750,10 +771,11 @@ mod tests {
         let unknown = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.8");
         assert!(check_extension(unknown, false, &[0xff]).is_ok());
         // Policies: each identifier once.
-        let policy = [0x30, 0x06, 0x30, 0x04, 0x06, 0x02, 0x2a, 0x03];
+        let policy = [0x30, 0x07, 0x30, 0x05, 0x06, 0x03, 0x2a, 0x03, 0x04];
         assert!(check_extension(OID_CERTIFICATE_POLICIES, false, &policy).is_ok());
         let twice = [
-            0x30, 0x0c, 0x30, 0x04, 0x06, 0x02, 0x2a, 0x03, 0x30, 0x04, 0x06, 0x02, 0x2a, 0x03,
+            0x30, 0x0e, 0x30, 0x05, 0x06, 0x03, 0x2a, 0x03, 0x04, 0x30, 0x05, 0x06, 0x03, 0x2a,
+            0x03, 0x04,
         ];
         assert!(check_extension(OID_CERTIFICATE_POLICIES, false, &twice).is_err());
     }

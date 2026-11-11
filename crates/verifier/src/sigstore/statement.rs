@@ -8,8 +8,8 @@ use base64::engine::general_purpose::STANDARD;
 use sha2::{Digest, Sha256};
 
 use super::SigstoreError;
-use crate::canonical::encode_lower_hex;
 use super::wire::Members;
+use crate::canonical::encode_lower_hex;
 use crate::json::{self, Value};
 use crate::x509::{KeyAlgorithm, PublicKey};
 

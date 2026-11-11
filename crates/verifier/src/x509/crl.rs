@@ -53,7 +53,9 @@ fn time(reader: &mut DerReader<'_>) -> Result<Instant, X509Error> {
     match element.tag {
         TAG_UTC_TIME => parse_utc_time(element.content),
         TAG_GENERALIZED_TIME => parse_generalized_time(element.content, Fraction::Forbidden),
-        _ => Err(error("revocation list time is not a UTCTime or GeneralizedTime")),
+        _ => Err(error(
+            "revocation list time is not a UTCTime or GeneralizedTime",
+        )),
     }
 }
 
@@ -147,10 +149,7 @@ impl Crl {
         let issuer = fields.expect(TAG_SEQUENCE)?;
         extension::check_name(issuer.encoded).map_err(|cause| cause.within("issuer"))?;
         let this_update = time(&mut fields)?;
-        if !matches!(
-            fields.peek_tag(),
-            Some(TAG_UTC_TIME | TAG_GENERALIZED_TIME)
-        ) {
+        if !matches!(fields.peek_tag(), Some(TAG_UTC_TIME | TAG_GENERALIZED_TIME)) {
             return Err(error("revocation list states no next update"));
         }
         let next_update = time(&mut fields)?;

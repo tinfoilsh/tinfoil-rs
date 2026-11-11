@@ -31,8 +31,7 @@ use sha2::{Digest, Sha256};
 use super::SigstoreError;
 use super::trusted_root::{TransparencyLog, TrustedRoot};
 use crate::instant::Instant;
-use crate::stub::pending;
-use crate::x509::{Certificate, EcdsaHash, SignatureScheme};
+use crate::x509::{Certificate, EcdsaHash, KeyAlgorithm, SignatureScheme};
 
 /// The certificate extension that carries the timestamp list.
 pub const OID_SCT_LIST: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.4.2");
@@ -235,8 +234,9 @@ pub fn signed_payload(
 /// the instant of the timestamp.
 ///
 /// The log is the one that the timestamp names; the timestamp's instant is
-/// within the period for which the log's key is trusted; the signature is
-/// ECDSA with SHA-256 over [`signed_payload`] for the given issuer.
+/// within the period for which the log's key is trusted; the log's key is
+/// on the P-256 curve; the signature is ECDSA with SHA-256 over
+/// [`signed_payload`] for the given issuer.
 pub fn verify_sct(
     certificate: &Certificate,
     issuer: &Certificate,
@@ -257,6 +257,11 @@ pub fn verify_sct(
     {
         return Err(error(
             "certificate timestamp is not signed with ECDSA and SHA-256",
+        ));
+    }
+    if log.key.algorithm() != KeyAlgorithm::EcdsaP256 {
+        return Err(error(
+            "certificate timestamps are verified only under P-256 log keys",
         ));
     }
     let payload = signed_payload(certificate, &issuer.spki_der()?, sct)?;
@@ -291,7 +296,29 @@ pub fn verify_scts(
     certificate: &Certificate,
     issuers: &[Certificate],
 ) -> Result<usize, SigstoreError> {
-    pending("sigstore::sct::verify_scts")
+    let scts = embedded_scts(certificate)?;
+    reject_duplicate_logs(&scts)?;
+    let mut verified = 0usize;
+    for sct in &scts {
+        let Some(log) = root.ct_log(&sct.log_id) else {
+            continue;
+        };
+        if !sct.time().is_ok_and(|time| log.valid_for.contains(time)) {
+            continue;
+        }
+        if issuers
+            .iter()
+            .any(|issuer| verify_sct(certificate, issuer, sct, log).is_ok())
+        {
+            verified = verified.saturating_add(1);
+        }
+    }
+    if verified == 0 {
+        return Err(error(
+            "no embedded certificate timestamp verifies under a trusted log",
+        ));
+    }
+    Ok(verified)
 }
 
 #[cfg(test)]

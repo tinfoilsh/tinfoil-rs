@@ -305,7 +305,8 @@ impl<'a> DerReader<'a> {
             if count > 4 {
                 return Err(X509Error::new("DER length is too large"));
             }
-            let (digits, after_digits) = after_first.split_at_checked(count).ok_or_else(malformed)?;
+            let (digits, after_digits) =
+                after_first.split_at_checked(count).ok_or_else(malformed)?;
             let mut length = 0usize;
             for digit in digits {
                 length = length
@@ -313,14 +314,16 @@ impl<'a> DerReader<'a> {
                     .and_then(|length| length.checked_add(usize::from(*digit)))
                     .ok_or_else(malformed)?;
             }
-            let minimal = digits.first().is_some_and(|digit| *digit != 0)
-                && (count > 1 || length >= 0x80);
+            let minimal =
+                digits.first().is_some_and(|digit| *digit != 0) && (count > 1 || length >= 0x80);
             if !minimal {
                 return Err(X509Error::new("DER length is not in its shortest form"));
             }
             (length, after_digits)
         };
-        let (content, rest) = after_length.split_at_checked(length).ok_or_else(malformed)?;
+        let (content, rest) = after_length
+            .split_at_checked(length)
+            .ok_or_else(malformed)?;
         let encoded_len = input.len().checked_sub(rest.len()).ok_or_else(malformed)?;
         let encoded = input.get(..encoded_len).ok_or_else(malformed)?;
         self.rest = rest;
@@ -407,9 +410,9 @@ pub fn bit_string(content: &[u8]) -> Result<(u8, &[u8]), X509Error> {
     }
     match bytes.last() {
         None if unused != 0 => Err(malformed()),
-        Some(last) if last.trailing_zeros() < u32::from(unused) => {
-            Err(X509Error::new("DER BIT STRING has unused bits that are set"))
-        }
+        Some(last) if last.trailing_zeros() < u32::from(unused) => Err(X509Error::new(
+            "DER BIT STRING has unused bits that are set",
+        )),
         _ => Ok((unused, bytes)),
     }
 }
@@ -468,7 +471,11 @@ pub(crate) fn push_element(out: &mut Vec<u8>, tag: u8, content: &[u8]) {
         out.push(u8::try_from(length).unwrap_or(0x7f));
     } else {
         let bytes = length.to_be_bytes();
-        let significant: Vec<u8> = bytes.iter().copied().skip_while(|byte| *byte == 0).collect();
+        let significant: Vec<u8> = bytes
+            .iter()
+            .copied()
+            .skip_while(|byte| *byte == 0)
+            .collect();
         out.push(0x80 | u8::try_from(significant.len()).unwrap_or(0x7f));
         out.extend_from_slice(&significant);
     }
@@ -487,9 +494,10 @@ pub fn ecdsa_raw_to_der(raw: &[u8]) -> Result<Vec<u8>, X509Error> {
     let (r, s) = raw.split_at(raw.len() / 2);
     let mut integers = Vec::with_capacity(raw.len().saturating_add(6));
     for half in [r, s] {
-        let start = half.iter().position(|byte| *byte != 0).ok_or_else(|| {
-            X509Error::new("ECDSA signature integer is zero")
-        })?;
+        let start = half
+            .iter()
+            .position(|byte| *byte != 0)
+            .ok_or_else(|| X509Error::new("ECDSA signature integer is zero"))?;
         let magnitude = half.get(start..).unwrap_or_default();
         let mut content = Vec::with_capacity(magnitude.len().saturating_add(1));
         if magnitude.first().is_some_and(|first| first & 0x80 != 0) {
@@ -704,7 +712,13 @@ mod tests {
         assert_eq!(bit_string(&[0x00]).unwrap(), (0, &[][..]));
         assert_eq!(bit_string(&[0x01, 0x06]).unwrap(), (1, &[0x06][..]));
         assert_eq!(bit_string(&[0x07, 0x80]).unwrap(), (7, &[0x80][..]));
-        for bad in [&[][..], &[0x01], &[0x08, 0x00], &[0x01, 0x01], &[0x07, 0xc0]] {
+        for bad in [
+            &[][..],
+            &[0x01],
+            &[0x08, 0x00],
+            &[0x01, 0x01],
+            &[0x07, 0xc0],
+        ] {
             assert!(bit_string(bad).is_err(), "{bad:02x?}");
         }
     }

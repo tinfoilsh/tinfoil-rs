@@ -184,7 +184,9 @@ impl PublicKey {
     /// Whether `algorithm` is the identifier of a kind of key that this type
     /// parses.
     pub(super) fn is_known_algorithm(algorithm: ObjectIdentifier) -> bool {
-        algorithm == OID_EC_PUBLIC_KEY || algorithm == OID_ED25519 || algorithm == OID_RSA_ENCRYPTION
+        algorithm == OID_EC_PUBLIC_KEY
+            || algorithm == OID_ED25519
+            || algorithm == OID_RSA_ENCRYPTION
     }
 
     /// Parses a PEM file that holds exactly one `PUBLIC KEY` block. The

@@ -67,8 +67,7 @@ pub fn verify_signed_entry_timestamp(
     log_key: &PublicKey,
 ) -> Result<(), SigstoreError> {
     let promise = entry
-        .inclusion_promise
-        .as_deref()
+        .signed_entry_timestamp()
         .ok_or_else(|| error("log entry has no inclusion promise"))?;
     let payload = signed_entry_timestamp_payload(entry);
     verify_entry_timestamp_signature(log_key, payload.as_bytes(), promise)

@@ -8,7 +8,7 @@
 use ::der::asn1::{BitString, Int, ObjectIdentifier, OctetString, OctetStringRef};
 use ::der::{Decode, Encode, Sequence, Tag, Tagged};
 use cms::content_info::ContentInfo;
-use cms::signed_data::{SignedData, SignerIdentifier};
+use cms::signed_data::{SignedData, SignerIdentifier, SignerInfo};
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use x509_cert::attr::Attributes;
 use x509_cert::ext::Extensions;
@@ -17,11 +17,16 @@ use x509_cert::spki::AlgorithmIdentifierOwned;
 
 use super::SigstoreError;
 use super::bundle::Bundle;
-use super::trusted_root::TrustedRoot;
+use super::trusted_root::{TimestampAuthority, TrustedRoot};
 use crate::instant::Instant;
-use crate::stub::pending;
-use crate::x509::der::{Fraction, parse_generalized_time};
-use crate::x509::{Certificate, EcdsaHash, SignatureScheme};
+use crate::x509::der::{
+    DerReader, Fraction, TAG_SEQUENCE, parse_generalized_time, parse_utc_time, single_element,
+};
+use crate::x509::extension::OID_EXTENDED_KEY_USAGE;
+use crate::x509::{Certificate, EcdsaHash, KeyPurpose, SignatureScheme, verify_chain};
+
+/// The most certificates that a timestamp token may embed.
+pub const MAX_EMBEDDED_CERTIFICATES: usize = 8;
 
 /// The largest timestamp response that is read, in bytes.
 pub const MAX_TIMESTAMP_SIZE: usize = 64 << 10;
@@ -35,7 +40,11 @@ const OID_SIGNED_DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.
 const OID_TST_INFO: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.1.4");
 const OID_CONTENT_TYPE: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.3");
 const OID_MESSAGE_DIGEST: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.4");
-const OID_SUBJECT_KEY_IDENTIFIER: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.14");
+const OID_SIGNING_TIME: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.5");
+const OID_TIME_STAMPING: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.8");
+const OID_ECDSA_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
+const OID_ECDSA_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3");
+const OID_ECDSA_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.4");
 const OID_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
 const OID_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.2");
 const OID_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.3");
@@ -145,6 +154,7 @@ pub struct ParsedTimestamp {
     pub hashed_message: Vec<u8>,
     tst_info_der: Vec<u8>,
     signed_data: SignedData,
+    embedded: Vec<Certificate>,
 }
 
 /// Decodes a DER `TimeStampResp`.
@@ -156,6 +166,10 @@ pub struct ParsedTimestamp {
 /// - the status is `granted`: a rejection, a grant with modifications and a
 ///   response without a token are all errors;
 /// - the token is CMS SignedData whose content is a `TSTInfo`;
+/// - the certificates that the token embeds, at most
+///   [`MAX_EMBEDDED_CERTIFICATES`], each parse
+///   ([`Certificate::from_der`]); an embedded item of another kind is an
+///   error;
 /// - the `TSTInfo` has version 1, and its `genTime` is a GeneralizedTime
 ///   in UTC, optionally with a fraction of a second
 ///   ([`parse_generalized_time`]).
@@ -178,8 +192,9 @@ pub fn parse_response(response: &[u8]) -> Result<ParsedTimestamp, SigstoreError>
     if content_info.content_type != OID_SIGNED_DATA {
         return Err(error("timestamp token is not CMS SignedData"));
     }
-    let signed_data =
-        SignedData::from_der(&content_info.content.to_der().map_err(parsing)?).map_err(parsing)?;
+    let signed_data_der = content_info.content.to_der().map_err(parsing)?;
+    let signed_data = SignedData::from_der(&signed_data_der).map_err(parsing)?;
+    let embedded = embedded_certificates(&signed_data_der)?;
     if signed_data.encap_content_info.econtent_type != OID_TST_INFO {
         return Err(error("timestamp token content is not a TSTInfo"));
     }
@@ -210,7 +225,34 @@ pub fn parse_response(response: &[u8]) -> Result<ParsedTimestamp, SigstoreError>
         hashed_message: tst_info.message_imprint.hashed_message.as_bytes().to_vec(),
         tst_info_der,
         signed_data,
+        embedded,
     })
+}
+
+/// The certificates that a SignedData embeds, each parsed from its own
+/// bytes as they appear in the token.
+fn embedded_certificates(signed_data: &[u8]) -> Result<Vec<Certificate>, SigstoreError> {
+    const TAG_CERTIFICATES: u8 = 0xa0;
+    let mut fields = single_element(signed_data)?.reader();
+    // version, digestAlgorithms, encapContentInfo
+    for _ in 0..3 {
+        fields.element()?;
+    }
+    let Some(set) = fields.optional(TAG_CERTIFICATES)? else {
+        return Ok(Vec::new());
+    };
+    let mut certificates = Vec::new();
+    let mut items: DerReader<'_> = set.reader();
+    while !items.is_empty() {
+        if certificates.len() >= MAX_EMBEDDED_CERTIFICATES {
+            return Err(error("timestamp token embeds too many certificates"));
+        }
+        let item = items
+            .expect(TAG_SEQUENCE)
+            .map_err(|_| error("timestamp token embeds something other than a certificate"))?;
+        certificates.push(Certificate::from_der(item.encoded)?);
+    }
+    Ok(certificates)
 }
 
 impl ParsedTimestamp {
@@ -224,37 +266,56 @@ impl ParsedTimestamp {
         Ok(())
     }
 
+    /// Checks that the timestamp covers `input` under the hash that its
+    /// message imprint names: SHA-256, SHA-384 or SHA-512.
+    pub fn check_imprint_any_hash(&self, input: &[u8]) -> Result<(), SigstoreError> {
+        let digest = hash(digest_of(self.hash_algorithm)?, input);
+        if self.hashed_message != digest {
+            return Err(error("timestamp does not cover the expected bytes"));
+        }
+        Ok(())
+    }
+
+    /// The token's only signer.
+    fn signer_info(&self) -> Result<&SignerInfo, SigstoreError> {
+        let mut signers = self.signed_data.signer_infos.0.iter();
+        match (signers.next(), signers.next()) {
+            (Some(info), None) => Ok(info),
+            _ => Err(error("timestamp token must have exactly one signer")),
+        }
+    }
+
     /// Verifies that `signer` signed the timestamp.
     ///
     /// In order: the token has exactly one signer; its signed attributes
     /// are present, say that the content is a `TSTInfo`, and carry the
-    /// digest of the token's `TSTInfo`; the signer is identified as
-    /// `signer`, by issuer and serial number or by subject key identifier;
-    /// the signature over the signed attributes verifies under `signer`'s
-    /// key, as ECDSA over the signer's digest algorithm (SHA-256, SHA-384
-    /// or SHA-512).
+    /// digest of the token's `TSTInfo` under the signer's digest algorithm
+    /// (SHA-256, SHA-384 or SHA-512); a signing-time attribute, when
+    /// present, is a UTCTime or GeneralizedTime within the validity of
+    /// `signer`; the signer is identified as `signer` by issuer and serial
+    /// number; the signature over the signed attributes verifies under
+    /// `signer`'s key, as ECDSA with the hash that the signature algorithm
+    /// names (`ecdsa-with-SHA256`, `-SHA384` or `-SHA512`).
     ///
-    /// Certificates embedded in the token are not consulted: only a
-    /// certificate that the caller already trusts can be `signer`. Whether
-    /// `signer` chains to a trusted root, may sign timestamps, and was
-    /// valid at the stated time is checked by [`verify_timestamp`].
+    /// Whether `signer` chains to a trusted root, may sign timestamps, and
+    /// was valid at the stated time is checked by
+    /// [`ParsedTimestamp::authenticate`].
     pub fn verify_signer(&self, signer: &Certificate) -> Result<(), SigstoreError> {
-        let mut signers = self.signed_data.signer_infos.0.iter();
-        let (Some(info), None) = (signers.next(), signers.next()) else {
-            return Err(error("timestamp token must have exactly one signer"));
-        };
+        let info = self.signer_info()?;
         let signed_attributes = info
             .signed_attrs
             .as_ref()
             .ok_or_else(|| error("timestamp token has no signed attributes"))?;
 
         let content_type: ObjectIdentifier = attribute(signed_attributes, OID_CONTENT_TYPE)?
+            .ok_or_else(|| error("timestamp content-type attribute is missing"))?
             .decode_as()
             .map_err(|_| error("timestamp content-type attribute is malformed"))?;
         if content_type != OID_TST_INFO {
             return Err(error("timestamp content-type attribute is not TSTInfo"));
         }
         let message_digest: OctetStringRef<'_> = attribute(signed_attributes, OID_MESSAGE_DIGEST)?
+            .ok_or_else(|| error("timestamp message-digest attribute is missing"))?
             .decode_as()
             .map_err(|_| error("timestamp message-digest attribute is malformed"))?;
         let digest_algorithm = digest_of(info.digest_alg.oid)?;
@@ -263,11 +324,39 @@ impl ParsedTimestamp {
                 "timestamp message-digest attribute does not match the timestamp info",
             ));
         }
+        if let Some(signing_time) = attribute(signed_attributes, OID_SIGNING_TIME)? {
+            let malformed = || error("timestamp signing-time attribute is malformed");
+            let at = match signing_time.tag() {
+                Tag::UtcTime => parse_utc_time(signing_time.value()),
+                Tag::GeneralizedTime => {
+                    parse_generalized_time(signing_time.value(), Fraction::Allowed)
+                }
+                _ => return Err(malformed()),
+            }
+            .map_err(|_| malformed())?;
+            if !signer.is_valid_at(at) {
+                return Err(error(
+                    "timestamp signing time is outside the validity of its signer",
+                ));
+            }
+        }
 
         if !identifies(&info.sid, signer) {
             return Err(error("timestamp signer is not the trusted certificate"));
         }
 
+        let signature_hash = if info.signature_algorithm.oid == OID_ECDSA_SHA256 {
+            EcdsaHash::Sha256
+        } else if info.signature_algorithm.oid == OID_ECDSA_SHA384 {
+            EcdsaHash::Sha384
+        } else if info.signature_algorithm.oid == OID_ECDSA_SHA512 {
+            EcdsaHash::Sha512
+        } else {
+            return Err(error(format!(
+                "unsupported timestamp signature algorithm {}",
+                info.signature_algorithm.oid
+            )));
+        };
         // The signature covers the attributes as a SET OF, not under the
         // context tag that they carry inside the signer info.
         let signed_bytes = signed_attributes
@@ -276,30 +365,119 @@ impl ParsedTimestamp {
         signer
             .public_key()?
             .verify(
-                SignatureScheme::EcdsaDer(digest_algorithm),
+                SignatureScheme::EcdsaDer(signature_hash),
                 &signed_bytes,
                 info.signature.as_bytes(),
             )
             .map_err(|cause| error(format!("timestamp token: {cause}")))
     }
+
+    /// Authenticates the timestamp under one authority of a trusted root.
+    ///
+    /// In order:
+    ///
+    /// 1. the authority has a root certificate;
+    /// 2. the signer is found. When the token embeds certificates, the
+    ///    signer is the first of them that the token names by issuer and
+    ///    serial number, and a token that names none of them is rejected;
+    ///    when the authority states a signing certificate, the signer must
+    ///    be that certificate, byte for byte. When the token embeds no
+    ///    certificate, the signer is the authority's signing certificate,
+    ///    and an authority that states none cannot authenticate the token;
+    /// 3. the signer signed the token ([`ParsedTimestamp::verify_signer`]);
+    /// 4. the signer chains to the authority's root at the stated time with
+    ///    the time-stamping purpose, through the authority's intermediates
+    ///    and the certificates that the token embeds
+    ///    ([`verify_chain`]);
+    /// 5. the signer is not a CA, and its extended key usage extension is
+    ///    critical and lists exactly one purpose, time stamping;
+    /// 6. the stated time is within the authority's period.
+    pub fn authenticate(&self, authority: &TimestampAuthority) -> Result<(), SigstoreError> {
+        let root = authority
+            .root
+            .as_ref()
+            .ok_or_else(|| error("timestamp authority has no root certificate"))?;
+        let info = self.signer_info()?;
+        let signer = if self.embedded.is_empty() {
+            authority.leaf.as_ref().ok_or_else(|| {
+                error("neither the token nor the authority states a signing certificate")
+            })?
+        } else {
+            let embedded = self
+                .embedded
+                .iter()
+                .find(|certificate| identifies(&info.sid, certificate))
+                .ok_or_else(|| error("timestamp token does not embed its signer"))?;
+            if authority
+                .leaf
+                .as_ref()
+                .is_some_and(|leaf| leaf.der() != embedded.der())
+            {
+                return Err(error(
+                    "timestamp signer is not the authority's signing certificate",
+                ));
+            }
+            embedded
+        };
+        self.verify_signer(signer)?;
+
+        let mut intermediates = authority.intermediates.clone();
+        intermediates.extend(self.embedded.iter().cloned());
+        verify_chain(
+            signer,
+            &intermediates,
+            std::slice::from_ref(root),
+            self.gen_time,
+            KeyPurpose::TimeStamping,
+        )
+        .map_err(|cause| error(format!("timestamp signer: {cause}")))?;
+
+        if signer
+            .basic_constraints()?
+            .is_some_and(|constraints| constraints.ca)
+        {
+            return Err(error("timestamp signer is a certificate authority"));
+        }
+        if !signer
+            .extension(OID_EXTENDED_KEY_USAGE)
+            .is_some_and(|extension| extension.critical)
+        {
+            return Err(error(
+                "timestamp signer's extended key usage is not critical",
+            ));
+        }
+        if signer.extended_key_usage()?.unwrap_or_default() != [OID_TIME_STAMPING] {
+            return Err(error(
+                "timestamp signer's only extended key usage must be time stamping",
+            ));
+        }
+        if !authority.valid_for.contains(self.gen_time) {
+            return Err(error("timestamp is outside the period of its authority"));
+        }
+        Ok(())
+    }
 }
 
-/// The single value of a signed attribute.
-fn attribute(attributes: &Attributes, oid: ObjectIdentifier) -> Result<&::der::Any, SigstoreError> {
-    let attribute = attributes
-        .iter()
-        .find(|attribute| attribute.oid == oid)
-        .ok_or_else(|| error(format!("timestamp signed attribute {oid} is missing")))?;
+/// The single value of the first signed attribute with the given
+/// identifier, or `None` when no attribute has it.
+fn attribute(
+    attributes: &Attributes,
+    oid: ObjectIdentifier,
+) -> Result<Option<&::der::Any>, SigstoreError> {
+    let Some(attribute) = attributes.iter().find(|attribute| attribute.oid == oid) else {
+        return Ok(None);
+    };
     let mut values = attribute.values.iter();
     match (values.next(), values.next()) {
-        (Some(value), None) => Ok(value),
+        (Some(value), None) => Ok(Some(value)),
         _ => Err(error(format!(
             "timestamp signed attribute {oid} must have exactly one value"
         ))),
     }
 }
 
-/// Whether a signer identifier names `certificate`.
+/// Whether a signer identifier names `certificate` by issuer and serial
+/// number. An identifier by subject key identifier names no certificate.
 fn identifies(identifier: &SignerIdentifier, certificate: &Certificate) -> bool {
     match identifier {
         SignerIdentifier::IssuerAndSerialNumber(named) => {
@@ -307,10 +485,7 @@ fn identifies(identifier: &SignerIdentifier, certificate: &Certificate) -> bool 
             named.issuer == parsed.tbs_certificate.issuer
                 && named.serial_number == parsed.tbs_certificate.serial_number
         }
-        SignerIdentifier::SubjectKeyIdentifier(named) => certificate
-            .extension(OID_SUBJECT_KEY_IDENTIFIER)
-            .and_then(|extension| OctetStringRef::from_der(extension.value).ok())
-            .is_some_and(|own| own.as_bytes() == named.0.as_bytes()),
+        SignerIdentifier::SubjectKeyIdentifier(_) => false,
     }
 }
 
@@ -341,19 +516,12 @@ fn hash(algorithm: EcdsaHash, data: &[u8]) -> Vec<u8> {
 ///
 /// In order:
 ///
-/// 1. the response decodes ([`parse_response`]) and covers `input`
-///    ([`ParsedTimestamp::check_imprint`]);
+/// 1. the response decodes ([`parse_response`]) and covers `input` with a
+///    SHA-256 imprint ([`ParsedTimestamp::check_imprint`]);
 /// 2. with `policy` given, the timestamp was issued under that policy;
-/// 3. one authority of the trusted root authenticates it. For an
-///    authority to do so: the stated time is within the authority's period
-///    ([`ValidFor`](super::trusted_root::ValidFor)); the authority's
-///    signing certificate signed the token
-///    ([`ParsedTimestamp::verify_signer`]); the signing certificate is not
-///    a CA and carries exactly one extended key usage, time stamping,
-///    marked critical; and it chains to the authority's root at the stated
-///    time with the time-stamping purpose
-///    ([`verify_chain`](crate::x509::verify_chain)). Authorities are tried
-///    in order and the first that authenticates the timestamp decides.
+/// 3. one authority of the trusted root authenticates it
+///    ([`ParsedTimestamp::authenticate`]). Authorities are tried in order
+///    and the first that authenticates the timestamp decides.
 ///
 /// The appraisal time plays no part here: a caller that bounds the age of
 /// the timestamp applies an [`AppraisalWindow`] to the result.
@@ -363,21 +531,71 @@ pub fn verify_timestamp(
     input: &[u8],
     policy: Option<ObjectIdentifier>,
 ) -> Result<Instant, SigstoreError> {
-    pending("sigstore::timestamp::verify_timestamp")
+    let timestamp = parse_response(response)?;
+    timestamp.check_imprint(input)?;
+    if policy.is_some_and(|policy| policy != timestamp.policy) {
+        return Err(error("unexpected timestamp policy"));
+    }
+    authenticated_by(root, &timestamp).map(|_| timestamp.gen_time)
+}
+
+/// The first authority of the trusted root that authenticates the
+/// timestamp.
+fn authenticated_by<'a>(
+    root: &'a TrustedRoot,
+    timestamp: &ParsedTimestamp,
+) -> Result<&'a TimestampAuthority, SigstoreError> {
+    let mut first_failure = None;
+    for authority in root.timestamp_authorities() {
+        match timestamp.authenticate(authority) {
+            Ok(()) => return Ok(authority),
+            Err(cause) => {
+                first_failure.get_or_insert(cause);
+            }
+        }
+    }
+    Err(match first_failure {
+        Some(cause) => cause.within("no trusted timestamp authority authenticated the response"),
+        None => error("no trusted timestamp authority authenticated the response"),
+    })
 }
 
 /// Authenticates the RFC 3161 timestamps of a bundle, which cover the
 /// bundle's DSSE signature, and returns the authenticated times in bundle
 /// order.
 ///
-/// Each timestamp is verified with [`verify_timestamp`] over the signature
-/// bytes, without a policy requirement. A timestamp that does not verify is
-/// skipped; the caller decides how many it needs.
+/// Each timestamp must decode, cover the signature bytes under the hash
+/// that its imprint names (SHA-256, SHA-384 or SHA-512), and be
+/// authenticated by an authority of the trusted root; no policy is
+/// required of it. A timestamp that does not verify is skipped, and so is a
+/// second timestamp of an authority (by the authority's URI) that already
+/// contributed one; the caller decides how many it needs.
 pub fn verify_signature_timestamps(
     root: &TrustedRoot,
     bundle: &Bundle,
 ) -> Result<Vec<Instant>, SigstoreError> {
-    pending("sigstore::timestamp::verify_signature_timestamps")
+    let mut times = Vec::new();
+    let mut authorities: Vec<&str> = Vec::new();
+    for response in &bundle.timestamps {
+        let Ok(timestamp) = parse_response(response) else {
+            continue;
+        };
+        if timestamp
+            .check_imprint_any_hash(&bundle.envelope.signature)
+            .is_err()
+        {
+            continue;
+        }
+        let Ok(authority) = authenticated_by(root, &timestamp) else {
+            continue;
+        };
+        if authorities.contains(&authority.uri.as_str()) {
+            continue;
+        }
+        authorities.push(&authority.uri);
+        times.push(timestamp.gen_time);
+    }
+    Ok(times)
 }
 
 #[cfg(test)]

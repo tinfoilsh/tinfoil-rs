@@ -80,12 +80,25 @@ pub struct TlogEntry {
     /// format does not distinguish an absent member from a zero. It is
     /// authenticated only by the inclusion promise.
     pub integrated_time: i64,
-    /// The log's signed entry timestamp, if the entry carries one.
+    /// The signed entry timestamp of the entry's inclusion promise, if the
+    /// entry carries a promise. A promise may be present with an empty
+    /// timestamp; [`TlogEntry::signed_entry_timestamp`] reads only a
+    /// timestamp that is there.
     pub inclusion_promise: Option<Vec<u8>>,
     /// The inclusion proof, if the entry carries one.
     pub inclusion_proof: Option<InclusionProof>,
     /// The entry as the log stores it.
     pub canonicalized_body: Vec<u8>,
+}
+
+impl TlogEntry {
+    /// The log's signed entry timestamp, when the entry carries a promise
+    /// with a timestamp that is not empty.
+    pub fn signed_entry_timestamp(&self) -> Option<&[u8]> {
+        self.inclusion_promise
+            .as_deref()
+            .filter(|timestamp| !timestamp.is_empty())
+    }
 }
 
 /// A proof that an entry is in a log at a signed checkpoint.
@@ -126,7 +139,7 @@ impl Bundle {
     ///   `signedEntryTimestamp`) and `inclusionProof` are optional, but one
     ///   of the last two is present, and at least one entry of the bundle
     ///   has an inclusion proof. An inclusion promise with an empty
-    ///   `signedEntryTimestamp` is no promise;
+    ///   `signedEntryTimestamp` does not count as present for this rule;
     /// - an inclusion proof has `logIndex`, `treeSize`, a 32-byte
     ///   `rootHash`, at most [`MAX_PROOF_HASHES`] 32-byte `hashes`, and a
     ///   non-empty `checkpoint.envelope` of at most [`MAX_CHECKPOINT_SIZE`]
@@ -167,7 +180,9 @@ impl Bundle {
             )));
         }
         if bundle.get("messageSignature").is_some() {
-            return Err(error("bundle carries a message signature, want a DSSE envelope"));
+            return Err(error(
+                "bundle carries a message signature, want a DSSE envelope",
+            ));
         }
         let material = Members::required(
             bundle.get("verificationMaterial"),
@@ -212,10 +227,9 @@ impl Bundle {
         let mut tlog_entries: Vec<TlogEntry> = Vec::with_capacity(entries.len());
         for entry in entries {
             let entry = tlog_entry(entry)?;
-            if tlog_entries
-                .iter()
-                .any(|earlier| earlier.log_id == entry.log_id && earlier.log_index == entry.log_index)
-            {
+            if tlog_entries.iter().any(|earlier| {
+                earlier.log_id == entry.log_id && earlier.log_index == entry.log_index
+            }) {
                 return Err(error("bundle carries the same log entry twice"));
             }
             tlog_entries.push(entry);
@@ -265,7 +279,10 @@ impl Bundle {
             timestamps,
             envelope: DsseEnvelope {
                 payload: envelope.bytes("payload")?.unwrap_or_default(),
-                payload_type: envelope.string("payloadType")?.unwrap_or_default().to_string(),
+                payload_type: envelope
+                    .string("payloadType")?
+                    .unwrap_or_default()
+                    .to_string(),
                 signature: signature.required_bytes("sig")?,
                 key_id: signature.string("keyid")?.unwrap_or_default().to_string(),
             },
@@ -332,7 +349,7 @@ fn tlog_entry(value: &Value) -> Result<TlogEntry, SigstoreError> {
         Some(promise) => {
             Members::required(Some(promise), "inclusionPromise", &["signedEntryTimestamp"])?
                 .bytes("signedEntryTimestamp")?
-                .filter(|promise| !promise.is_empty())
+                .or_else(|| Some(Vec::new()))
         }
         None => None,
     };
@@ -363,7 +380,10 @@ fn tlog_entry(value: &Value) -> Result<TlogEntry, SigstoreError> {
             }
             Some(InclusionProof {
                 log_index: proof.required_index("logIndex")?,
-                root_hash: hash(proof.required_bytes("rootHash")?, "inclusion proof root hash")?,
+                root_hash: hash(
+                    proof.required_bytes("rootHash")?,
+                    "inclusion proof root hash",
+                )?,
                 tree_size: proof.required_index("treeSize")?,
                 hashes,
                 checkpoint: checkpoint.to_string(),
@@ -371,7 +391,7 @@ fn tlog_entry(value: &Value) -> Result<TlogEntry, SigstoreError> {
         }
         None => None,
     };
-    if inclusion_promise.is_none() && inclusion_proof.is_none() {
+    if inclusion_promise.as_ref().is_none_or(Vec::is_empty) && inclusion_proof.is_none() {
         return Err(error(
             "log entry has neither an inclusion promise nor an inclusion proof",
         ));
@@ -381,7 +401,10 @@ fn tlog_entry(value: &Value) -> Result<TlogEntry, SigstoreError> {
         log_id: Members::required(entry.get("logId"), "logId", &["keyId"])?
             .required_bytes("keyId")?,
         kind: kind_version.string("kind")?.unwrap_or_default().to_string(),
-        version: kind_version.string("version")?.unwrap_or_default().to_string(),
+        version: kind_version
+            .string("version")?
+            .unwrap_or_default()
+            .to_string(),
         integrated_time: entry.int64("integratedTime")?,
         inclusion_promise,
         inclusion_proof,

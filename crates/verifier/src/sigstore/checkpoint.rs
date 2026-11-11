@@ -132,9 +132,7 @@ impl SignedCheckpoint {
         };
         for line in &self.signatures {
             if line.key_hint != hint {
-                return Err(error(
-                    "checkpoint carries a signature line of another key",
-                ));
+                return Err(error("checkpoint carries a signature line of another key"));
             }
             key.verify(scheme, self.signed_text.as_bytes(), &line.signature)
                 .map_err(|cause| error(format!("checkpoint signature: {cause}")))?;
@@ -550,7 +548,10 @@ mod tests {
     fn a_checkpoint_does_not_verify_under_another_key() {
         let (checkpoint, _) = production_checkpoint();
         let bundle = testutil::bundle(testutil::REKOR_V2_BUNDLE);
-        let other = testutil::log(testutil::STAGING_TRUSTED_ROOT, &bundle.tlog_entries[0].log_id);
+        let other = testutil::log(
+            testutil::STAGING_TRUSTED_ROOT,
+            &bundle.tlog_entries[0].log_id,
+        );
         assert!(checkpoint.verify_every_signature(&other.key).is_err());
     }
 

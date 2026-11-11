@@ -15,7 +15,9 @@ use crate::document::collateral::RuntimeReference;
 use crate::instant::Instant;
 use crate::json::Value;
 use crate::sigstore::bundle::Bundle;
-use crate::sigstore::timestamp::AppraisalWindow;
+use crate::sigstore::keyed::{check_approval_layout, verify_keyed_bundle};
+use crate::sigstore::statement::{MAX_STATEMENT_SIZE, key_hint};
+use crate::sigstore::timestamp::{AppraisalWindow, SIGSTORE_TIMESTAMP_POLICY, verify_timestamp};
 use crate::sigstore::trusted_root::TrustedRoot;
 use crate::stub::pending;
 use crate::x509::{Certificate, PublicKey};
@@ -236,14 +238,19 @@ impl ArtifactStatement {
 /// decodes ([`Bundle::from_value`]) and has the approval layout
 /// ([`check_approval_layout`](crate::sigstore::keyed::check_approval_layout)).
 pub fn parse_approval_bundle(bundle: &Value) -> Result<Bundle, EndorsementError> {
-    pending("endorsement::approval::parse_approval_bundle")
+    let bundle = Bundle::from_value(bundle)?;
+    check_approval_layout(&bundle)?;
+    Ok(bundle)
 }
 
 /// Decodes an approval bundle from its JSON text: the text has 1 to
 /// [`MAX_BUNDLE_SIZE`](crate::sigstore::bundle::MAX_BUNDLE_SIZE) bytes,
 /// decodes ([`Bundle::from_json`]) and has the approval layout.
 pub fn parse_approval_bundle_json(bundle: &[u8]) -> Result<Bundle, EndorsementError> {
-    pending("endorsement::approval::parse_approval_bundle_json")
+    let bundle =
+        Bundle::from_json(bundle).map_err(|cause| cause.within("parsing endorsement bundle"))?;
+    check_approval_layout(&bundle)?;
+    Ok(bundle)
 }
 
 /// Verifies approvals signed with pinned keys.
@@ -265,7 +272,25 @@ impl ApprovalVerifier {
     /// ([`key_hint`](crate::sigstore::statement::key_hint)); two keys have
     /// the same hint.
     pub fn new(root: Arc<TrustedRoot>, keys: &[PublicKey]) -> Result<Self, EndorsementError> {
-        pending("endorsement::approval::ApprovalVerifier::new")
+        if root.rekor_logs().is_empty() {
+            return Err(EndorsementError::new("Rekor trust is required"));
+        }
+        if keys.is_empty() {
+            return Err(EndorsementError::new(
+                "at least one independently trusted signing key is required",
+            ));
+        }
+        let mut pinned: Vec<(String, PublicKey)> = Vec::with_capacity(keys.len());
+        for key in keys {
+            let hint = key_hint(key)?;
+            if pinned.iter().any(|(earlier, _)| *earlier == hint) {
+                return Err(EndorsementError::new(format!(
+                    "duplicate signing key {hint}"
+                )));
+            }
+            pinned.push((hint, key.clone()));
+        }
+        Ok(Self { root, keys: pinned })
     }
 
     /// Verifies an approval bundle and returns the hint of the pinned key
@@ -276,7 +301,13 @@ impl ApprovalVerifier {
     /// the bundle verifies under that key for `digest`
     /// ([`verify_keyed_bundle`](crate::sigstore::keyed::verify_keyed_bundle)).
     pub fn verify(&self, bundle: &Bundle, digest: &[u8; 32]) -> Result<String, EndorsementError> {
-        pending("endorsement::approval::ApprovalVerifier::verify")
+        let (hint, key) = bundle
+            .key_hint()
+            .and_then(|hint| self.keys.iter().find(|(pinned, _)| pinned == hint))
+            .ok_or_else(|| EndorsementError::new("untrusted approval signing key"))?;
+        verify_keyed_bundle(&self.root, bundle, key, digest)
+            .map_err(|cause| cause.within("verifying endorsement bundle"))?;
+        Ok(hint.clone())
     }
 
     /// Authenticates an approval's inner timestamp.
@@ -310,7 +341,14 @@ pub fn verify_approval_timestamp(
     input: &[u8],
     window: &AppraisalWindow,
 ) -> Result<Instant, EndorsementError> {
-    pending("endorsement::approval::verify_approval_timestamp")
+    if input.is_empty() || input.len() > MAX_STATEMENT_SIZE {
+        return Err(EndorsementError::new(
+            "timestamp input size is outside allowed bounds",
+        ));
+    }
+    let at = verify_timestamp(root, response, input, Some(SIGSTORE_TIMESTAMP_POLICY))?;
+    window.check(at)?;
+    Ok(at)
 }
 
 /// What a config endorsement must match, and the clock that judges its

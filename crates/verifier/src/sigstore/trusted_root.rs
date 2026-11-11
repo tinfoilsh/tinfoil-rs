@@ -3,8 +3,8 @@
 //! each with the period for which it is trusted.
 
 use super::SigstoreError;
-use crate::instant::Instant;
 use super::wire::Members;
+use crate::instant::Instant;
 use crate::json::{self, Value};
 use crate::x509::{Certificate, KeyAlgorithm, PublicKey};
 
@@ -309,8 +309,8 @@ fn logs(values: &[Value], list: &str) -> Result<Vec<TransparencyLog>, SigstoreEr
                 identifier.bytes("keyId")?;
             }
         }
-        let log_id = Members::required(log.get("logId"), "logId", &["keyId"])?
-            .required_bytes("keyId")?;
+        let log_id =
+            Members::required(log.get("logId"), "logId", &["keyId"])?.required_bytes("keyId")?;
         let public_key = Members::required(
             log.get("publicKey"),
             "publicKey",
