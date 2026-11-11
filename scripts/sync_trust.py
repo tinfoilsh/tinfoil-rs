@@ -31,8 +31,16 @@ Checks before writing:
 - the signing key has the pinned SHA-256 and loads as an ECDSA P-256 key;
 - a self-signed root that differs from the committed one is refused unless
   ``--allow-root-change`` is passed, so a root never changes by accident. A
-  committed file that cannot be read is an error, not a missing file, and a
-  symbolic link in its place is refused.
+  committed bundle that holds no self-signed root at all is refused the same
+  way: only a file that is truly absent starts from nothing. A committed
+  file that cannot be read is an error, not a missing file;
+- no path that is read or written passes through a symbolic link, in the
+  file itself or in any directory between it and the repository root;
+- every download is HTTPS from start to finish: a redirect to any other
+  scheme is refused.
+
+Installation is all or nothing: if replacing any file fails, the files
+already replaced are put back and the new ones removed.
 
 Running the script twice against unchanged sources produces identical files.
 
@@ -49,6 +57,7 @@ import shutil
 import ssl
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,16 +135,33 @@ class Anchor:
     """Whether the anchor is a PEM certificate bundle, whose self-signed roots are guarded against change."""
 
 
+def require_https(url: str) -> None:
+    if urllib.parse.urlsplit(url).scheme != "https":
+        raise SyncError(f"{url}: refusing a URL that is not HTTPS")
+
+
+class HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect only to another HTTPS URL, so that no hop of a download is unauthenticated."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ANN201, PLR0913
+        require_https(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def fetch(url: str) -> Source:
-    """Download ``url`` with a timeout; an empty body or any transport error is a SyncError."""
+    """Download ``url`` over HTTPS with a timeout; an empty body or any transport error is a SyncError."""
+    require_https(url)
     # The interpreter that runs this script may have no system trust store; the
     # Mozilla bundle that certifi ships verifies the vendors' TLS certificates.
     context = ssl.create_default_context(cafile=certifi.where())
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), HttpsOnlyRedirects())
     try:
-        with urllib.request.urlopen(url, timeout=TIMEOUT_SECONDS, context=context) as response:  # noqa: S310
+        with opener.open(url, timeout=TIMEOUT_SECONDS) as response:
+            final_url = response.geturl()
             content = response.read()
     except OSError as err:
         raise SyncError(f"{url}: {err}") from err
+    require_https(final_url)
     if not content:
         raise SyncError(f"{url}: empty response")
     return Source(url, content)
@@ -256,16 +282,27 @@ def self_signed_spkis(what: str, pem: bytes) -> set[bytes]:
     return roots
 
 
-def committed_roots(path: Path) -> set[bytes]:
-    """The SPKIs of the self-signed roots in a committed PEM file; none only if the file is truly absent."""
-    if path.is_symlink():
-        # A link, dangling or not, is never what this script wrote; following
-        # or replacing it could read or clobber something outside the tree.
-        raise SyncError(f"{path}: is a symbolic link; refusing to read or replace it")
+def refuse_symlinks(path: Path) -> None:
+    """Refuse ``path`` if it, or any directory between it and the repository root, is a symbolic link.
+
+    A link, dangling or not, is never what this script wrote; following or
+    replacing one could read or clobber something outside the tree.
+    """
+    relative = path.relative_to(REPO_ROOT)
+    current = REPO_ROOT
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise SyncError(f"{current}: is a symbolic link; refusing to read or write through it")
+
+
+def committed_roots(path: Path) -> set[bytes] | None:
+    """The SPKIs of the self-signed roots in a committed PEM file, or None if the file is truly absent."""
+    refuse_symlinks(path)
     try:
         pem = path.read_bytes()
     except FileNotFoundError:
-        return set()
+        return None
     except OSError as err:
         raise SyncError(f"{path}: cannot read the committed anchor: {err}") from err
     return self_signed_spkis(str(path), pem)
@@ -273,8 +310,15 @@ def committed_roots(path: Path) -> set[bytes]:
 
 def check_root_change(path: Path, source: Source, allow: bool) -> None:
     before = committed_roots(path)
-    after = self_signed_spkis(source.url, source.content)
-    if before and before != after and not allow:
+    if before is None or allow:
+        return
+    if not before:
+        # An existing bundle without a root gives nothing to compare with;
+        # treating it as absent would let any root in unnoticed.
+        raise SyncError(
+            f"{path.name}: the committed bundle holds no self-signed root; pass --allow-root-change to replace it"
+        )
+    if before != self_signed_spkis(source.url, source.content):
         raise SyncError(f"{path.name}: the self-signed root changed; pass --allow-root-change to accept it")
 
 
@@ -394,17 +438,56 @@ def render_all(workdir: Path, allow_root_change: bool) -> dict[str, bytes]:
     return outputs
 
 
-def install(staged: Path, outputs: dict[str, bytes]) -> None:
-    """Move the staged files into the trust directory, refusing to write through a symbolic link."""
+def install(staged: Path, backups: Path, outputs: dict[str, bytes]) -> None:
+    """Replace the files of the trust directory with the staged ones, all or none.
+
+    Nothing is written through a symbolic link. Every file that is about to
+    be replaced is first copied to ``backups``; if any step fails, the files
+    already replaced are restored from there and the files that did not exist
+    before are removed, so that the tree is as it was.
+    """
     for name in outputs:
         target = TRUST_DIR / name
-        if target.is_symlink():
-            raise SyncError(f"{target}: is a symbolic link; refusing to replace it")
+        refuse_symlinks(target)
+        if target.exists() and not target.is_file():
+            raise SyncError(f"{target}: is not a regular file; refusing to replace it")
+
+    replaced: list[str] = []
+    created: list[Path] = []
+    try:
+        for name in outputs:
+            target = TRUST_DIR / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                backup = backups / name
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, backup)
+                replaced.append(name)
+            else:
+                created.append(target)
+            shutil.move(staged / name, target)
+    except OSError as err:
+        # Put back everything, even if one file cannot be: a file that cannot
+        # be restored is named, never silently left half written.
+        unrestored: list[str] = []
+        for restored in replaced:
+            try:
+                shutil.copy2(backups / restored, TRUST_DIR / restored)
+            except OSError:
+                unrestored.append(restored)
+        for target in created:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                unrestored.append(str(target.relative_to(TRUST_DIR)))
+        outcome = (
+            f"could not restore {', '.join(unrestored)}; check those files by hand"
+            if unrestored
+            else "the trust directory was restored"
+        )
+        raise SyncError(f"installing {name}: {err}; {outcome}") from err
     for name in outputs:
-        target = TRUST_DIR / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(staged / name, target)
-        print(f"wrote {target.relative_to(REPO_ROOT)}")
+        print(f"wrote {(TRUST_DIR / name).relative_to(REPO_ROOT)}")
 
 
 def main(argv: list[str]) -> int:
@@ -423,7 +506,7 @@ def main(argv: list[str]) -> int:
                 path = staged / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(content)
-            install(staged, outputs)
+            install(staged, workdir / "backups", outputs)
         except SyncError as err:
             print(f"sync_trust: {err}", file=sys.stderr)
             return 1
