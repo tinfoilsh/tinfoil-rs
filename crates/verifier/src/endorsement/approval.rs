@@ -311,7 +311,7 @@ impl ConfigStatement {
                 }
                 ConfigPredicate::V1
             }
-            _ => return Err(error("unsupported config endorsement statement type")),
+            _ => return Err(error("unsupported config endorsement predicate type")),
         };
         let [subject] = parts.subjects.as_slice() else {
             predicate_is_valid(&predicate)?;

@@ -124,7 +124,8 @@ impl Fixture {
     }
 
     fn root(&self, case: &Object) -> Arc<TrustedRoot> {
-        Arc::clone(&self.roots[count(case, "root")])
+        let index = usize::try_from(integer(case.get("root").unwrap())).unwrap();
+        Arc::clone(&self.roots[index])
     }
 }
 
