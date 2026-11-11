@@ -3,9 +3,13 @@
 //! translation of an endorsed policy into complete expectations.
 
 pub mod authenticate;
+#[cfg(test)]
+mod differential_tests;
 pub mod expectations;
 pub mod identity;
 pub mod lib;
+#[cfg(test)]
+mod tests;
 
 pub use authenticate::{Evidence, PcsReplay, Quote, authenticate};
 pub use expectations::{Expectations, assemble};
