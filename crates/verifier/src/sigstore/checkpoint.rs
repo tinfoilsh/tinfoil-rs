@@ -117,16 +117,15 @@ impl SignedCheckpoint {
     ///
     /// Each line's key hint is the first four bytes of the SHA-256 of the
     /// key's SubjectPublicKeyInfo, and each line carries a valid signature
-    /// over the body as it was received: ECDSA with SHA-256 in DER (for a
-    /// key on either curve), or Ed25519. The names on the lines are not
-    /// compared. One line of another signer, or one line that does not
-    /// verify, fails the whole checkpoint.
+    /// over the body as it was received: ECDSA P-256 with SHA-256 in DER,
+    /// or Ed25519. A log with a key of any other kind, P-384 included, signs
+    /// no checkpoint of this form. The names on the lines are not compared.
+    /// One line of another signer, or one line that does not verify, fails
+    /// the whole checkpoint.
     pub fn verify_every_signature(&self, key: &PublicKey) -> Result<(), SigstoreError> {
         let hint = spki_key_hint(key);
         let scheme = match key.algorithm() {
-            KeyAlgorithm::EcdsaP256 | KeyAlgorithm::EcdsaP384 => {
-                SignatureScheme::EcdsaDer(EcdsaHash::Sha256)
-            }
+            KeyAlgorithm::EcdsaP256 => SignatureScheme::EcdsaDer(EcdsaHash::Sha256),
             KeyAlgorithm::Ed25519 => SignatureScheme::Ed25519,
             other => return Err(error(format!("unsupported log key type {other:?}"))),
         };
@@ -542,6 +541,16 @@ mod tests {
     fn a_production_checkpoint_verifies_under_its_log_key() {
         let (checkpoint, key) = production_checkpoint();
         checkpoint.verify_every_signature(&key).unwrap();
+    }
+
+    #[test]
+    fn a_p384_key_signs_no_checkpoint_that_its_log_alone_signs() {
+        let (checkpoint, _) = production_checkpoint();
+        let authority = testutil::timestamp_authority(testutil::PRODUCTION_TRUSTED_ROOT);
+        let key = authority[0].public_key().unwrap();
+        assert_eq!(key.algorithm(), KeyAlgorithm::EcdsaP384);
+        let error = checkpoint.verify_every_signature(&key).unwrap_err();
+        assert!(error.to_string().contains("unsupported log key"), "{error}");
     }
 
     #[test]

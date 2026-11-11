@@ -92,7 +92,7 @@ fn recorded_approval_bundles_get_their_recorded_verdicts() {
         stricter += usize::from(check(name, &expected, code, &output, "signing_key_hint"));
         accepted += usize::from(code == EXIT_ACCEPTED);
     }
-    assert_eq!((accepted, stricter), (94, 53));
+    assert_eq!((accepted, stricter), (103, 53));
 }
 
 #[test]

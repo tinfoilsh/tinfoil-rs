@@ -166,7 +166,7 @@ fn recorded_approval_bundles_get_their_recorded_verdicts() {
             assert_eq!(Some(hint.as_str()), text(case, "hint"), "{name}");
         }
     }
-    assert_eq!(accepted, 94);
+    assert_eq!(accepted, 103);
 }
 
 #[test]
