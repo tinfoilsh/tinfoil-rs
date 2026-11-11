@@ -98,6 +98,10 @@ impl Instant {
 
     /// The system time of this instant. `None` when the platform's system
     /// time cannot represent it.
+    ///
+    /// A system time is only as fine as the platform makes it: where its
+    /// unit is coarser than a nanosecond (100 nanoseconds on Windows), the
+    /// result is the instant rounded toward the past to that unit.
     pub fn to_system_time(self) -> Option<SystemTime> {
         let nanos = Duration::from_nanos(u64::from(self.nanos));
         if self.seconds >= 0 {
@@ -683,15 +687,27 @@ mod tests {
 
     #[test]
     fn system_times_convert_both_ways() {
-        let time = UNIX_EPOCH + Duration::new(1_778_700_213, 250);
+        // A multiple of 100 nanoseconds, which every platform's system time
+        // holds exactly.
+        let time = UNIX_EPOCH + Duration::new(1_778_700_213, 2_500);
         let instant = Instant::from_system_time(time).unwrap();
-        assert_eq!(instant, at("2026-05-13T19:23:33.00000025Z"));
+        assert_eq!(instant, at("2026-05-13T19:23:33.0000025Z"));
         assert_eq!(instant.to_system_time().unwrap(), time);
 
         let before = UNIX_EPOCH - Duration::new(1, 250_000_000);
         let instant = Instant::from_system_time(before).unwrap();
         assert_eq!(instant, at("1969-12-31T23:59:58.75Z"));
         assert_eq!(instant.to_system_time().unwrap(), before);
+    }
+
+    #[test]
+    fn a_system_time_is_never_later_than_its_instant() {
+        // 250 nanoseconds is finer than the unit of some system clocks.
+        let instant = at("2026-05-13T19:23:33.00000025Z");
+        let time = instant.to_system_time().unwrap();
+        let back = Instant::from_system_time(time).unwrap();
+        assert!(back <= instant);
+        assert!(instant.duration_since(back).unwrap() < Duration::from_nanos(100));
     }
 
     #[test]
