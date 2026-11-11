@@ -148,6 +148,13 @@ impl<'a> Members<'a> {
             .map_err(|_| error(format!("{}.{name} is negative", self.path)))
     }
 
+    /// An integer member that is not negative; absent is zero, which is how
+    /// the encoding writes a zero.
+    pub(super) fn index(&self, name: &str) -> Result<u64, SigstoreError> {
+        u64::try_from(self.int64(name)?)
+            .map_err(|_| error(format!("{}.{name} is negative", self.path)))
+    }
+
     /// A time member in RFC 3339; absent is `None`.
     pub(super) fn time(&self, name: &str) -> Result<Option<Instant>, SigstoreError> {
         self.string(name)?
@@ -222,6 +229,9 @@ mod tests {
         assert_eq!(read.required_index("a").unwrap(), 12);
         assert!(read.required_index("c").is_err());
         assert!(read.required_index("absent").is_err());
+        assert_eq!(read.index("a").unwrap(), 12);
+        assert!(read.index("c").is_err());
+        assert_eq!(read.index("absent").unwrap(), 0);
     }
 
     #[test]
