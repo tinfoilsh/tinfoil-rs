@@ -303,9 +303,10 @@ impl Crl {
     /// [`Certificate::serial`] returns it; leading zero bytes do not
     /// matter.
     ///
-    /// A list answers only for certificates of its own issuer; the caller
-    /// has checked that with [`Crl::verify_issued_by`] against the
-    /// certificate's issuer.
+    /// A list answers only for certificates of its own issuer. The caller
+    /// has established that: with [`Crl::verify_issued_by`] against the
+    /// certificate's issuer, or with [`Crl::verify_signed_by`] where the
+    /// issuer is known by its key alone and names are not compared.
     pub fn is_revoked(&self, serial: &[u8]) -> bool {
         self.revoked_serials
             .iter()
