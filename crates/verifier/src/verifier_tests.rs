@@ -1099,6 +1099,85 @@ fn a_config_authorizer_sees_the_material_of_the_document() {
 }
 
 #[test]
+fn the_accepted_registries_are_never_left_open_by_default() {
+    // Without a list, a config endorsement of any registry would pass. Only
+    // the caller's own config keys, which use no registry, leave it open.
+    let public = Some(vec![PUBLIC_REGISTRY_ID.to_owned()]);
+    let inputs = Inputs::new();
+    for (name, builder) in [
+        ("defaults", Verifier::builder()),
+        (
+            "embedded artifacts",
+            Verifier::builder().embedded_references(inputs.artifacts()),
+        ),
+        (
+            "freshness keys",
+            Verifier::builder().freshness_signing_keys(signing_keys()),
+        ),
+        ("authorizer", Verifier::builder().config_authorizer(accept)),
+        (
+            "embedded config",
+            Verifier::builder().embedded_references(inputs.all()),
+        ),
+    ] {
+        let verifier = builder.build().unwrap();
+        assert_eq!(
+            verifier.reference_pins("").unwrap().registry_ids,
+            public,
+            "{name}"
+        );
+    }
+    let listed = vec![PRIVATE_REGISTRY.to_owned()];
+    let verifier = Verifier::builder()
+        .config_registry_ids(listed.clone())
+        .build()
+        .unwrap();
+    assert_eq!(
+        verifier.reference_pins("").unwrap().registry_ids,
+        Some(listed)
+    );
+    let keyed = Verifier::builder()
+        .config_signing_keys(signing_keys())
+        .build()
+        .unwrap();
+    assert_eq!(keyed.reference_pins("").unwrap().registry_ids, None);
+
+    // End to end: a config endorsement that a private registry certified,
+    // under registry roots that would authenticate it, is refused unless
+    // the caller lists that registry.
+    let fixture = Fixture::load();
+    for (name, accepted) in [
+        (
+            "config-sev/certified-private-with-config-default-ids/",
+            false,
+        ),
+        (
+            "config-sev/certified-private-with-config-public-only/",
+            false,
+        ),
+        ("config-sev/certified-private-with-config-exclusive/", true),
+    ] {
+        let case = fixture.case(name);
+        let verifier = fixture.verifier(case).unwrap();
+        let document = fixture.document(text(case, "doc")).unwrap();
+        let result = verifier.verify_at(&document, &Fixture::nonce(case), "", instant(case));
+        match result {
+            Ok(verified) => {
+                assert!(accepted, "{name}");
+                let registry = verified.config().unwrap().registry_id.as_deref();
+                assert_eq!(registry, Some(PRIVATE_REGISTRY));
+            }
+            Err(Error::Verification(rejected)) => {
+                assert!(!accepted, "{name}: {rejected}");
+                assert_eq!(rejected.layer(), Layer::Provenance);
+                assert!(rejected.to_string().contains("registry"), "{rejected}");
+            }
+            Err(other) => panic!("{name}: {other}"),
+        }
+    }
+}
+
+#[test]
 fn an_embedded_runtime_is_recorded_at_its_release_tag() {
     use crate::verifier::release_tag;
     for (version, tag) in [

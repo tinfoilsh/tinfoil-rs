@@ -156,11 +156,11 @@ impl StdError for AuthorizerRefusal {
 
 /// The pins that a repository reference sets on a config endorsement.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Pins {
-    identity: Option<String>,
-    revision: Option<String>,
-    digest: Option<String>,
-    registry_ids: Option<Vec<String>>,
+pub(crate) struct Pins {
+    pub(crate) identity: Option<String>,
+    pub(crate) revision: Option<String>,
+    pub(crate) digest: Option<String>,
+    pub(crate) registry_ids: Option<Vec<String>>,
 }
 
 /// Reference values in the form that policy assembly takes.
@@ -378,6 +378,10 @@ impl Verifier {
     /// [`freshness_expires_at`](Verification::freshness_expires_at) when
     /// it is set. With every reference embedded there is no deadline, and
     /// renewal is the caller's.
+    ///
+    /// The verifier puts no bound on the size of `doc`, and parsing takes
+    /// memory in proportion to it. The caller bounds the document where it
+    /// reads it, before it calls the verifier.
     ///
     /// # Errors
     ///
@@ -613,7 +617,7 @@ impl Verifier {
     /// document. Every check of that kind belongs here, so that
     /// [`check_repo_verifiability`](Self::check_repo_verifiability) makes
     /// it too.
-    fn reference_pins(&self, reference: &str) -> Result<Pins, UsageError> {
+    pub(crate) fn reference_pins(&self, reference: &str) -> Result<Pins, UsageError> {
         let mut pins = Pins {
             registry_ids: self.config_registry_ids.clone(),
             ..Pins::default()

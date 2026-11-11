@@ -697,4 +697,8 @@ fn the_fixture_covers_both_flows_on_both_platforms() {
     // A config, a runtime and a platform artifact that are all endorsed and
     // approved, with the earliest approval setting the deadline.
     assert!(accepted("config-sev/full-") >= 10);
+    // Config endorsements under a registry certificate, for the public and
+    // for a private registry.
+    assert!(accepted("config-sev/certified-private-") >= 10);
+    assert!(accepted("config-sev/certified-public-") >= 10);
 }
