@@ -501,10 +501,10 @@ fn replay(fixture: &Fixture, case: &Object) -> Outcome {
     };
     let repo = text(case, "repo");
     let repo_check = verifier.check_repo_verifiability(repo);
-    if let Err(error) = &repo_check {
-        if !matches!(error, Error::Usage(_)) {
-            return Outcome::Differs(format!("repository check fails with {error}"));
-        }
+    if let Err(error) = &repo_check
+        && !matches!(error, Error::Usage(_))
+    {
+        return Outcome::Differs(format!("repository check fails with {error}"));
     }
     if repo_check.is_ok() != flag(recorded, "repo_check") {
         return Outcome::Differs(format!("repository check: {repo_check:?}"));
