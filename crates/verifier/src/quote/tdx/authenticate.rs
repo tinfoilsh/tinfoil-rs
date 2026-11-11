@@ -1,10 +1,12 @@
 //! Authentication of a TDX quote.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use super::identity::identity;
 use super::lib::abi::QuoteV4;
-use super::lib::pcs::{Observed, observe};
+use super::lib::pcs::{Observed, QeIdentity, TcbInfo, observe};
 use super::lib::verify::verify_quote;
 use crate::document::collateral::PcsResponse;
 use crate::instant::Instant;
@@ -108,9 +110,42 @@ impl Quote {
 pub struct ReplayedResponse<'a> {
     /// The response headers, with names in canonical MIME form
     /// (`Tcb-Info-Issuer-Chain`).
-    pub headers: BTreeMap<String, Vec<String>>,
+    pub headers: Rc<BTreeMap<String, Vec<String>>>,
     /// The response body.
     pub body: &'a [u8],
+    /// The body as a revocation list, when it parses as one.
+    pub revocation_list: Option<Rc<Crl>>,
+}
+
+/// What was established about one recorded response the first time that
+/// it was served.
+#[derive(Debug, Clone)]
+struct Judged {
+    headers: Rc<BTreeMap<String, Vec<String>>>,
+    revocation_list: Option<Rc<Crl>>,
+}
+
+/// Counts of the expensive steps of a replay, for tests that hold the
+/// work of a verification to the size of its document.
+#[cfg(test)]
+pub(crate) mod work {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// How many bodies were parsed as revocation lists on this thread.
+        pub(crate) static LIST_PARSES: Cell<usize> = const { Cell::new(0) };
+        /// How many bodies were parsed for their edition on this thread.
+        pub(crate) static OBSERVATIONS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn reset() {
+        LIST_PARSES.with(|count| count.set(0));
+        OBSERVATIONS.with(|count| count.set(0));
+    }
+
+    pub(crate) fn counts() -> (usize, usize) {
+        (LIST_PARSES.with(Cell::get), OBSERVATIONS.with(Cell::get))
+    }
 }
 
 /// A PCS URL in the plain form that the replay understands, taken apart.
@@ -244,6 +279,10 @@ pub struct PcsReplay<'a> {
     /// The recorded responses by lookup key.
     responses: BTreeMap<String, &'a PcsResponse>,
     now: Instant,
+    /// What was established about each response that was served, by
+    /// lookup key, so that a response is judged once however often it is
+    /// asked for.
+    judged: RefCell<BTreeMap<String, Result<Judged, QuoteError>>>,
 }
 
 impl<'a> PcsReplay<'a> {
@@ -258,6 +297,7 @@ impl<'a> PcsReplay<'a> {
         Ok(Self {
             responses: index,
             now,
+            judged: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -288,24 +328,58 @@ impl<'a> PcsReplay<'a> {
     /// `crl`. Header names are served in canonical MIME form
     /// ([`canonical_header_name`]); two recorded names with the same
     /// canonical form and different values are an error.
+    ///
+    /// A response is judged the first time that it is served. Asking for
+    /// it again, under any URL with the same lookup key, gives the same
+    /// outcome without parsing or copying anything.
     pub fn get(&self, url: &str) -> Result<ReplayedResponse<'a>, QuoteError> {
         let key = Self::key(url)?;
-        let response = self.responses.get(&key).ok_or_else(|| {
+        let response = *self.responses.get(&key).ok_or_else(|| {
             QuoteError::new(format!(
                 "intel-pcs collateral has no recorded response for {url}"
             ))
         })?;
-        match Crl::from_der(&response.body) {
-            Ok(crl) => crl.check_validity(self.now).map_err(|error| {
-                QuoteError::new(format!("recorded revocation list for {url}: {error}"))
-            })?,
+        let mut judged = self
+            .judged
+            .try_borrow_mut()
+            .map_err(|_| QuoteError::new("the replay is already serving a response"))?;
+        let outcome = match judged.get(&key) {
+            Some(outcome) => outcome.clone(),
+            None => {
+                let outcome = self.judge(url, &key, response);
+                judged.insert(key, outcome.clone());
+                outcome
+            }
+        };
+        let Judged {
+            headers,
+            revocation_list,
+        } = outcome?;
+        Ok(ReplayedResponse {
+            headers,
+            body: &response.body,
+            revocation_list,
+        })
+    }
+
+    /// Judges one recorded response, as [`PcsReplay::get`] describes.
+    fn judge(&self, url: &str, key: &str, response: &PcsResponse) -> Result<Judged, QuoteError> {
+        #[cfg(test)]
+        work::LIST_PARSES.with(|count| count.set(count.get() + 1));
+        let revocation_list = match Crl::from_der(&response.body) {
+            Ok(crl) => {
+                crl.check_validity(self.now).map_err(|error| {
+                    QuoteError::new(format!("recorded revocation list for {url}: {error}"))
+                })?;
+                Some(Rc::new(crl))
+            }
             Err(error) if key.contains("crl") => {
                 return Err(QuoteError::new(format!(
                     "parsing recorded revocation list for {url}: {error}"
                 )));
             }
-            Err(_) => {}
-        }
+            Err(_) => None,
+        };
         let mut headers: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (name, values) in &response.headers {
             let canonical = canonical_header_name(name);
@@ -321,9 +395,9 @@ impl<'a> PcsReplay<'a> {
                 }
             }
         }
-        Ok(ReplayedResponse {
-            headers,
-            body: &response.body,
+        Ok(Judged {
+            headers: Rc::new(headers),
+            revocation_list,
         })
     }
 }
@@ -351,12 +425,22 @@ enum Edition {
 ///
 /// What is noted goes by the path of the request: a path that ends in
 /// `/tcb` is TCB info, one that ends in `/qe/identity` is the QE identity.
-/// A later response of a kind replaces what an earlier one stated.
+/// A later response of a kind replaces what an earlier one stated, every
+/// time that it is served; what a response states is read from its body
+/// once.
+///
+/// What is noted is what responses say, not what was authenticated: any
+/// recorded response is noted when its path fits.
+/// [`CollateralRecorder::check_authenticated`] holds the notes to the
+/// documents whose signatures were verified.
 #[derive(Debug, Clone)]
 pub struct CollateralRecorder<'a> {
     replay: PcsReplay<'a>,
     tcb_info: Edition,
     qe_identity: Edition,
+    /// What each served body states as the given kind of collateral, by
+    /// lookup key.
+    observed: BTreeMap<(String, &'static str), Observed>,
 }
 
 impl<'a> CollateralRecorder<'a> {
@@ -366,6 +450,7 @@ impl<'a> CollateralRecorder<'a> {
             replay,
             tcb_info: Edition::Unseen,
             qe_identity: Edition::Unseen,
+            observed: BTreeMap::new(),
         }
     }
 
@@ -382,7 +467,13 @@ impl<'a> CollateralRecorder<'a> {
             None
         };
         if let Some((edition, member)) = noted {
-            match observe(response.body, member) {
+            let key = PcsReplay::key(url)?;
+            let observed = *self.observed.entry((key, member)).or_insert_with(|| {
+                #[cfg(test)]
+                work::OBSERVATIONS.with(|count| count.set(count.get() + 1));
+                observe(response.body, member)
+            });
+            match observed {
                 Observed::Nothing => {}
                 Observed::Edition { number, issued } => {
                     *edition = Edition::Seen { number, issued };
@@ -391,6 +482,46 @@ impl<'a> CollateralRecorder<'a> {
             }
         }
         Ok(response)
+    }
+
+    /// Checks that what was noted is what was authenticated: the edition
+    /// and the issue time noted for each kind of collateral are those of
+    /// the document of that kind whose signature was verified.
+    ///
+    /// Without this, a response that verification asked for by its
+    /// location alone, and whose content nothing vouches for, could state
+    /// the edition that a policy floor is held against.
+    pub fn check_authenticated(
+        &self,
+        tcb_info: &TcbInfo,
+        qe_identity: &QeIdentity,
+    ) -> Result<(), QuoteError> {
+        let authenticated = [
+            (
+                self.tcb_info,
+                tcb_info.tcb_evaluation_data_number,
+                tcb_info.issue_date,
+                "TCB info",
+            ),
+            (
+                self.qe_identity,
+                qe_identity.tcb_evaluation_data_number,
+                qe_identity.issue_date,
+                "QE identity",
+            ),
+        ];
+        for (noted, number, issued, kind) in authenticated {
+            let expected = Edition::Seen {
+                number,
+                issued: Some(issued),
+            };
+            if noted != expected {
+                return Err(QuoteError::new(format!(
+                    "a served response states another edition or issue time than the authenticated {kind}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Checks that both kinds of collateral stated an issue time and that
@@ -473,12 +604,15 @@ fn trust_anchor(pem: &[u8]) -> Result<Certificate, QuoteError> {
 /// 4. every recorded response has a lookup key ([`PcsReplay::new`]);
 /// 5. the quote verifies against the replayed collateral
 ///    ([`verify_quote`]) with revocation checking on;
-/// 6. the TCB info and the QE identity that were served both state an
-///    issue date, and `now` is not before either
+/// 6. the edition and the issue date that the served responses state are
+///    those of the TCB info and the QE identity whose signatures were
+///    verified ([`CollateralRecorder::check_authenticated`]), and `now` is
+///    not before either issue date
 ///    ([`CollateralRecorder::check_issue_dates`]);
 /// 7. the identity is the PPID ([`identity`](super::identity()));
-/// 8. both collateral documents state a `tcbEvaluationDataNumber`; the
-///    quote records the lower of the two;
+/// 8. the quote records the lower of the two `tcbEvaluationDataNumber`
+///    values. It is authenticated: it is stated by documents that Intel's
+///    TCB signing key signed, and by no other response;
 /// 9. the measurement is the quote's MRTD and four RTMRs.
 pub fn authenticate(
     evidence: Evidence<'_>,
@@ -503,8 +637,9 @@ pub fn authenticate(
     }
 
     let mut collateral = CollateralRecorder::new(PcsReplay::new(evidence.pcs, now)?);
-    verify_quote(&quote, &mut collateral, &trusted_root, now)
+    let verified = verify_quote(&quote, &mut collateral, &trusted_root, now)
         .map_err(|error| error.within("verifying TDX quote"))?;
+    collateral.check_authenticated(&verified.tcb_info, &verified.qe_identity)?;
     collateral.check_issue_dates(now)?;
 
     let identity = identity(&quote)?;
