@@ -16,12 +16,19 @@
 //! arrives as an argument wherever age is judged.
 
 pub mod approval;
+#[cfg(test)]
+mod approval_tests;
 pub mod freshness;
+#[cfg(test)]
+mod probe_tests;
 pub mod provenance;
 pub mod reference;
+#[cfg(test)]
+mod replay_tests;
 pub mod runtime;
 pub mod signing_keys;
 pub mod time;
+mod wire;
 
 use crate::stub::message_error;
 

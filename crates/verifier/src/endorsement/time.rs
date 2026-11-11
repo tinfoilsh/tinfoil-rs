@@ -12,18 +12,29 @@ pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// sets no skew: five minutes.
 pub const DEFAULT_FUTURE_SKEW: Duration = Duration::from_secs(5 * 60);
 
+/// Whether `now` is the instant that stands for a clock that was never
+/// set: the first instant of year 1. No appraisal happens at it.
+pub fn is_unset_clock(now: Instant) -> bool {
+    const FIRST_SECOND_OF_YEAR_ONE: i64 = -62_135_596_800;
+    now.unix_seconds() == FIRST_SECOND_OF_YEAR_ONE && now.subsec_nanos() == 0
+}
+
 /// The window in which an approval's timestamp must fall when appraised at
 /// `now`: from `now` less the greatest age to `now` plus the clock skew.
 ///
 /// `None` selects [`DEFAULT_MAX_AGE`] or [`DEFAULT_FUTURE_SKEW`]; a given
 /// duration is used as it is, so a zero age accepts only timestamps at or
 /// after `now`. An error when an end of the window is not a representable
-/// instant.
+/// instant, or when `now` is the unset clock
+/// ([`is_unset_clock`]).
 pub fn approval_window(
     now: Instant,
     max_age: Option<Duration>,
     future_skew: Option<Duration>,
 ) -> Result<AppraisalWindow, EndorsementError> {
+    if is_unset_clock(now) {
+        return Err(EndorsementError::new("an appraisal clock is required"));
+    }
     let out_of_range = || EndorsementError::new("appraisal window is out of range");
     Ok(AppraisalWindow {
         earliest: now
@@ -64,6 +75,13 @@ mod tests {
 
         let exact = approval_window(now, Some(Duration::ZERO), Some(Duration::ZERO)).unwrap();
         assert_eq!((exact.earliest, exact.latest), (now, now));
+    }
+
+    #[test]
+    fn an_unset_clock_has_no_window() {
+        assert!(approval_window(at("0001-01-01T00:00:00Z"), None, None).is_err());
+        assert!(approval_window(at("0001-01-01T00:00:00.000000001Z"), None, None).is_ok());
+        assert!(approval_window(at("0001-01-01T00:00:01Z"), None, None).is_ok());
     }
 
     #[test]

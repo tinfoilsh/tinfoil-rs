@@ -60,7 +60,10 @@ impl Statement {
     /// broken:
     ///
     /// - there are at most [`MAX_SUBJECTS`] subjects, each with at most
-    ///   [`MAX_SUBJECT_DIGESTS`] digests;
+    ///   [`MAX_SUBJECT_DIGESTS`] digests, and every digest is a string: a
+    ///   `null` digest is not read as absent;
+    /// - every number in the predicate, at any depth, is within the range
+    ///   of a double;
     /// - `predicate`, when present, is an object. Its members are not
     ///   interpreted here and keep their number literals, so that an
     ///   integer above 2^53 reaches the predicate's own decoder unchanged.
@@ -100,7 +103,6 @@ impl Statement {
                 for (algorithm, value) in digests.iter() {
                     let value = match value {
                         Value::String(value) => value.clone(),
-                        Value::Null => String::new(),
                         other => {
                             return Err(error(format!(
                                 "subject digest {algorithm:?}: cannot decode JSON {} as a string",
@@ -123,7 +125,10 @@ impl Statement {
         }
         let predicate = match statement.get("predicate") {
             None => json::parse(b"{}").map_err(|cause| error(cause.to_string()))?,
-            Some(Value::Object(_)) => predicate_of(payload)?,
+            Some(found @ Value::Object(_)) => {
+                check_predicate_numbers(found)?;
+                predicate_of(payload)?
+            }
             Some(other) => {
                 return Err(error(format!(
                     "statement predicate: cannot decode JSON {} as an object",
@@ -296,6 +301,33 @@ fn write_canonical_string(out: &mut Vec<u8>, text: &str) {
     out.push(b'"');
 }
 
+/// Checks that every number in a predicate, at any depth, is one that a
+/// double can hold: a literal whose nearest double is infinite is an error.
+/// The walk uses no recursion.
+fn check_predicate_numbers(predicate: &Value) -> Result<(), SigstoreError> {
+    let mut pending = vec![predicate];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Number(number) => {
+                let finite = number
+                    .as_str()
+                    .parse::<f64>()
+                    .is_ok_and(|double| double.is_finite());
+                if !finite {
+                    return Err(SigstoreError::new(format!(
+                        "statement predicate: number {} is out of range",
+                        number.as_str()
+                    )));
+                }
+            }
+            Value::Array(items) => pending.extend(items),
+            Value::Object(object) => pending.extend(object.iter().map(|(_, member)| member)),
+            Value::Null | Value::Bool(_) | Value::String(_) => {}
+        }
+    }
+    Ok(())
+}
+
 /// The `predicate` member of a statement, parsed on its own so that it can
 /// be owned apart from the rest of the statement.
 fn predicate_of(payload: &[u8]) -> Result<Value, SigstoreError> {
@@ -319,6 +351,48 @@ fn predicate_of(payload: &[u8]) -> Result<Value, SigstoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_null_digest_is_not_an_absent_one() {
+        let statement = |digest: &str| {
+            format!(r#"{{"subject":[{{"name":"a","digest":{digest}}}],"predicate":{{}}}}"#)
+        };
+        assert!(Statement::from_payload(statement(r#"{"sha256":"00"}"#).as_bytes()).is_ok());
+        assert!(Statement::from_payload(statement("null").as_bytes()).is_ok());
+        for digest in [r#"{"sha256":null}"#, r#"{"sha256":"00","sha512":null}"#] {
+            assert!(
+                Statement::from_payload(statement(digest).as_bytes()).is_err(),
+                "{digest}"
+            );
+        }
+    }
+
+    #[test]
+    fn predicate_numbers_fit_a_double() {
+        let statement = |predicate: &str| format!(r#"{{"predicate":{predicate}}}"#);
+        for accepted in [
+            r#"{"x":1e-400}"#,
+            r#"{"x":-0}"#,
+            r#"{"x":1.7976931348623157e308}"#,
+            r#"{"x":18446744073709551616}"#,
+        ] {
+            assert!(
+                Statement::from_payload(statement(accepted).as_bytes()).is_ok(),
+                "{accepted}"
+            );
+        }
+        for rejected in [
+            r#"{"x":1e400}"#,
+            r#"{"x":-1e999}"#,
+            r#"{"x":1.7976931348623159e308}"#,
+            r#"{"a":[{"b":[1,2e308]}]}"#,
+        ] {
+            assert!(
+                Statement::from_payload(statement(rejected).as_bytes()).is_err(),
+                "{rejected}"
+            );
+        }
+    }
 
     #[test]
     fn the_pre_authentication_encoding_states_both_lengths() {
