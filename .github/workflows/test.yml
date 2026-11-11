@@ -166,6 +166,8 @@ jobs:
           # Compiles the adapter's stages in; without the flag every fixture
           # is skipped.
           RUSTFLAGS: --cfg tinfoil_conformance
+          # Documentation tests are built by rustdoc, which takes its own flags.
+          RUSTDOCFLAGS: --cfg tinfoil_conformance
           TINFOIL_CONFORMANCE_VECTORS: ${{ github.workspace }}/tinfoil-conformance/vectors/v3
         run: cargo test --locked -p tinfoil-conformance -- --nocapture
 
