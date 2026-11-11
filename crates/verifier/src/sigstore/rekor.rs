@@ -107,10 +107,11 @@ fn is_shard_of(origin: &str, log_name: &str) -> bool {
 /// - An origin with a tree identifier (`<name> - <digits>`) is a log made
 ///   of shards, and `<name>` is `log_name`. The log alone signs such a
 ///   checkpoint: every signature line is by `log_key`
-///   ([`SignedCheckpoint::verify_every_signature`]). The proof's index
-///   counts within the shard while the entry's index counts across the
-///   whole log, so the proof is verified at its own index and tree size,
-///   and neither is compared with the entry or the checkpoint.
+///   ([`SignedCheckpoint::verify_every_signature`]). The proof's tree
+///   size equals the checkpoint's. The proof's index counts within the
+///   shard while the entry's index counts across the whole log, so the
+///   proof is verified at its own index, which is not compared with the
+///   entry's.
 /// - Any other origin is a log of one tree, whose entries are
 ///   `hashedrekord` 0.0.2 records. The origin is `log_name`; the
 ///   checkpoint is a note signed by `log_name` with `log_key`, possibly
@@ -137,6 +138,13 @@ pub fn verify_inclusion(
                 "checkpoint origin is {:?}, want a shard of {log_name:?}",
                 checkpoint.origin
             )));
+        }
+        // The proof is for the tree that the log signed, not for an
+        // earlier or a later one.
+        if proof.tree_size != checkpoint.size {
+            return Err(error(
+                "inclusion proof tree size differs from the signed checkpoint",
+            ));
         }
     } else {
         if (entry.kind.as_str(), entry.version.as_str()) != (KIND_HASHEDREKORD, VERSION_0_0_2) {
@@ -531,6 +539,26 @@ mod tests {
         assert!(has_tree_id(&checkpoint.checkpoint().origin));
         assert_ne!(proof.log_index, entry.log_index);
         included(&bundle, &log).unwrap();
+    }
+
+    #[test]
+    fn a_sharded_log_proof_is_for_the_tree_of_its_checkpoint() {
+        let (bundle, log) = production();
+        let proof = bundle.tlog_entries[0].inclusion_proof.as_ref().unwrap();
+        let checkpoint = SignedCheckpoint::decode(&proof.checkpoint).unwrap();
+        assert_eq!(proof.tree_size, checkpoint.checkpoint().size);
+
+        // One leaf more leaves this entry's path unchanged, so the hashes
+        // still lead to the signed root; the size is no longer the signed
+        // one.
+        let mut changed = bundle.clone();
+        changed.tlog_entries[0]
+            .inclusion_proof
+            .as_mut()
+            .unwrap()
+            .tree_size += 1;
+        let error = included(&changed, &log).unwrap_err();
+        assert!(error.to_string().contains("tree size differs"), "{error}");
     }
 
     #[test]
