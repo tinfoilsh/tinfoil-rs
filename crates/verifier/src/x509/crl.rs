@@ -266,27 +266,34 @@ impl Crl {
     }
 
     /// Checks that the list was issued by `issuer`: the list's issuer name
-    /// equals the certificate's subject name byte for byte; the certificate
-    /// is an authority (a version 3 certificate has basic constraints, and
-    /// basic constraints have `cA` set); a key usage extension with any bit
-    /// set includes CRL signing; and the signature verifies under the
-    /// certificate's key over the encoded `tbsCertList` as it appears in
-    /// the list, with the algorithms that certificate signatures accept.
+    /// equals the certificate's subject name byte for byte, and the list
+    /// is signed by the certificate ([`Crl::verify_signed_by`]).
     pub fn verify_issued_by(&self, issuer: &Certificate) -> Result<(), X509Error> {
         if self.issuer_der != issuer.subject_der() {
             return Err(error(
                 "revocation list issuer is not the subject of the certificate",
             ));
         }
-        check_may_sign(issuer)?;
-        if issuer
+        self.verify_signed_by(issuer)
+    }
+
+    /// Checks that the list is signed by `signer`, without comparing
+    /// names: the certificate is an authority (a version 3 certificate has
+    /// basic constraints, and basic constraints have `cA` set); a key usage
+    /// extension with any bit set includes CRL signing; and the signature
+    /// verifies under the certificate's key over the encoded `tbsCertList`
+    /// as it appears in the list, with the algorithms that certificate
+    /// signatures accept.
+    pub fn verify_signed_by(&self, signer: &Certificate) -> Result<(), X509Error> {
+        check_may_sign(signer)?;
+        if signer
             .key_usage()?
             .is_some_and(|usage| !usage.is_empty() && !usage.crl_sign)
         {
             return Err(error("issuer's key usage does not permit CRL signing"));
         }
         let algorithm = AlgorithmIdentifierOwned::from_der(&self.signature_algorithm)?;
-        issuer
+        signer
             .public_key()?
             .verify(signature_scheme(&algorithm)?, &self.tbs, &self.signature)
     }
