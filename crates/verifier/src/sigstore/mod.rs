@@ -31,6 +31,7 @@ pub mod sct;
 pub mod statement;
 pub mod timestamp;
 pub mod trusted_root;
+mod wire;
 
 #[cfg(test)]
 pub(crate) mod testutil;

@@ -15,12 +15,13 @@ pub mod certificate;
 pub mod chain;
 pub mod crl;
 pub mod der;
+pub mod extension;
 pub mod key;
 
 use crate::stub::message_error;
 
 pub use certificate::{Certificate, Extension, NameField};
-pub use chain::{KeyPurpose, verify_chain};
+pub use chain::{KeyPurpose, check_signed_by, verify_chain};
 pub use crl::Crl;
 pub use der::{PemBlock, pem_blocks};
 pub use key::{EcdsaHash, KeyAlgorithm, PublicKey, SignatureScheme};

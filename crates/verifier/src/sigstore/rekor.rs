@@ -8,17 +8,17 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha384};
 
 use super::SigstoreError;
 use super::bundle::{DsseEnvelope, TlogEntry};
-use super::checkpoint::{SignedCheckpoint, verify_log_signature};
+use super::checkpoint::{SignedCheckpoint, verify_entry_timestamp_signature};
 use super::merkle;
 use super::statement::pae;
 use crate::canonical::{decode_base64, encode_lower_hex};
 use crate::json::{self, Value};
-use crate::x509::PublicKey;
 use crate::x509::der::pem_certificates;
+use crate::x509::{Certificate, KeyAlgorithm, PublicKey};
 
 /// The entry kind that logs a DSSE envelope in Rekor v1.
 pub const KIND_DSSE: &str = "dsse";
@@ -31,6 +31,15 @@ pub const VERSION_0_0_2: &str = "0.0.2";
 
 fn error(message: impl Into<String>) -> SigstoreError {
     SigstoreError::new(message)
+}
+
+/// What signed the envelope that a log entry records.
+#[derive(Debug, Clone, Copy)]
+pub enum EntrySigner<'a> {
+    /// The bundle's signing certificate.
+    Certificate(&'a Certificate),
+    /// A key that the verifier holds.
+    Key(&'a PublicKey),
 }
 
 /// The text that a Rekor v1 signed entry timestamp covers: the canonical
@@ -46,7 +55,9 @@ pub fn signed_entry_timestamp_payload(entry: &TlogEntry) -> String {
     )
 }
 
-/// Verifies an entry's signed entry timestamp under the log's key.
+/// Verifies an entry's signed entry timestamp under the log's key: ECDSA
+/// with SHA-256, whatever the key's curve. A log with a key of another
+/// kind issues no entry timestamps, so one that claims to is an error.
 ///
 /// The Merkle leaf covers only the entry's body, so this signature is what
 /// authenticates the entry's integrated time. An entry without an inclusion
@@ -60,7 +71,7 @@ pub fn verify_signed_entry_timestamp(
         .as_deref()
         .ok_or_else(|| error("log entry has no inclusion promise"))?;
     let payload = signed_entry_timestamp_payload(entry);
-    verify_log_signature(log_key, payload.as_bytes(), promise)
+    verify_entry_timestamp_signature(log_key, payload.as_bytes(), promise)
         .map_err(|cause| cause.within("signed entry timestamp"))
 }
 
@@ -86,26 +97,27 @@ fn is_shard_of(origin: &str, log_name: &str) -> bool {
 
 /// Verifies that an entry is in its log.
 ///
-/// In order: the entry has an inclusion proof; the proof's checkpoint
-/// decodes and carries a valid signature by the log's key under the name
-/// `log_name` and the key hint of the entry's log identifier; the proof
-/// agrees with the signed checkpoint and with the entry, as below; the
-/// Merkle proof leads from the leaf hash of the entry's body, at the
-/// proof's index in a tree of the proof's size, to the checkpoint's root.
+/// The entry has an inclusion proof whose checkpoint decodes. The
+/// checkpoint's origin tells which kind of log signed it, and the kind
+/// decides how the checkpoint is authenticated and what the proof must
+/// agree with. In both kinds the proof's root hash equals the checkpoint's,
+/// and the Merkle proof leads from the leaf hash of the entry's body to
+/// that root. The caller has bound the body to the bundle
+/// ([`verify_body_binding`]), so the leaf is the record of this bundle.
 ///
-/// What "agrees" means depends on the log, which the checkpoint's origin
-/// tells:
-///
-/// - an origin with a tree identifier (`<name> - <digits>`) is a log made
-///   of shards, and `<name>` is `log_name`. The proof's root hash equals
-///   the checkpoint's. The proof's
-///   index counts within the shard while the entry's index counts across
-///   the whole log, so the two are not compared, and the proof's tree size
-///   is not compared with the checkpoint's;
-/// - any other origin is a log of one tree, and nothing in the proof may
-///   differ from what is signed or stated elsewhere: the origin is
-///   `log_name`, the proof's root hash and tree size equal the
-///   checkpoint's, and the proof's index equals the entry's index.
+/// - An origin with a tree identifier (`<name> - <digits>`) is a log made
+///   of shards, and `<name>` is `log_name`. The log alone signs such a
+///   checkpoint: every signature line is by `log_key`
+///   ([`SignedCheckpoint::verify_every_signature`]). The proof's index
+///   counts within the shard while the entry's index counts across the
+///   whole log, so the proof is verified at its own index and tree size,
+///   and neither is compared with the entry or the checkpoint.
+/// - Any other origin is a log of one tree, whose entries are
+///   `hashedrekord` 0.0.2 records. The origin is `log_name`; the
+///   checkpoint is a note signed by `log_name` with `log_key`, possibly
+///   among witnesses
+///   ([`SignedCheckpoint::verify_named_signature`]); the proof's tree size
+///   equals the checkpoint's and its index equals the entry's index.
 pub fn verify_inclusion(
     entry: &TlogEntry,
     log_key: &PublicKey,
@@ -116,16 +128,9 @@ pub fn verify_inclusion(
         .as_ref()
         .ok_or_else(|| error("log entry has no inclusion proof"))?;
     let signed = SignedCheckpoint::decode(&proof.checkpoint)?;
-    signed.verify_signature(log_key, log_name, &entry.log_id)?;
     let checkpoint = signed.checkpoint();
-    // The checkpoint is what the log signed, so the proof must lead to its
-    // root, not merely to the root that the proof itself states.
-    if checkpoint.root_hash != proof.root_hash {
-        return Err(error(
-            "inclusion proof root hash differs from the signed checkpoint",
-        ));
-    }
     if has_tree_id(&checkpoint.origin) {
+        signed.verify_every_signature(log_key)?;
         // The shard still belongs to this log: the tree identifier follows
         // the log's own name.
         if !is_shard_of(&checkpoint.origin, log_name) {
@@ -135,6 +140,13 @@ pub fn verify_inclusion(
             )));
         }
     } else {
+        if (entry.kind.as_str(), entry.version.as_str()) != (KIND_HASHEDREKORD, VERSION_0_0_2) {
+            return Err(error(format!(
+                "a {} {} entry cannot be in a log of one tree",
+                entry.kind, entry.version
+            )));
+        }
+        signed.verify_named_signature(log_key, log_name)?;
         if checkpoint.origin != log_name {
             return Err(error(format!(
                 "checkpoint origin is {:?}, want {log_name:?}",
@@ -152,6 +164,13 @@ pub fn verify_inclusion(
             ));
         }
     }
+    // The checkpoint is what the log signed, so the proof must lead to its
+    // root, not merely to the root that the proof itself states.
+    if checkpoint.root_hash != proof.root_hash {
+        return Err(error(
+            "inclusion proof root hash differs from the signed checkpoint",
+        ));
+    }
     let leaf_hash = merkle::hash_leaf(&entry.canonicalized_body);
     merkle::verify_inclusion(
         proof.log_index,
@@ -163,37 +182,102 @@ pub fn verify_inclusion(
     Ok(())
 }
 
-/// Verifies that the logged entry is about this envelope and this signing
-/// certificate.
+/// The body of the `hashedrekord` 0.0.2 entry that records `envelope` as
+/// signed by `signer`: the canonical JSON that a log stores and hashes
+/// into its tree.
 ///
-/// The entry's body is strict JSON. In order:
+/// The record names the signature, the signer (the certificate, or the
+/// key's SubjectPublicKeyInfo) with the name of its signature algorithm,
+/// and the digest of the pre-authentication encoding of the payload under
+/// the hash of the signer's curve: SHA-256 for P-256, SHA-384 for P-384. A
+/// signer with a key of another kind has no such record.
+pub fn hashedrekord_body(
+    envelope: &DsseEnvelope,
+    signer: EntrySigner<'_>,
+) -> Result<Vec<u8>, SigstoreError> {
+    let (algorithm, verifier_name, verifier_bytes) = match signer {
+        EntrySigner::Certificate(certificate) => (
+            certificate.public_key()?.algorithm(),
+            "x509Certificate",
+            certificate.der(),
+        ),
+        EntrySigner::Key(key) => (key.algorithm(), "publicKey", key.spki_der()),
+    };
+    let encoded = pae(&envelope.payload_type, &envelope.payload);
+    let (key_details, hash_name, digest) = match algorithm {
+        KeyAlgorithm::EcdsaP256 => (
+            "PKIX_ECDSA_P256_SHA_256",
+            "SHA2_256",
+            Sha256::digest(&encoded).to_vec(),
+        ),
+        KeyAlgorithm::EcdsaP384 => (
+            "PKIX_ECDSA_P384_SHA_384",
+            "SHA2_384",
+            Sha384::digest(&encoded).to_vec(),
+        ),
+        other => {
+            return Err(error(format!(
+                "a {other:?} key has no hashedrekord log entry"
+            )));
+        }
+    };
+    Ok(format!(
+        concat!(
+            r#"{{"apiVersion":"0.0.2","kind":"hashedrekord","spec":{{"hashedRekordV002":{{"#,
+            r#""data":{{"algorithm":"{}","digest":"{}"}},"#,
+            r#""signature":{{"content":"{}","verifier":{{"keyDetails":"{}","{}":{{"rawBytes":"{}"}}}}}}}}}}}}"#
+        ),
+        hash_name,
+        STANDARD.encode(digest),
+        STANDARD.encode(&envelope.signature),
+        key_details,
+        verifier_name,
+        STANDARD.encode(verifier_bytes),
+    )
+    .into_bytes())
+}
+
+/// Verifies that the logged entry is about this envelope and this signer.
 ///
-/// 1. the body's `kind` and `apiVersion` equal the entry's kind and
-///    version, and are `dsse` 0.0.1 or `hashedrekord` 0.0.2;
-/// 2. the certificate in the body is `certificate_der`, byte for byte;
-/// 3. the signature in the body is the envelope's signature;
-/// 4. the digest in the body is that of the envelope: for `dsse`, SHA-256
-///    of the payload; for `hashedrekord`, SHA-256 of the pre-authentication
-///    encoding of the payload type and payload.
+/// By the entry's kind and version:
+///
+/// - `hashedrekord` 0.0.2: the entry's body is, byte for byte, the record
+///   of this envelope and signer ([`hashedrekord_body`]);
+/// - `dsse` 0.0.1, for a certificate only: the body is strict JSON whose
+///   `kind` and `apiVersion` equal the entry's; the certificate in the body
+///   is the signing certificate, byte for byte; the signature in the body
+///   is the envelope's signature; and the payload hash in the body is the
+///   SHA-256 of the envelope's payload;
+/// - anything else is an error.
 pub fn verify_body_binding(
     entry: &TlogEntry,
     envelope: &DsseEnvelope,
-    certificate_der: &[u8],
+    signer: EntrySigner<'_>,
 ) -> Result<(), SigstoreError> {
-    let body = json::parse(&entry.canonicalized_body)
-        .map_err(|cause| error(format!("log entry body: {cause}")))?;
-    let kind = text(&body, &["kind"]);
-    let version = text(&body, &["apiVersion"]);
-    if kind != Some(entry.kind.as_str()) || version != Some(entry.version.as_str()) {
-        return Err(error(format!(
-            "log entry body is {kind:?} {version:?}, but the entry says {:?} {:?}",
-            entry.kind, entry.version
-        )));
-    }
-    match (entry.kind.as_str(), entry.version.as_str()) {
-        (KIND_DSSE, VERSION_0_0_1) => bind_dsse(&body, envelope, certificate_der),
-        (KIND_HASHEDREKORD, VERSION_0_0_2) => bind_hashedrekord(&body, envelope, certificate_der),
-        (kind, version) => Err(error(format!(
+    match (entry.kind.as_str(), entry.version.as_str(), signer) {
+        (KIND_HASHEDREKORD, VERSION_0_0_2, signer) => {
+            if entry.canonicalized_body != hashedrekord_body(envelope, signer)? {
+                return Err(error(
+                    "log entry is not the record of this bundle: the signature, the signer or \
+                     the digest of the payload's pre-authentication encoding differs",
+                ));
+            }
+            Ok(())
+        }
+        (KIND_DSSE, VERSION_0_0_1, EntrySigner::Certificate(certificate)) => {
+            let body = json::parse(&entry.canonicalized_body)
+                .map_err(|cause| error(format!("log entry body: {cause}")))?;
+            let kind = text(&body, &["kind"]);
+            let version = text(&body, &["apiVersion"]);
+            if kind != Some(KIND_DSSE) || version != Some(VERSION_0_0_1) {
+                return Err(error(format!(
+                    "log entry body is {kind:?} {version:?}, but the entry says {:?} {:?}",
+                    entry.kind, entry.version
+                )));
+            }
+            bind_dsse(&body, envelope, certificate.der())
+        }
+        (kind, version, _) => Err(error(format!(
             "unsupported log entry type {kind} {version}"
         ))),
     }
@@ -235,50 +319,6 @@ fn bind_dsse(
         .ok_or_else(|| error("dsse log entry has no payload hash"))?;
     if logged_hash != encode_lower_hex(&Sha256::digest(&envelope.payload)) {
         return Err(error("bundle payload is not the payload in the log entry"));
-    }
-    Ok(())
-}
-
-fn bind_hashedrekord(
-    body: &Value,
-    envelope: &DsseEnvelope,
-    certificate_der: &[u8],
-) -> Result<(), SigstoreError> {
-    let record = at(body, &["spec", "hashedRekordV002"])
-        .ok_or_else(|| error("hashedrekord log entry has no record"))?;
-
-    let logged_certificate = bytes(
-        record,
-        &["signature", "verifier", "x509Certificate", "rawBytes"],
-        "hashedrekord log entry certificate",
-    )?;
-    if logged_certificate != certificate_der {
-        return Err(error(
-            "bundle certificate is not the certificate in the log entry",
-        ));
-    }
-
-    let logged_signature = bytes(
-        record,
-        &["signature", "content"],
-        "hashedrekord log entry signature",
-    )?;
-    if logged_signature != envelope.signature {
-        return Err(error(
-            "bundle signature is not the signature in the log entry",
-        ));
-    }
-
-    if text(record, &["data", "algorithm"]) != Some("SHA2_256") {
-        return Err(error("hashedrekord log entry digest is not SHA-256"));
-    }
-    let logged_digest = bytes(record, &["data", "digest"], "hashedrekord log entry digest")?;
-    let digest = Sha256::digest(pae(&envelope.payload_type, &envelope.payload));
-    if logged_digest[..] != digest[..] {
-        return Err(error(
-            "bundle payload is not the payload in the log entry: the digest of its \
-             pre-authentication encoding differs",
-        ));
     }
     Ok(())
 }
@@ -325,10 +365,11 @@ mod tests {
     }
 
     fn bind(bundle: &Bundle) -> Result<(), SigstoreError> {
+        let certificate = Certificate::from_der(bundle.certificate_der().unwrap())?;
         verify_body_binding(
             &bundle.tlog_entries[0],
             &bundle.envelope,
-            bundle.certificate_der().unwrap(),
+            EntrySigner::Certificate(&certificate),
         )
     }
 
@@ -353,8 +394,7 @@ mod tests {
     #[test]
     fn another_certificate_is_not_the_logged_one() {
         let (mut bundle, _) = production();
-        bundle.key_material =
-            crate::sigstore::bundle::KeyMaterial::Certificate(b"tampered".to_vec());
+        bundle.key_material = staging().0.key_material;
         let error = bind(&bundle).unwrap_err();
         assert!(error.to_string().contains("certificate"), "{error}");
     }
@@ -558,10 +598,7 @@ mod tests {
             "\u{2014} log2025-alpha3.rekor.github.dev",
         );
         let error = included(&bundle, &log).unwrap_err();
-        assert!(
-            error.to_string().contains("checkpoint signature"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("not signed by"), "{error}");
     }
 
     #[test]
