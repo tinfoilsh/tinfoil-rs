@@ -117,8 +117,8 @@ pub fn embedded_cert_chain_pem(product_line: ProductLine) -> &'static [u8] {
 ///    under the VCEK; and the report's version is supported;
 /// 7. the report does not set MASK_CHIP_KEY. A CHIP_ID that the host
 ///    masked reads as zeros with that flag clear, and is not refused
-///    here: it authenticates with the all-zero identity, which no policy
-///    names;
+///    here: it authenticates with the all-zero identity, and passes later
+///    only if the platform policy names a machine with that identity;
 /// 8. the identity is the CHIP_ID ([`identity`]) and the measurement is
 ///    the report's launch measurement.
 ///
