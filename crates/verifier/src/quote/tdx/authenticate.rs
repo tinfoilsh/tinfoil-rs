@@ -124,6 +124,11 @@ impl<'a> PcsReplay<'a> {
     }
 }
 
+/// The Intel SGX root certificate embedded in the crate, PEM.
+pub fn embedded_root_pem() -> &'static [u8] {
+    crate::trust::INTEL_SGX_ROOT_CA_PEM
+}
+
 /// Verifies a quote's signature chain up to the pinned Intel SGX root,
 /// replaying the recorded Intel collateral.
 ///
@@ -132,8 +137,8 @@ impl<'a> PcsReplay<'a> {
 /// ([`VendorRoots`](crate::quote::VendorRoots)). Everything is judged at
 /// `now`. In order:
 ///
-/// 1. the trust anchor parses: the first PEM block of the root, a
-///    certificate;
+/// 1. the trust anchor parses: the first PEM block of the embedded root
+///    ([`embedded_root_pem`]) or of `root_pem`, a certificate;
 /// 2. the quote decodes as a version 4 quote ([`QuoteV4::parse`]);
 /// 3. the reserved header bytes 8 to 11 are zero, and every byte after the
 ///    signed data is zero: trailing bytes may only be the padding of the

@@ -1,0 +1,2 @@
+crates/verifier/src/trust/data/* -text
+crates/verifier/tests/data/sev/* -text
