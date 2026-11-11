@@ -56,9 +56,19 @@ fn a_stage_reads_stdin_and_reports_its_exit_code() {
 fn capabilities_list_the_stages_of_this_build() {
     let capabilities = stdout_json(&adapter(&["capabilities"], ""));
     let stages = capabilities["v3"]["stages_supported"].as_array().unwrap();
-    let envelope = stages.iter().any(|stage| stage == "v3-check-envelope");
-    assert_eq!(envelope, cfg!(tinfoil_conformance));
-    assert_eq!(stages.len(), usize::from(envelope));
+    for stage in [
+        "v3-check-envelope",
+        "v3-authenticate-approval",
+        "v3-verify-timestamp",
+    ] {
+        let listed = stages.iter().any(|listed| listed == stage);
+        assert_eq!(listed, cfg!(tinfoil_conformance), "{stage}");
+    }
+    if !cfg!(tinfoil_conformance) {
+        assert!(stages.is_empty());
+    }
+    let sigstore = &capabilities["v3"]["synthetic_roots"]["sigstore"];
+    assert_eq!(sigstore, cfg!(tinfoil_conformance));
 }
 
 #[test]

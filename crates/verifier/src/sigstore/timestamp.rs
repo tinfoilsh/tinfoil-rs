@@ -164,7 +164,8 @@ pub struct ParsedTimestamp {
 /// - 1 to [`MAX_TIMESTAMP_SIZE`] bytes of canonical DER with nothing after
 ///   it;
 /// - the status is `granted`: a rejection, a grant with modifications and a
-///   response without a token are all errors;
+///   response without a token are all errors, and failure information,
+///   when present, is a well-formed bit string;
 /// - the token is CMS SignedData whose content is a `TSTInfo`;
 /// - the certificates that the token embeds, at most
 ///   [`MAX_EMBEDDED_CERTIFICATES`], each parse
@@ -179,6 +180,16 @@ pub fn parse_response(response: &[u8]) -> Result<ParsedTimestamp, SigstoreError>
     }
     let parsing = |cause: ::der::Error| error(format!("parsing timestamp response: {cause}"));
     let response = TimeStampResp::from_der(response).map_err(parsing)?;
+    // The unused bits of a bit string are zero.
+    if response.status.fail_info.as_ref().is_some_and(|bits| {
+        bits.raw_bytes()
+            .last()
+            .is_some_and(|last| last.trailing_zeros() < u32::from(bits.unused_bits()))
+    }) {
+        return Err(error(
+            "timestamp response failure information has unused bits that are set",
+        ));
+    }
     if response.status.status != STATUS_GRANTED {
         return Err(error(format!(
             "timestamp request was not granted (status {})",

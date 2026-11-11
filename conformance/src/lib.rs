@@ -342,7 +342,9 @@ mod tests {
     #[test]
     fn a_stage_that_is_not_implemented_is_unsupported_once_its_input_parses() {
         for stage in STAGES {
-            if stages_supported().contains(&stage) {
+            // The quote stage reads its document before it reaches the
+            // platform's verifier, so it has a verdict on an empty one.
+            if stages_supported().contains(&stage) || stage == STAGE_AUTHENTICATE_QUOTE {
                 continue;
             }
             let (output, code) = run(stage, MINIMAL.as_bytes());
