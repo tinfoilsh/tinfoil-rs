@@ -11,9 +11,6 @@ use crate::{
     decode_base64, decode_hex, malformed,
 };
 
-/// Whether this stage is implemented.
-pub(crate) const SUPPORTED: bool = true;
-
 /// Runs the stage.
 ///
 /// Fields that do not decode, a trusted root that is not one, and a key

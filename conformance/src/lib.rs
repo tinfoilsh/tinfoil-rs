@@ -5,13 +5,13 @@
 //! The adapter answers with JSON on stdout and an exit code; the exit code is
 //! the verdict and the JSON carries the verified facts or the rejection code.
 //!
-//! A stage that is not implemented reports [`EXIT_UNSUPPORTED`] once its
-//! input has parsed, so the suite skips its fixtures instead of failing them.
-//!
-//! The stages reach into the verifier's internal modules, which the verifier
-//! exposes only to a build with `--cfg tinfoil_conformance`. Built without
-//! that flag, the adapter implements no stage and says so in its
-//! capabilities.
+//! Full verification runs through the verifier's public entry point. The
+//! fixtures' synthetic trust anchors, and the internal modules that the
+//! single-layer stages isolate, are reachable only in a verifier built with
+//! `--cfg tinfoil_conformance`. Built without that flag, the adapter
+//! implements no stage, says so in its capabilities, and reports
+//! [`EXIT_UNSUPPORTED`] for every stage once its input has parsed, so that
+//! the suite skips its fixtures instead of failing them.
 
 // Clippy has no test exemption for this lint; see the workspace lints.
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
@@ -62,19 +62,12 @@ pub const STAGES: [&str; 7] = [
 ];
 
 /// The stages that this build of the adapter implements, in the order of
-/// [`STAGES`]. A build without the verifier's internal modules implements
-/// none; otherwise each stage answers for itself, so that a stage whose
-/// verifier is not built yet is left out.
+/// [`STAGES`]: all of them, or none in a build without the verifier's
+/// conformance seams.
 pub fn stages_supported() -> Vec<&'static str> {
-    #[cfg(tinfoil_conformance)]
-    {
-        STAGES
-            .into_iter()
-            .filter(|stage| stages::is_supported(stage))
-            .collect()
-    }
-    #[cfg(not(tinfoil_conformance))]
-    {
+    if cfg!(tinfoil_conformance) {
+        STAGES.to_vec()
+    } else {
         Vec::new()
     }
 }
@@ -87,6 +80,8 @@ pub const CODE_ENVELOPE_REJECTED: &str = "ENVELOPE_REJECTED";
 pub const CODE_PROVENANCE_REJECTED: &str = "PROVENANCE_REJECTED";
 /// The rejection code of the quote layer.
 pub const CODE_QUOTE_REJECTED: &str = "QUOTE_REJECTED";
+/// The rejection code of the policy layer.
+pub const CODE_POLICY_REJECTED: &str = "POLICY_REJECTED";
 
 /// The stdin JSON of one adapter run.
 ///
@@ -242,28 +237,18 @@ pub fn capabilities() -> serde_json::Value {
             "supported": true,
             "stages_supported": stages_supported(),
             "synthetic_roots": synthetic_roots(),
-            "freshness_enforced": false,
+            "freshness_enforced": cfg!(tinfoil_conformance),
             "live_verify": false,
             "channel_binding": "none",
         },
     })
 }
 
-/// Which trust anchors a fixture may replace: each is honoured once a
-/// stage that uses it is implemented.
+/// Which trust anchors a fixture may replace: all of them, in a build
+/// with the verifier's conformance seams.
 fn synthetic_roots() -> serde_json::Value {
-    #[cfg(tinfoil_conformance)]
-    {
-        serde_json::json!({
-            "amd": stages::authenticate_quote::sev_snp_is_built(),
-            "intel": stages::authenticate_quote::tdx_is_built(),
-            "sigstore": true,
-        })
-    }
-    #[cfg(not(tinfoil_conformance))]
-    {
-        serde_json::json!({ "amd": false, "intel": false, "sigstore": false })
-    }
+    let supported = cfg!(tinfoil_conformance);
+    serde_json::json!({ "amd": supported, "intel": supported, "sigstore": supported })
 }
 
 /// The output and exit code for a stage or command that is not supported.
@@ -340,14 +325,13 @@ mod tests {
     }
 
     #[test]
-    fn a_stage_that_is_not_implemented_is_unsupported_once_its_input_parses() {
+    fn a_build_without_the_stages_reports_every_stage_unsupported() {
         for stage in STAGES {
-            // The quote stage reads its document before it reaches the
-            // platform's verifier, so it has a verdict on an empty one.
-            if stages_supported().contains(&stage) || stage == STAGE_AUTHENTICATE_QUOTE {
+            let (output, code) = run(stage, MINIMAL.as_bytes());
+            if cfg!(tinfoil_conformance) {
+                assert_ne!(code, EXIT_UNSUPPORTED, "{stage}");
                 continue;
             }
-            let (output, code) = run(stage, MINIMAL.as_bytes());
             assert_eq!(code, EXIT_UNSUPPORTED, "{stage}");
             assert_eq!(output.stage, stage);
             assert!(!output.accepted);

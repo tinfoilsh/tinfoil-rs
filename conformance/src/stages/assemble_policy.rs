@@ -11,9 +11,6 @@ use crate::{
     malformed,
 };
 
-/// Whether this stage is implemented.
-pub(crate) const SUPPORTED: bool = true;
-
 /// Runs the stage.
 ///
 /// The stage authenticates the platform policy artifact and goes no
