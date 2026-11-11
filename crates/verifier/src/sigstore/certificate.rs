@@ -41,6 +41,22 @@ pub const OID_FULCIO_SOURCE_REPOSITORY_IDENTIFIER: ObjectIdentifier =
 pub const OID_FULCIO_SOURCE_REPOSITORY_OWNER_IDENTIFIER: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.17");
 
+/// The Fulcio extensions that are read for their form only: the build
+/// signer URI and digest, the source repository URI, the source repository
+/// owner URI, the build config URI and digest, the build trigger, the run
+/// invocation URI and the source repository visibility.
+const OID_FULCIO_OTHER_CLAIMS: [ObjectIdentifier; 9] = [
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.9"),
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.10"),
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.12"),
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.16"),
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.18"),
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.19"),
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.20"),
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.21"),
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.22"),
+];
+
 /// The identity claims that a Fulcio certificate carries beside its subject
 /// alternative name. A claim that the certificate does not carry is empty.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -103,10 +119,14 @@ fn error(message: impl Into<String>) -> SigstoreError {
 /// Reads the identity of a signing certificate.
 ///
 /// The subject alternative name holds exactly one name, a URI. Each Fulcio
-/// claim that is present is a DER UTF8String with nothing after it; the
-/// issuer is read from the newer extension, and from the older raw-bytes
-/// extension (UTF-8 text) only when the newer one is absent. When both are
-/// present they must agree.
+/// claim that is present is a DER UTF8String with nothing after it: the six
+/// claims that are returned, and the nine further ones that a certificate
+/// may carry (build signer, build config, run invocation and the like),
+/// which are read only so that a certificate with a malformed claim is
+/// refused as a whole. The issuer is read from the newer extension, and
+/// from the older raw-bytes extension (UTF-8 text) only when the newer one
+/// is absent. When both are present they must agree. The other older
+/// extensions hold raw bytes and are not read.
 pub fn signing_identity(certificate: &Certificate) -> Result<SigningIdentity, SigstoreError> {
     let (uris, others) = certificate.subject_alternative_uris()?;
     let [subject_alternative_name] = uris.as_slice() else {
@@ -131,6 +151,9 @@ pub fn signing_identity(certificate: &Certificate) -> Result<SigningIdentity, Si
                 ))
             })
     };
+    for oid in OID_FULCIO_OTHER_CLAIMS {
+        claim(oid)?;
+    }
     let mut issuer = claim(OID_FULCIO_ISSUER_V2)?;
     if let Some(older) = certificate.extension(OID_FULCIO_ISSUER_V1) {
         let older = std::str::from_utf8(older.value)

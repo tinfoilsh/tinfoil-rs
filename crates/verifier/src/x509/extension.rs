@@ -11,7 +11,7 @@ use super::X509Error;
 use super::certificate::{BasicConstraints, KeyUsage};
 use super::der::{
     DerReader, TAG_BIT_STRING, TAG_BOOLEAN, TAG_INTEGER, TAG_OCTET_STRING, TAG_OID, TAG_SEQUENCE,
-    TAG_SET, bit_string, boolean, check_integer, single_element,
+    TAG_SET, bit_string, boolean, check_integer, check_object_identifier, single_element,
 };
 
 /// `id-ce-subjectKeyIdentifier`.
@@ -67,23 +67,14 @@ fn error(message: impl Into<String>) -> X509Error {
     X509Error::new(message)
 }
 
-/// Decodes the contents of an OBJECT IDENTIFIER, which must be in the
-/// shortest form: no sub-identifier starts with a padding octet. An
-/// identifier of fewer than three or more than 39 content bytes is not
-/// supported and is an error.
+/// Decodes the contents of an OBJECT IDENTIFIER, which must pass
+/// [`check_object_identifier`]: sub-identifiers in their shortest form,
+/// none above 2^31 - 1. An identifier that the decoder does not support is
+/// an error too: fewer than three or more than 39 content bytes, or a
+/// sub-identifier of 2^28 or more in some positions.
 pub fn object_identifier(content: &[u8]) -> Result<ObjectIdentifier, X509Error> {
-    let malformed = || error("malformed OBJECT IDENTIFIER");
-    let mut at_start = true;
-    for byte in content {
-        if at_start && *byte == 0x80 {
-            return Err(malformed());
-        }
-        at_start = byte & 0x80 == 0;
-    }
-    if !at_start {
-        return Err(malformed());
-    }
-    ObjectIdentifier::from_bytes(content).map_err(|_| malformed())
+    check_object_identifier(content)?;
+    ObjectIdentifier::from_bytes(content).map_err(|_| error("unsupported OBJECT IDENTIFIER"))
 }
 
 /// Decodes a basic constraints extension value.
