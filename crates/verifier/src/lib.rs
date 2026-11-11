@@ -32,6 +32,8 @@ mod measurement;
 mod policy;
 #[cfg(test)]
 mod probes;
+#[allow(dead_code, unused_imports, unused_variables)]
+mod quote;
 #[allow(dead_code, unused_imports)]
 mod runtime;
 #[allow(dead_code)]
@@ -56,5 +58,29 @@ pub mod conformance {
     /// The attestation document and its strict parsing.
     pub mod document {
         pub use crate::document::*;
+    }
+    /// Authentication of reference values.
+    pub mod endorsement {
+        pub use crate::endorsement::*;
+    }
+    /// The verifier's time type.
+    pub mod instant {
+        pub use crate::instant::*;
+    }
+    /// The platform policy artifact.
+    pub mod policy {
+        pub use crate::policy::*;
+    }
+    /// Authentication and appraisal of CPU evidence.
+    pub mod quote {
+        pub use crate::quote::*;
+    }
+    /// Sigstore bundles, trusted roots and timestamps.
+    pub mod sigstore {
+        pub use crate::sigstore::*;
+    }
+    /// Certificates and public keys.
+    pub mod x509 {
+        pub use crate::x509::*;
     }
 }
