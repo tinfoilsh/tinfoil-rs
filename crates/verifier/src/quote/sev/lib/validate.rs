@@ -314,10 +314,12 @@ fn check_firmware(report: &Report, options: &Options, problems: &mut Vec<String>
 
 /// The CHIP_ID must be the certificate's hardware identifier: the whole
 /// field for a 64-byte identifier, its first 8 bytes for an 8-byte one. An
-/// all-zero CHIP_ID is not compared.
+/// all-zero CHIP_ID identifies no chip and is an error.
 fn check_chip_id(chip_id: &[u8; CHIP_ID_SIZE], hwid: &[u8]) -> Result<(), AssemblyError> {
     if chip_id.iter().all(|byte| *byte == 0) {
-        return Ok(());
+        return Err(AssemblyError::new(
+            "report field CHIP_ID is all zeros and cannot be bound to the VCEK certificate",
+        ));
     }
     let compared: &[u8] = match hwid.len() {
         HWID_SIZE_V0 => chip_id,
@@ -1004,8 +1006,11 @@ mod tests {
         let legacy = [0x5a; CHIP_ID_SIZE];
         check_chip_id(&turin, &TURIN_HWID).unwrap();
         check_chip_id(&legacy, &legacy).unwrap();
-        // An all-zero CHIP_ID is not compared.
-        check_chip_id(&[0; CHIP_ID_SIZE], &TURIN_HWID).unwrap();
+        // An all-zero CHIP_ID identifies no chip, whatever the certificate says.
+        for hwid in [&TURIN_HWID[..], &[0; 8], &[0; 64]] {
+            let error = check_chip_id(&[0; CHIP_ID_SIZE], hwid).unwrap_err();
+            assert!(error.to_string().contains("all zeros"), "{error}");
+        }
         let error = check_chip_id(&turin, &[0xff; 8]).unwrap_err();
         assert!(error.to_string().contains("is not the VCEK"), "{error}");
         let error = check_chip_id(&turin, &[0; 7]).unwrap_err();
