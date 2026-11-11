@@ -5,7 +5,7 @@
 //! that an independent implementation of the same rules gave it
 //! (`reference`) and the verdict of this adapter (`exit`). The two differ
 //! only where this verifier is the stricter one, and never the other way
-//! round: no case that the reference turns down is accepted here.
+//! round: no case that the other implementation turns down is accepted here.
 
 // Test tooling: indexing a JSON value yields null for a missing member and
 // never panics, and a panic is how a test fails.
@@ -22,8 +22,10 @@ use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 use tinfoil_conformance::{EXIT_ACCEPTED, EXIT_MALFORMED, EXIT_REJECTED};
 
-const APPROVALS: &str = include_str!("data/approval_differential.json");
-const TIMESTAMPS: &str = include_str!("data/timestamp_differential.json");
+const APPROVALS: &str =
+    include_str!("../../crates/verifier/tests/data/sigstore/approval_differential.json");
+const TIMESTAMPS: &str =
+    include_str!("../../crates/verifier/tests/data/sigstore/timestamp_differential.json");
 
 /// The bytes of a case: the base with the part between `prefix` and
 /// `suffix` replaced by `middle`.
@@ -37,7 +39,7 @@ fn spliced(base: &[u8], case: &Value, middle: &[u8]) -> Vec<u8> {
 }
 
 /// Checks one case's verdict against the record and returns whether the
-/// adapter was stricter than the reference.
+/// adapter was stricter than the other implementation.
 fn check(name: &str, case: &Value, code: i32, output: &Value, fact: &str) -> bool {
     let reference = i32::try_from(case["reference"].as_i64().unwrap()).unwrap();
     let recorded = i32::try_from(case["exit"].as_i64().unwrap()).unwrap();
@@ -48,7 +50,7 @@ fn check(name: &str, case: &Value, code: i32, output: &Value, fact: &str) -> boo
     );
     assert!(
         code != EXIT_ACCEPTED || reference == EXIT_ACCEPTED,
-        "{name}: accepted an input that the reference turns down"
+        "{name}: accepted an input that the other implementation turns down"
     );
     if code == EXIT_ACCEPTED {
         assert_eq!(output["outputs"][fact], case[fact], "{name}: {fact}");
@@ -97,7 +99,9 @@ fn recorded_approval_bundles_get_their_recorded_verdicts() {
 fn recorded_timestamp_responses_get_their_recorded_verdicts() {
     let fixture: Value = serde_json::from_str(TIMESTAMPS).unwrap();
     let bases = &fixture["bases"];
-    let base = STANDARD.decode(bases["response"].as_str().unwrap()).unwrap();
+    let base = STANDARD
+        .decode(bases["response"].as_str().unwrap())
+        .unwrap();
     let cases = fixture["cases"].as_array().unwrap();
     assert!(cases.len() > 250);
     let (mut accepted, mut stricter) = (0, 0);
@@ -117,7 +121,9 @@ fn recorded_timestamp_responses_get_their_recorded_verdicts() {
         } else {
             &case["now"]
         };
-        let root = case["root"].as_str().unwrap_or(bases["root"].as_str().unwrap());
+        let root = case["root"]
+            .as_str()
+            .unwrap_or(bases["root"].as_str().unwrap());
         let input = json!({
             "schema_version": "1",
             "timestamp_response_b64": STANDARD.encode(&response),
