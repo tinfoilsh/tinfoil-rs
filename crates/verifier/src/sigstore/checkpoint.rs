@@ -37,6 +37,9 @@ pub struct SignedCheckpoint {
     pub checkpoint: Checkpoint,
     /// The signature lines, in order.
     pub signatures: Vec<NoteSignature>,
+    /// The body exactly as it was received, with its final line end: the
+    /// text that the signatures cover.
+    signed_text: String,
 }
 
 /// The body of a checkpoint.
@@ -69,10 +72,14 @@ fn error(message: impl Into<String>) -> SigstoreError {
 
 impl SignedCheckpoint {
     /// Decodes a checkpoint envelope: the body, a blank line, and at least
-    /// one and at most [`MAX_NOTE_SIGNATURES`] signature lines.
+    /// one and at most [`MAX_NOTE_SIGNATURES`] signature lines. The
+    /// signature lines are what follows the last blank line.
+    ///
+    /// The body is kept as received, and signatures are verified over that
+    /// text, never over a re-encoding of the decoded fields.
     pub fn decode(envelope: &str) -> Result<Self, SigstoreError> {
         let (body, signature_lines) = envelope
-            .split_once("\n\n")
+            .rsplit_once("\n\n")
             .ok_or_else(|| error("checkpoint has no signature section"))?;
         let signatures = signature_lines
             .lines()
@@ -88,6 +95,7 @@ impl SignedCheckpoint {
         Ok(Self {
             checkpoint: Checkpoint::decode(body)?,
             signatures,
+            signed_text: format!("{body}\n"),
         })
     }
 
@@ -96,8 +104,8 @@ impl SignedCheckpoint {
     /// A signature line counts when its name is `name` and its key hint is
     /// the first four bytes of `key_id`; lines of other signers, such as
     /// witnesses, are ignored. The checkpoint verifies when one such line
-    /// carries a valid signature over the body: ECDSA P-256 with SHA-256 in
-    /// DER, or Ed25519.
+    /// carries a valid signature over the body as it was received: ECDSA
+    /// P-256 with SHA-256 in DER, or Ed25519.
     pub fn verify_signature(
         &self,
         key: &PublicKey,
@@ -105,12 +113,11 @@ impl SignedCheckpoint {
         key_id: &[u8],
     ) -> Result<(), SigstoreError> {
         let hint = key_id.first_chunk::<4>();
-        let message = self.checkpoint.encode();
         for line in &self.signatures {
             if line.name != name || hint != Some(&line.key_hint) {
                 continue;
             }
-            if verify_log_signature(key, message.as_bytes(), &line.signature).is_ok() {
+            if verify_log_signature(key, self.signed_text.as_bytes(), &line.signature).is_ok() {
                 return Ok(());
             }
         }
@@ -139,7 +146,8 @@ impl Checkpoint {
     }
 
     /// Decodes a body: a non-empty origin line, a decimal size, a base64
-    /// 32-byte root hash, and any further lines.
+    /// 32-byte root hash, and any further lines. The size is written in
+    /// digits only, without a sign and without a leading zero.
     fn decode(body: &str) -> Result<Self, SigstoreError> {
         let mut lines = body.split('\n');
         let (Some(origin), Some(size), Some(root_hash)) =
@@ -150,9 +158,14 @@ impl Checkpoint {
         if origin.trim().is_empty() {
             return Err(error("checkpoint origin must not be empty"));
         }
+        let canonical = !size.is_empty()
+            && size.bytes().all(|byte| byte.is_ascii_digit())
+            && (size == "0" || !size.starts_with('0'));
         let size = size
             .parse::<u64>()
-            .map_err(|_| error("checkpoint size is not a decimal number"))?;
+            .ok()
+            .filter(|_| canonical)
+            .ok_or_else(|| error("checkpoint size is not a canonical decimal number"))?;
         let root_hash: [u8; 32] = STANDARD
             .decode(root_hash)
             .map_err(|_| error("checkpoint root hash is not base64"))?
@@ -402,6 +415,12 @@ mod tests {
 
     /// The checkpoint of a production Rekor entry, with its log's key, name
     /// and identifier.
+    fn production_envelope() -> String {
+        let bundle = testutil::bundle(testutil::REKOR_V1_BUNDLE);
+        let proof = bundle.tlog_entries[0].inclusion_proof.as_ref().unwrap();
+        proof.checkpoint.clone()
+    }
+
     fn production_checkpoint() -> (SignedCheckpoint, PublicKey, String, Vec<u8>) {
         let bundle = testutil::bundle(testutil::REKOR_V1_BUNDLE);
         let entry = &bundle.tlog_entries[0];
@@ -437,9 +456,65 @@ mod tests {
 
     #[test]
     fn a_changed_checkpoint_body_is_rejected() {
-        let (mut checkpoint, key, name, log_id) = production_checkpoint();
-        checkpoint.checkpoint.size += 1;
-        assert!(checkpoint.verify_signature(&key, &name, &log_id).is_err());
+        let (checkpoint, key, name, log_id) = production_checkpoint();
+        let envelope = production_envelope();
+        let size = checkpoint.checkpoint.size;
+        let changed = envelope.replacen(&format!("\n{size}\n"), &format!("\n{}\n", size + 1), 1);
+        assert_ne!(changed, envelope);
+        let changed = SignedCheckpoint::decode(&changed).unwrap();
+        assert_eq!(changed.checkpoint.size, size + 1);
+        assert!(changed.verify_signature(&key, &name, &log_id).is_err());
+    }
+
+    #[test]
+    fn the_signature_covers_the_text_as_received() {
+        let (checkpoint, key, name, log_id) = production_checkpoint();
+        let envelope = production_envelope();
+        let body = checkpoint.checkpoint.encode();
+        assert!(envelope.starts_with(&body));
+
+        // A further body line decodes to the same origin, size and root
+        // hash, but it is not the text that the log signed.
+        let extended = envelope.replacen(&body, &format!("{body}extra\n"), 1);
+        let extended = SignedCheckpoint::decode(&extended).unwrap();
+        assert_eq!(extended.checkpoint.size, checkpoint.checkpoint.size);
+        assert_eq!(
+            extended.checkpoint.root_hash,
+            checkpoint.checkpoint.root_hash
+        );
+        assert!(extended.verify_signature(&key, &name, &log_id).is_err());
+
+        // A size with a leading zero would decode to the same number; it is
+        // rejected before any signature is looked at.
+        let size = checkpoint.checkpoint.size;
+        let padded = envelope.replacen(&format!("\n{size}\n"), &format!("\n0{size}\n"), 1);
+        assert_ne!(padded, envelope);
+        assert!(SignedCheckpoint::decode(&padded).is_err());
+    }
+
+    #[test]
+    fn a_size_has_one_decimal_form() {
+        let with_size = |size: &str| {
+            Checkpoint::decode(&format!(
+                "Log\n{size}\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n"
+            ))
+        };
+        assert_eq!(with_size("0").unwrap().size, 0);
+        assert_eq!(with_size("123").unwrap().size, 123);
+        assert_eq!(with_size("18446744073709551615").unwrap().size, u64::MAX);
+        for size in [
+            "+123",
+            "0123",
+            "00",
+            "-0",
+            " 1",
+            "1 ",
+            "",
+            "1e3",
+            "18446744073709551616",
+        ] {
+            assert!(with_size(size).is_err(), "{size:?}");
+        }
     }
 
     #[test]

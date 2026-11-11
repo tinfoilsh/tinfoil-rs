@@ -64,14 +64,36 @@ pub fn verify_signed_entry_timestamp(
         .map_err(|cause| cause.within("signed entry timestamp"))
 }
 
+/// Whether a checkpoint origin ends in a tree identifier: ` - ` followed by
+/// decimal digits. Logs that are split into shards sign such origins; a
+/// log that is one tree signs its bare name.
+fn has_tree_id(origin: &str) -> bool {
+    origin.rsplit_once(" - ").is_some_and(|(_, tree_id)| {
+        !tree_id.is_empty() && tree_id.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
 /// Verifies that an entry is in its log.
 ///
 /// In order: the entry has an inclusion proof; the proof's checkpoint
 /// decodes and carries a valid signature by the log's key under the name
-/// `log_name` and the key hint of the entry's log identifier; the
-/// checkpoint's root hash equals the proof's root hash; the Merkle proof
-/// leads from the leaf hash of the entry's body, at the proof's index in a
-/// tree of the proof's size, to that root.
+/// `log_name` and the key hint of the entry's log identifier; the proof
+/// agrees with the signed checkpoint and with the entry, as below; the
+/// Merkle proof leads from the leaf hash of the entry's body, at the
+/// proof's index in a tree of the proof's size, to the checkpoint's root.
+///
+/// What "agrees" means depends on the log, which the checkpoint's origin
+/// tells:
+///
+/// - an origin with a tree identifier (`<name> - <digits>`) is a log made
+///   of shards. The proof's root hash equals the checkpoint's. The proof's
+///   index counts within the shard while the entry's index counts across
+///   the whole log, so the two are not compared, and the proof's tree size
+///   is not compared with the checkpoint's;
+/// - any other origin is a log of one tree, and nothing in the proof may
+///   differ from what is signed or stated elsewhere: the origin is
+///   `log_name`, the proof's root hash and tree size equal the
+///   checkpoint's, and the proof's index equals the entry's index.
 pub fn verify_inclusion(
     entry: &TlogEntry,
     log_key: &PublicKey,
@@ -81,14 +103,33 @@ pub fn verify_inclusion(
         .inclusion_proof
         .as_ref()
         .ok_or_else(|| error("log entry has no inclusion proof"))?;
-    let checkpoint = SignedCheckpoint::decode(&proof.checkpoint)?;
-    checkpoint.verify_signature(log_key, log_name, &entry.log_id)?;
+    let signed = SignedCheckpoint::decode(&proof.checkpoint)?;
+    signed.verify_signature(log_key, log_name, &entry.log_id)?;
+    let checkpoint = &signed.checkpoint;
     // The checkpoint is what the log signed, so the proof must lead to its
     // root, not merely to the root that the proof itself states.
-    if checkpoint.checkpoint.root_hash != proof.root_hash {
+    if checkpoint.root_hash != proof.root_hash {
         return Err(error(
             "inclusion proof root hash differs from the signed checkpoint",
         ));
+    }
+    if !has_tree_id(&checkpoint.origin) {
+        if checkpoint.origin != log_name {
+            return Err(error(format!(
+                "checkpoint origin is {:?}, want {log_name:?}",
+                checkpoint.origin
+            )));
+        }
+        if proof.tree_size != checkpoint.size {
+            return Err(error(
+                "inclusion proof tree size differs from the signed checkpoint",
+            ));
+        }
+        if proof.log_index != entry.log_index {
+            return Err(error(
+                "inclusion proof index differs from the index of the log entry",
+            ));
+        }
     }
     let leaf_hash = merkle::hash_leaf(&entry.canonicalized_body);
     merkle::verify_inclusion(
@@ -419,6 +460,61 @@ mod tests {
         included(&bundle, &log).unwrap();
         bind(&bundle).unwrap();
         assert!(verify_signed_entry_timestamp(entry, &log.key).is_err());
+    }
+
+    #[test]
+    fn a_sharded_log_counts_the_proof_index_within_the_shard() {
+        let (bundle, log) = production();
+        let entry = &bundle.tlog_entries[0];
+        let proof = entry.inclusion_proof.as_ref().unwrap();
+        let checkpoint = SignedCheckpoint::decode(&proof.checkpoint).unwrap();
+        assert!(has_tree_id(&checkpoint.checkpoint.origin));
+        assert_ne!(proof.log_index, entry.log_index);
+        included(&bundle, &log).unwrap();
+    }
+
+    #[test]
+    fn a_single_tree_log_must_agree_with_its_checkpoint_and_entry() {
+        let (bundle, log) = staging();
+        let entry = &bundle.tlog_entries[0];
+        let proof = entry.inclusion_proof.as_ref().unwrap();
+        let checkpoint = SignedCheckpoint::decode(&proof.checkpoint).unwrap();
+        assert!(!has_tree_id(&checkpoint.checkpoint.origin));
+        assert_eq!(checkpoint.checkpoint.origin, log.name);
+        assert_eq!(proof.tree_size, checkpoint.checkpoint.size);
+        assert_eq!(proof.log_index, entry.log_index);
+
+        // Another index for the entry, with the proof left as it verifies.
+        let mut changed = bundle.clone();
+        changed.tlog_entries[0].log_index += 1;
+        let error = included(&changed, &log).unwrap_err();
+        assert!(error.to_string().contains("index differs"), "{error}");
+
+        // Another tree size in the proof than the log signed.
+        let mut changed = bundle.clone();
+        changed.tlog_entries[0]
+            .inclusion_proof
+            .as_mut()
+            .unwrap()
+            .tree_size += 1;
+        let error = included(&changed, &log).unwrap_err();
+        assert!(error.to_string().contains("tree size differs"), "{error}");
+    }
+
+    #[test]
+    fn a_tree_identifier_is_a_decimal_suffix_of_the_origin() {
+        assert!(has_tree_id("rekor.sigstore.dev - 1193050959916656506"));
+        assert!(has_tree_id("a - b - 7"));
+        for origin in [
+            "log2025-alpha3.rekor.sigstage.dev",
+            "rekor.sigstore.dev - ",
+            "rekor.sigstore.dev - 12x",
+            "rekor.sigstore.dev -12",
+            "rekor.sigstore.dev- 12",
+            "",
+        ] {
+            assert!(!has_tree_id(origin), "{origin:?}");
+        }
     }
 
     #[test]
