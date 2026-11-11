@@ -2,7 +2,6 @@
 
 use super::EndorsementError;
 use crate::document::collateral::RUNTIME_REPO;
-use crate::stub::pending;
 
 /// The OIDC issuer of GitHub Actions workflow tokens.
 pub const OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
@@ -32,12 +31,54 @@ pub struct Reference {
 /// Parses `owner/name[@tag][@sha256:digest]`.
 ///
 /// `owner` and `name` are one or more of ASCII letters, digits, `_`, `.`
-/// and `-`. A tag is one or more characters other than `@`, whitespace,
-/// `~`, `^`, `:`, `?`, `*`, `[` and `\`. A digest is `sha256:` and exactly
+/// and `-`. A tag is one or more characters other than `@`, `~`, `^`, `:`,
+/// `?`, `*`, `[`, `\` and the ASCII whitespace characters space, tab, line
+/// feed, form feed and carriage return. A digest is `sha256:` and exactly
 /// 64 lowercase hex digits. With one `@` part, it is a digest when it has
 /// the digest form and a tag otherwise. Anything else is an error.
 pub fn parse_reference(reference: &str) -> Result<Reference, EndorsementError> {
-    pending("endorsement::reference::parse_reference")
+    let invalid = || {
+        EndorsementError::new(format!(
+            "invalid release reference {reference:?}: want owner/name[@tag][@sha256:digest]"
+        ))
+    };
+    let mut parts = reference.split('@');
+    let repo = parts.next().filter(|repo| is_repository_name(repo));
+    let (tag, digest) = match (parts.next(), parts.next(), parts.next()) {
+        (None, _, _) => (None, None),
+        (Some(only), None, _) => match reference_digest(only) {
+            Some(digest) => (None, Some(digest)),
+            None => (Some(only), None),
+        },
+        (Some(tag), Some(digest), None) => (
+            Some(tag),
+            Some(reference_digest(digest).ok_or_else(invalid)?),
+        ),
+        _ => return Err(invalid()),
+    };
+    if tag.is_some_and(|tag| !is_reference_tag(tag)) {
+        return Err(invalid());
+    }
+    Ok(Reference {
+        repo: repo.ok_or_else(invalid)?.to_string(),
+        tag: tag.map(str::to_string),
+        digest: digest.map(str::to_string),
+    })
+}
+
+/// The hex digits of the digest part of a reference, `sha256:` and 64
+/// lowercase hex digits.
+fn reference_digest(part: &str) -> Option<&str> {
+    part.strip_prefix("sha256:")
+        .filter(|digest| is_sha256_hex(digest))
+}
+
+/// Whether `tag` can be the tag part of a reference.
+fn is_reference_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && !tag.contains([
+            '@', '~', '^', ':', '?', '*', '[', '\\', ' ', '\t', '\n', '\u{c}', '\r',
+        ])
 }
 
 /// Whether `repo` is a GitHub repository slug: `owner/name`, each one or
@@ -84,7 +125,27 @@ impl AuthenticatedArtifact {
     /// tag, a Git commit, a non-empty subject name, a SHA-256. Checked in
     /// that order.
     pub fn validate(&self) -> Result<(), EndorsementError> {
-        pending("endorsement::reference::AuthenticatedArtifact::validate")
+        let error = |what: &str| {
+            Err(EndorsementError::new(format!(
+                "authenticated artifact {what}"
+            )))
+        };
+        if !is_repository_name(&self.repo) {
+            return error("repository is invalid");
+        }
+        if self.tag.is_empty() {
+            return error("tag is empty");
+        }
+        if !is_git_commit(&self.commit) {
+            return error("commit is malformed");
+        }
+        if self.subject_name.is_empty() {
+            return error("subject name is empty");
+        }
+        if !is_sha256_hex(&self.digest) {
+            return error("digest is malformed");
+        }
+        Ok(())
     }
 }
 
@@ -326,5 +387,111 @@ mod tests {
         assert!(!identity.matches(&format!("{prefix}release.yml@refs/tags/v1.2.30")));
         assert!(!identity.matches(&format!("{prefix}release.yml@refs/tags/v1x2.3")));
         assert!(!identity.matches(&format!("{prefix}platform-release.yml@refs/tags/v1.2.3")));
+    }
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+
+    #[test]
+    fn a_reference_has_a_repository_and_optional_pins() {
+        let digest = "ab".repeat(32);
+        let parsed = |reference: &str| parse_reference(reference).unwrap();
+        let pins = |reference: &str| {
+            let parsed = parsed(reference);
+            (parsed.tag, parsed.digest)
+        };
+        assert_eq!(parsed("org/repo").repo, "org/repo");
+        assert_eq!(pins("org/repo"), (None, None));
+        assert_eq!(pins("org/repo@v1.2.3"), (Some("v1.2.3".into()), None));
+        assert_eq!(
+            pins(&format!("org/repo@sha256:{digest}")),
+            (None, Some(digest.clone()))
+        );
+        assert_eq!(
+            pins(&format!("org/repo@v1@sha256:{digest}")),
+            (Some("v1".into()), Some(digest.clone()))
+        );
+        // Characters outside the excluded set are tag characters.
+        assert_eq!(pins("org/repo@a/b\u{b}c").0, Some("a/b\u{b}c".into()));
+    }
+
+    #[test]
+    fn a_malformed_reference_is_an_error() {
+        let digest = "ab".repeat(32);
+        for reference in [
+            "",
+            "org/repo@",
+            "org/repo@sha256:bad",
+            "org/repo@v1@v2",
+            "org/repo/extra",
+            "org/(repo|other)",
+            "org/repo@v 1",
+            "org/repo@v1\n",
+            "org/repo@a:b",
+            "org/repo@a~b",
+            "org/repo@a^b",
+            "org/repo@a?b",
+            "org/repo@a*b",
+            "org/repo@a[b",
+            "org/repo@a\\b",
+            &format!("org/repo@sha256:{}", digest.to_uppercase()),
+            &format!("org/repo@sha256:{digest}@v1"),
+            &format!("org/repo@v1@sha256:{digest}@x"),
+            &format!("org/repo@@sha256:{digest}"),
+        ] {
+            let error = parse_reference(reference).unwrap_err().to_string();
+            assert!(
+                error.contains("invalid release reference"),
+                "{reference}: {error}"
+            );
+        }
+    }
+
+    fn release() -> AuthenticatedArtifact {
+        AuthenticatedArtifact {
+            repo: PLATFORM_ENDORSEMENTS_REPO.to_string(),
+            tag: "v0.0.4".to_string(),
+            commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            subject_name: "platform-endorsements.json".to_string(),
+            digest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+        }
+    }
+
+    #[test]
+    fn an_authenticated_artifact_has_every_field_in_its_form() {
+        assert!(release().validate().is_ok());
+        let rejected = |change: fn(&mut AuthenticatedArtifact), message: &str| {
+            let mut artifact = release();
+            change(&mut artifact);
+            let error = artifact.validate().unwrap_err().to_string();
+            assert!(error.contains(message), "{error}");
+        };
+        rejected(
+            |artifact| artifact.repo = "cvmimage".into(),
+            "repository is invalid",
+        );
+        rejected(|artifact| artifact.tag.clear(), "tag is empty");
+        rejected(
+            |artifact| artifact.commit = "abc".into(),
+            "commit is malformed",
+        );
+        rejected(
+            |artifact| artifact.subject_name.clear(),
+            "subject name is empty",
+        );
+        rejected(
+            |artifact| artifact.digest = "abc".into(),
+            "digest is malformed",
+        );
+        rejected(
+            |artifact| artifact.digest = format!("sha256:{}", artifact.digest),
+            "digest is malformed",
+        );
+        rejected(
+            |artifact| artifact.digest = artifact.digest.to_uppercase(),
+            "digest is malformed",
+        );
     }
 }

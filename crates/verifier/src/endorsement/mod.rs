@@ -22,6 +22,7 @@ pub mod reference;
 pub mod runtime;
 pub mod signing_keys;
 pub mod time;
+mod wire;
 
 use crate::stub::message_error;
 
