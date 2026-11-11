@@ -158,8 +158,11 @@ impl TrustedRoot {
     ///   [`PublicKey::from_spki_der`] accepts), a `keyDetails` that names
     ///   the kind of the key (one of the `PKIX_ECDSA_*` values for an ECDSA
     ///   key, whatever its curve; one of the `PKIX_RSA_PKCS1V15_*_SHA256`
-    ///   values for an RSA key; `PKIX_ED25519` for an Ed25519 key; any
-    ///   other value is an error), and a `validFor` with a `start`;
+    ///   values for an RSA key; `PKCS1_RSA_PKCS1V5` for an RSA key whose
+    ///   `rawBytes` are a bare `RSAPublicKey`; `PKIX_ED25519` for an
+    ///   Ed25519 key; any other value is an error), and a `validFor` with a
+    ///   `start`. A log with an RSA key is listed, but nothing verifies
+    ///   under it;
     /// - two logs of one list do not share an identifier;
     /// - an authority has a `certChain.certificates` array of 1 to
     ///   [`MAX_AUTHORITY_CHAIN`] entries, each `rawBytes` the canonical
@@ -286,6 +289,8 @@ fn logs(values: &[Value], list: &str) -> Result<Vec<TransparencyLog>, SigstoreEr
         "PKIX_RSA_PKCS1V15_3072_SHA256",
         "PKIX_RSA_PKCS1V15_4096_SHA256",
     ];
+    /// The key details of an RSA key given as a bare `RSAPublicKey`.
+    const BARE_RSA: &str = "PKCS1_RSA_PKCS1V5";
     let mut logs: Vec<TransparencyLog> = Vec::with_capacity(values.len());
     for value in values {
         let log = Members::required(
@@ -304,10 +309,10 @@ fn logs(values: &[Value], list: &str) -> Result<Vec<TransparencyLog>, SigstoreEr
                 "{list}: unsupported log hash algorithm"
             )));
         }
-        if let Some(ignored) = log.get("checkpointKeyId") {
-            if let Some(identifier) = Members::of(ignored, "checkpointKeyId", &["keyId"])? {
-                identifier.bytes("keyId")?;
-            }
+        if let Some(ignored) = log.get("checkpointKeyId")
+            && let Some(identifier) = Members::of(ignored, "checkpointKeyId", &["keyId"])?
+        {
+            identifier.bytes("keyId")?;
         }
         let log_id =
             Members::required(log.get("logId"), "logId", &["keyId"])?.required_bytes("keyId")?;
@@ -316,11 +321,16 @@ fn logs(values: &[Value], list: &str) -> Result<Vec<TransparencyLog>, SigstoreEr
             "publicKey",
             &["rawBytes", "keyDetails", "validFor"],
         )?;
-        let key = PublicKey::from_spki_der(&public_key.required_bytes("rawBytes")?)?;
         let details = public_key.string("keyDetails")?.unwrap_or_default();
+        let raw = public_key.required_bytes("rawBytes")?;
+        let key = if details == BARE_RSA {
+            PublicKey::from_spki_der(&rsa_spki(&raw))?
+        } else {
+            PublicKey::from_spki_der(&raw)?
+        };
         let fits = match key.algorithm() {
             KeyAlgorithm::EcdsaP256 | KeyAlgorithm::EcdsaP384 => ECDSA.contains(&details),
-            KeyAlgorithm::Rsa => RSA.contains(&details),
+            KeyAlgorithm::Rsa => RSA.contains(&details) || details == BARE_RSA,
             KeyAlgorithm::Ed25519 => details == "PKIX_ED25519",
         };
         if !fits {
@@ -348,6 +358,23 @@ fn logs(values: &[Value], list: &str) -> Result<Vec<TransparencyLog>, SigstoreEr
     Ok(logs)
 }
 
+/// The SubjectPublicKeyInfo around a bare `RSAPublicKey`.
+fn rsa_spki(rsa_public_key: &[u8]) -> Vec<u8> {
+    use crate::x509::der::{TAG_BIT_STRING, TAG_SEQUENCE, push_element};
+    // AlgorithmIdentifier { rsaEncryption, NULL }
+    const RSA_ENCRYPTION: [u8; 15] = [
+        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
+    ];
+    let mut bits = Vec::with_capacity(rsa_public_key.len().saturating_add(1));
+    bits.push(0);
+    bits.extend_from_slice(rsa_public_key);
+    let mut content = RSA_ENCRYPTION.to_vec();
+    push_element(&mut content, TAG_BIT_STRING, &bits);
+    let mut spki = Vec::with_capacity(content.len().saturating_add(4));
+    push_element(&mut spki, TAG_SEQUENCE, &content);
+    spki
+}
+
 /// The URI, certificate chain and period of one authority.
 fn authority(
     value: &Value,
@@ -358,11 +385,11 @@ fn authority(
         list,
         &["subject", "uri", "certChain", "validFor"],
     )?;
-    if let Some(subject) = authority.get("subject") {
-        if let Some(subject) = Members::of(subject, "subject", &["organization", "commonName"])? {
-            subject.string("organization")?;
-            subject.string("commonName")?;
-        }
+    if let Some(subject) = authority.get("subject")
+        && let Some(subject) = Members::of(subject, "subject", &["organization", "commonName"])?
+    {
+        subject.string("organization")?;
+        subject.string("commonName")?;
     }
     let chain = Members::required(authority.get("certChain"), "certChain", &["certificates"])?;
     let encoded = chain.array("certificates")?;

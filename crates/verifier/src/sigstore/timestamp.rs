@@ -20,7 +20,8 @@ use super::bundle::Bundle;
 use super::trusted_root::{TimestampAuthority, TrustedRoot};
 use crate::instant::Instant;
 use crate::x509::der::{
-    DerReader, Fraction, TAG_SEQUENCE, parse_generalized_time, parse_utc_time, single_element,
+    DerReader, Fraction, TAG_SEQUENCE, TAG_SET, check_object_identifiers, parse_generalized_time,
+    parse_utc_time, single_element,
 };
 use crate::x509::extension::OID_EXTENDED_KEY_USAGE;
 use crate::x509::{Certificate, EcdsaHash, KeyPurpose, SignatureScheme, verify_chain};
@@ -171,6 +172,11 @@ pub struct ParsedTimestamp {
 ///   [`MAX_EMBEDDED_CERTIFICATES`], each parse
 ///   ([`Certificate::from_der`]); an embedded item of another kind is an
 ///   error;
+/// - every OBJECT IDENTIFIER of the response is in its shortest form;
+/// - the message imprint is a non-empty hash under SHA-256, SHA-384 or
+///   SHA-512, and a signer is identified by issuer and serial number;
+/// - the SignedData holds, after its content, at most one certificate set,
+///   at most one set of revocation lists, and the signer infos;
 /// - the `TSTInfo` has version 1, and its `genTime` is a GeneralizedTime
 ///   in UTC, optionally with a fraction of a second
 ///   ([`parse_generalized_time`]).
@@ -179,6 +185,7 @@ pub fn parse_response(response: &[u8]) -> Result<ParsedTimestamp, SigstoreError>
         return Err(error("timestamp response size is outside allowed bounds"));
     }
     let parsing = |cause: ::der::Error| error(format!("parsing timestamp response: {cause}"));
+    check_object_identifiers(response)?;
     let response = TimeStampResp::from_der(response).map_err(parsing)?;
     // The unused bits of a bit string are zero.
     if response.status.fail_info.as_ref().is_some_and(|bits| {
@@ -218,7 +225,27 @@ pub fn parse_response(response: &[u8]) -> Result<ParsedTimestamp, SigstoreError>
         .map_err(parsing)?
         .as_bytes()
         .to_vec();
+    check_object_identifiers(&tst_info_der)?;
     let tst_info = TstInfo::from_der(&tst_info_der).map_err(parsing)?;
+    if tst_info
+        .message_imprint
+        .hashed_message
+        .as_bytes()
+        .is_empty()
+    {
+        return Err(error("timestamp covers no hash"));
+    }
+    digest_of(tst_info.message_imprint.hash_algorithm.oid)?;
+    if signed_data
+        .signer_infos
+        .0
+        .iter()
+        .any(|info| matches!(info.sid, SignerIdentifier::SubjectKeyIdentifier(_)))
+    {
+        return Err(error(
+            "timestamp signer must be identified by issuer and serial number",
+        ));
+    }
     if tst_info.version != TST_INFO_VERSION {
         return Err(error(format!(
             "timestamp info has version {}, want {TST_INFO_VERSION}",
@@ -244,12 +271,19 @@ pub fn parse_response(response: &[u8]) -> Result<ParsedTimestamp, SigstoreError>
 /// bytes as they appear in the token.
 fn embedded_certificates(signed_data: &[u8]) -> Result<Vec<Certificate>, SigstoreError> {
     const TAG_CERTIFICATES: u8 = 0xa0;
+    const TAG_REVOCATION_LISTS: u8 = 0xa1;
     let mut fields = single_element(signed_data)?.reader();
     // version, digestAlgorithms, encapContentInfo
     for _ in 0..3 {
         fields.element()?;
     }
-    let Some(set) = fields.optional(TAG_CERTIFICATES)? else {
+    let set = fields.optional(TAG_CERTIFICATES)?;
+    // Then only the optional revocation lists and the signer infos: a
+    // second certificate set, or anything else, is an error.
+    fields.optional(TAG_REVOCATION_LISTS)?;
+    fields.expect(TAG_SET)?;
+    fields.finish()?;
+    let Some(set) = set else {
         return Ok(Vec::new());
     };
     let mut certificates = Vec::new();

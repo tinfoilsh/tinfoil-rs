@@ -7,13 +7,13 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
-use sha2::{Digest, Sha256, Sha384};
+use sha2::{Digest, Sha256};
 
 use super::SigstoreError;
 use super::bundle::{Bundle, DsseEnvelope, KeyMaterial, TlogEntry};
 use super::certificate::{TimeSource, VerifiedTime};
 use super::rekor::{
-    self, EntrySigner, KIND_HASHEDREKORD, VERSION_0_0_2, verify_body_binding, verify_inclusion,
+    EntrySigner, KIND_HASHEDREKORD, VERSION_0_0_2, verify_body_binding, verify_inclusion,
     verify_signed_entry_timestamp,
 };
 use super::statement::{DIGEST_ALGORITHM, PAYLOAD_TYPE, Statement, key_hint, pae};
@@ -173,12 +173,11 @@ pub(super) fn verify_log_entries(
         if entry.inclusion_proof.is_some() {
             verify_inclusion(entry, &log.key, log.checkpoint_name()?)?;
         }
-        if entry.integrated_time != 0 {
-            if let EntrySigner::Certificate(certificate) = signer {
-                if !integrated.is_some_and(|at| certificate.is_valid_at(at)) {
-                    return Err(error("integrated time outside certificate validity"));
-                }
-            }
+        if entry.integrated_time != 0
+            && let EntrySigner::Certificate(certificate) = signer
+            && !integrated.is_some_and(|at| certificate.is_valid_at(at))
+        {
+            return Err(error("integrated time outside certificate validity"));
         }
         if !verified_logs.contains(&entry.log_id.as_slice()) {
             verified_logs.push(&entry.log_id);
