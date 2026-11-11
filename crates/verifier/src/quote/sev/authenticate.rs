@@ -115,10 +115,10 @@ pub fn embedded_cert_chain_pem(product_line: ProductLine) -> &'static [u8] {
 ///    pinned ASK and ARK at `now`; the revocation list is signed by the
 ///    ARK and does not revoke the ASK; the report's signature verifies
 ///    under the VCEK; and the report's version is supported;
-/// 7. the report does not set MASK_CHIP_KEY. A CHIP_ID that the host
-///    masked reads as zeros with that flag clear, and is not refused
-///    here: it authenticates with the all-zero identity, and passes later
-///    only if the platform policy names a machine with that identity;
+/// 7. the report does not set MASK_CHIP_KEY, and its CHIP_ID is not all
+///    zeros. A host can mask the CHIP_ID, which then reads as zeros with
+///    that flag clear; such a report names no chip and cannot be bound to
+///    its VCEK, so it is refused;
 /// 8. the identity is the CHIP_ID ([`identity`]) and the measurement is
 ///    the report's launch measurement.
 ///
@@ -175,6 +175,11 @@ pub fn authenticate(
     if report.signer_info.mask_chip_key {
         return Err(QuoteError::new(
             "report sets MASK_CHIP_KEY; a report that is not signed with the chip key is unsupported",
+        ));
+    }
+    if report.chip_id.iter().all(|byte| *byte == 0) {
+        return Err(QuoteError::new(
+            "report's CHIP_ID is all zeros; a report with a masked chip identity is unsupported",
         ));
     }
     Ok(Quote {
@@ -487,7 +492,6 @@ mod tests {
             // What authentication leaves to validation.
             ("report-tcb-differs-from-certificate", true),
             ("report-chip-id-other", true),
-            ("report-chip-id-zero", true),
             ("vcek-extension-hwid-value-other-chip", true),
             // The document's chain is not compared with the pinned one.
             ("document-chain-swapped", true),
@@ -501,6 +505,21 @@ mod tests {
             assert_eq!(case.accepted, case.reference, "{name}");
             let result = case.authenticate();
             assert_eq!(result.is_ok(), accepted, "{name}: {:?}", result.err());
+        }
+    }
+
+    /// A report whose CHIP_ID is all zeros is correctly signed and names no
+    /// chip, so it is refused on both product lines.
+    #[test]
+    fn a_report_without_a_chip_identity_is_refused() {
+        let cases = authentication_cases();
+        for line in ["minted-genoa", "minted-turin"] {
+            let case = named(&cases, &format!("{line}/report-chip-id-zero"));
+            let message = case.authenticate().unwrap_err().to_string();
+            assert!(
+                message.contains("CHIP_ID is all zeros"),
+                "{line}: {message}"
+            );
         }
     }
 

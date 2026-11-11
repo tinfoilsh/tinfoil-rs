@@ -245,14 +245,15 @@ fn recorded_evidence_gets_its_recorded_verdict() {
 }
 
 /// The recorded cases that authenticate.
-const EXPECTED_ACCEPTED: usize = 348;
+const EXPECTED_ACCEPTED: usize = 346;
 
 /// The recorded cases that authenticate elsewhere and not here, by class.
-const EXPECTED_STRICTER: [(&str, usize); 8] = [
+const EXPECTED_STRICTER: [(&str, usize); 9] = [
     ("PEM with text outside blocks, headers or spaces", 9),
     ("VCEK certificate in PEM form", 2),
     ("distribution point URL with an unusual authority", 9),
     ("pinned certificate signature algorithm", 2),
+    ("report with an all-zero CHIP_ID", 2),
     ("report with reserved bits set in the CPUID stepping", 14),
     ("revocation list signature algorithm", 2),
     ("revocation list with a critical extension", 2),
@@ -372,7 +373,7 @@ fn recorded_policies_stop_where_they_are_recorded_to_stop() {
             Instant::from_unix(integer(base.get("now").unwrap()), 0).unwrap(),
             Some(text(base, "root_pem").as_bytes()),
         )
-        .unwrap()
+        .map_err(|error| error.to_string())
     });
     let quotes: BTreeMap<_, _> = distinct.into_iter().zip(quotes).collect();
 
@@ -382,7 +383,19 @@ fn recorded_policies_stop_where_they_are_recorded_to_stop() {
         let name = text(case, "name");
         let base = object(bases.get(text(case, "base")).unwrap());
         let bytes = |name: &str| edited_bytes(&b64(text(base, name)), case.get(name));
-        let quote = quotes.get(&evidence(case)).unwrap();
+        let quote = quotes.get(&evidence(case)).unwrap().as_ref();
+        // The only evidence of this record that does not authenticate is a
+        // report without a chip identity.
+        let quote = match quote {
+            Ok(quote) => Some(quote),
+            Err(message) => {
+                assert!(
+                    message.contains("CHIP_ID is all zeros"),
+                    "{name}: {message}"
+                );
+                None
+            }
+        };
         let base_policy = object(base.get("policy").unwrap());
         let changes = case.get("policy").map(object);
         let policy = policy_from(|path| {
@@ -392,19 +405,34 @@ fn recorded_policies_stop_where_they_are_recorded_to_stop() {
         });
         let launch = Register::new(array(&bytes("launch")));
         let report_data: [u8; 64] = array(&bytes("report_data"));
-        let stop = match assemble(&policy, quote, launch, &report_data) {
-            Err(_) => "assemble",
-            Ok(expectations) => match expectations.validate(quote) {
-                Err(_) => "validate",
-                Ok(()) => "accept",
+        let stop = match quote {
+            None => "authenticate",
+            Some(quote) => match assemble(&policy, quote, launch, &report_data) {
+                Err(_) => "assemble",
+                Ok(expectations) => match expectations.validate(quote) {
+                    Err(_) => "validate",
+                    Ok(()) => "accept",
+                },
             },
         };
-        assert_eq!(stop, text(case, "reference"), "{name}");
+        // A case stops where the record says, unless it names an earlier
+        // stop of its own; that is only ever for evidence that the record
+        // lets through.
+        let here = case.get("here").and_then(Value::as_str);
+        if here.is_some() {
+            assert_eq!(text(case, "reference"), "accept", "{name}");
+        }
+        assert_eq!(stop, here.unwrap_or(text(case, "reference")), "{name}");
         *stops.entry(stop).or_default() += 1;
     }
     let stops: Vec<(&str, usize)> = stops.into_iter().collect();
     assert_eq!(
         stops,
-        [("accept", 375), ("assemble", 193), ("validate", 714)]
+        [
+            ("accept", 369),
+            ("assemble", 193),
+            ("authenticate", 6),
+            ("validate", 714)
+        ]
     );
 }
