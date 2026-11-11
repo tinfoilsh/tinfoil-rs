@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::authenticate::{
     CollateralRecorder, Evidence, PcsReplay, Quote, authenticate, canonical_header_name,
-    embedded_root_pem,
+    embedded_root_pem, work,
 };
 use super::differential_tests::{Pool, index, integer, member};
 use super::expectations::assemble;
@@ -50,7 +50,11 @@ struct Recorded {
 
 impl Recorded {
     fn load(id: &str) -> Self {
-        let document = json::parse(CASES.as_bytes()).unwrap();
+        Self::load_from(CASES, id)
+    }
+
+    fn load_from(cases: &str, id: &str) -> Self {
+        let document = json::parse(cases.as_bytes()).unwrap();
         let mut pool = Pool::new(&document);
         let case = member(&document, "cases")
             .as_array()
@@ -1281,6 +1285,111 @@ fn the_recorder_goes_by_the_path_of_the_request() {
     recorder.get(TCB_URL).unwrap();
     assert_eq!(recorder.minimum().unwrap(), 20);
     assert_eq!(recorder.check_issue_dates(now), Ok(()));
+}
+
+#[test]
+fn a_response_is_read_once_and_noted_every_time_it_is_served() {
+    let now = at(2026, 1, 15, 0, 0, 0);
+    let first = "https://pki.example.com/a/tcb";
+    let second = "https://pki.example.com/b/tcb";
+    let responses = [
+        response(
+            first,
+            &edition_body("tcbInfo", 20, Some("2026-01-01T00:00:00Z")),
+        ),
+        response(
+            second,
+            &edition_body("tcbInfo", 99, Some("2026-01-02T00:00:00Z")),
+        ),
+        response(
+            QE_URL,
+            &edition_body("enclaveIdentity", 500, Some("2026-01-01T00:00:00Z")),
+        ),
+    ];
+    work::reset();
+    let mut recorder = CollateralRecorder::new(PcsReplay::new(&responses, now).unwrap());
+    recorder.get(QE_URL).unwrap();
+    // The last response served is the one noted, however often each was
+    // served before and under whatever spelling of its URL.
+    for (url, noted) in [
+        (first, 20),
+        (second, 99),
+        (first, 20),
+        (first, 20),
+        ("https://PKI.example.com/b/tcb", 99),
+        (
+            "HTTPS://pki.example.com/a/tcb?tcbEvaluationDataNumber=7",
+            20,
+        ),
+        (second, 99),
+        // The same response under a path that does not end in `/tcb`
+        // is served and not noted.
+        ("https://pki.example.com/A/TCB", 99),
+        (first, 20),
+    ] {
+        let served = recorder.get(url).unwrap();
+        assert!(served.revocation_list.is_none());
+        assert_eq!(recorder.minimum().unwrap(), noted, "{url}");
+    }
+    for _ in 0..1000 {
+        recorder.get(first).unwrap();
+        recorder.get(second).unwrap();
+        assert!(recorder.get("https://pki.example.com/absent").is_err());
+    }
+    assert_eq!(recorder.minimum().unwrap(), 99);
+    // Three responses were judged and three bodies read, once each.
+    assert_eq!(work::counts(), (3, 3));
+}
+
+const DISTRIBUTION_POINTS: &str =
+    include_str!("../../../tests/data/quote-tdx/distribution_points.json");
+
+/// A quote whose QE identity root names many CRL distribution points: the
+/// same two locations over and over, each recorded with a body that states
+/// nothing, between locations that were not recorded, and the true one
+/// last. The root that names them is read before it is authenticated, so
+/// the work that the list causes must not grow with its length.
+#[test]
+fn the_work_of_authentication_does_not_grow_with_the_distribution_points() {
+    let filler = format!(r#"{{"filler":[{}0]}}"#, "0,".repeat(1 << 20)).into_bytes();
+    let mut counts = Vec::new();
+    for (id, points) in [
+        ("distribution-points/370", 371),
+        ("distribution-points/2", 3),
+    ] {
+        let mut sample = Recorded::load_from(DISTRIBUTION_POINTS, id);
+        // The root certificate is close to the largest that is parsed.
+        let header = &sample.pcs[1].headers["Sgx-Enclave-Identity-Issuer-Chain"][0];
+        assert_eq!(header.len() > 20_000, points > 3, "{id}");
+        // The bodies at the repeated locations are large, and not signed.
+        let mut repeated = 0;
+        for response in &mut sample.pcs {
+            if response.url.starts_with("https://pki.example.com/") {
+                response.body = filler.clone();
+                repeated += 1;
+            }
+        }
+        assert_eq!(repeated, 2);
+        work::reset();
+        let quote = sample.authenticate().unwrap();
+        assert_eq!(quote.tcb_evaluation_data_number(), 17);
+        counts.push(work::counts());
+    }
+    // Six responses are judged (TCB info, QE identity, both revocation
+    // lists and the two repeated locations), and four bodies are read for
+    // an edition, whether the root names 371 locations or 3.
+    assert_eq!(counts, [(6, 4), (6, 4)]);
+}
+
+#[test]
+fn a_quote_with_many_distribution_points_has_its_recorded_outcome() {
+    for id in ["base", "distribution-points/370", "distribution-points/2"] {
+        let quote = Recorded::load_from(DISTRIBUTION_POINTS, id)
+            .authenticate()
+            .unwrap();
+        assert_eq!(quote.tcb_evaluation_data_number(), 17, "{id}");
+        assert_eq!(quote.identity(), "ab".repeat(16), "{id}");
+    }
 }
 
 // ---- Authentication.

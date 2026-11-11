@@ -288,8 +288,11 @@ fn obtain_collateral(
         .get(&pck_crl_url(ca))
         .map_err(|error| error.within("PCK revocation list"))?;
     let pck_crl_issuer = issuer_chain(&response, PCK_CRL_ISSUER_CHAIN_HEADER)?;
-    let pck_crl = Crl::from_der(response.body)
-        .map_err(|error| QuoteError::new(format!("PCK revocation list: {error}")))?;
+    let pck_crl = response
+        .revocation_list
+        .as_deref()
+        .cloned()
+        .ok_or_else(|| QuoteError::new("PCK revocation list: the response is not one"))?;
 
     let locations = qe_identity_issuer.root.crl_distribution_uris()?;
     if locations.is_empty() {
@@ -300,12 +303,16 @@ fn obtain_collateral(
     let mut root_crl = None;
     let mut failure = None;
     for location in &locations {
-        let served = collateral
-            .get(location)
-            .and_then(|response| Ok(Crl::from_der(response.body)?));
+        // Each location costs a lookup: a response is parsed once, however
+        // many locations name it.
+        let served = collateral.get(location).and_then(|response| {
+            response
+                .revocation_list
+                .ok_or_else(|| QuoteError::new("the response is not a revocation list"))
+        });
         match served {
             Ok(crl) => {
-                root_crl = Some(crl);
+                root_crl = Some(crl.as_ref().clone());
                 break;
             }
             Err(error) => failure = Some(error),
