@@ -142,7 +142,7 @@ const ACCEPTED_HERE: &[(&str, usize)] = &[
 /// - a case whose `differs` names a class in [`REFUSED_HERE`] is recorded
 ///   as accepted and is refused here;
 /// - a case whose `differs` names a class in [`ACCEPTED_HERE`] is recorded
-///   as rejected and yields a pin here.
+///   as rejected and yields a pin here; the case carries that pin.
 ///
 /// Every case is checked against its group, and each class must have
 /// exactly the listed number of cases.
@@ -160,8 +160,14 @@ fn configs_agree_with_the_recorded_probes() {
         let class = case.text("differs");
         if !class.is_empty() {
             *differing.entry((recorded, class)).or_insert(0_usize) += 1;
-            if outcome.is_ok() == recorded {
-                failures.push(format!("{name}: no longer differs ({class})"));
+            match outcome {
+                Ok(_) if recorded => failures.push(format!("{name}: no longer refused ({class})")),
+                Err(_) if !recorded => failures.push(format!("{name}: no longer read ({class})")),
+                // The case carries the pin that is read here.
+                Ok(pin) if pin != reference(case.text("tag"), case.text("digest")) => {
+                    failures.push(format!("{name}: read {pin:?}"));
+                }
+                _ => {}
             }
             continue;
         }
