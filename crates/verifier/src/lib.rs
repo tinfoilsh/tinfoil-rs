@@ -15,6 +15,8 @@
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
 
 mod canonical;
+#[cfg(test)]
+mod differential_tests;
 mod document;
 mod embedded;
 mod endorsement;

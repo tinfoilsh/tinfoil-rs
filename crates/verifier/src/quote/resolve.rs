@@ -165,7 +165,10 @@ pub fn complete(expected: &Expected) -> Result<Measurement, AssemblyError> {
 
 /// Parses a register of authenticated reference values, with `label` in
 /// front of the error.
-pub(super) fn register(label: impl std::fmt::Display, value: &str) -> Result<Register, AssemblyError> {
+pub(super) fn register(
+    label: impl std::fmt::Display,
+    value: &str,
+) -> Result<Register, AssemblyError> {
     crate::measurement::parse_register(value)
         .map_err(|message| AssemblyError::new(format!("{label}: {message}")))
 }

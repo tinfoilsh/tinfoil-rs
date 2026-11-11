@@ -86,10 +86,7 @@ impl<'a> LegacyReferenceValues<'a> {
                 )?;
                 platform_measurement_name = Some(name.to_owned());
                 let Expected::Tdx {
-                    mrtd,
-                    rtmr0,
-                    rtmr3,
-                    ..
+                    mrtd, rtmr0, rtmr3, ..
                 } = &mut expected
                 else {
                     return Err(AssemblyError::new(

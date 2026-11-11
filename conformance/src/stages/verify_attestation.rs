@@ -5,9 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use tinfoil_verifier::{Error, Expected, Layer, Verifier};
 
-use super::authenticate_quote::{
-    SEV_SNP_MEASUREMENT_TYPE, TDX_MEASUREMENT_TYPE, measurement,
-};
+use super::authenticate_quote::{SEV_SNP_MEASUREMENT_TYPE, TDX_MEASUREMENT_TYPE, measurement};
 use super::{accepted, rejected};
 use crate::{
     AcceptOutputs, CODE_ENVELOPE_REJECTED, CODE_MALFORMED_INPUT, CODE_POLICY_REJECTED,
@@ -20,7 +18,9 @@ use crate::{
 /// platform that the wire contract does not know.
 fn expected(registers: &Expected) -> Option<Measurement> {
     let hex = |register: &Option<tinfoil_verifier::Register>| {
-        register.map(|register| register.to_string()).unwrap_or_default()
+        register
+            .map(|register| register.to_string())
+            .unwrap_or_default()
     };
     Some(match registers {
         Expected::SevSnp { launch } => Measurement {

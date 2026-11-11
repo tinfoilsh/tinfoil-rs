@@ -404,10 +404,25 @@ impl Verifier {
         repo: &str,
         verification_time: SystemTime,
     ) -> Result<Verification, Error> {
+        let now = Instant::from_system_time(verification_time)
+            .ok_or_else(|| UsageError::new("verification time is out of range"))?;
+        self.verify_at(doc, nonce, repo, now)
+    }
+
+    /// Verifies a document at an instant of the verifier's own time type,
+    /// which keeps nanoseconds on every platform.
+    pub(crate) fn verify_at(
+        &self,
+        doc: &[u8],
+        nonce: &[u8],
+        repo: &str,
+        now: Instant,
+    ) -> Result<Verification, Error> {
         let trust = self.trust.as_ref().map_err(|cause| {
             UsageError::new(format!("embedded trust material is unusable: {cause}"))
         })?;
-        let now = Instant::from_system_time(verification_time)
+        let verified_at = now
+            .to_system_time()
             .ok_or_else(|| UsageError::new("verification time is out of range"))?;
         let rejected_at =
             |layer: Layer| move |cause: BoxError| Error::from(VerificationError::new(layer, cause));
@@ -478,7 +493,7 @@ impl Verifier {
                     name: VERIFIER_NAME.to_owned(),
                     version: VERIFIER_VERSION.to_owned(),
                 },
-                verified_at: verification_time,
+                verified_at,
             },
         })
     }
@@ -617,9 +632,8 @@ impl Verifier {
                 Some(name) => parse_name(name).map_err(UsageError::new)?,
                 None => ("", ""),
             };
-            let differs = |pin: &Option<String>, value: &str| {
-                pin.as_deref().is_some_and(|pin| pin != value)
-            };
+            let differs =
+                |pin: &Option<String>, value: &str| pin.as_deref().is_some_and(|pin| pin != value);
             if differs(&pins.identity, identity)
                 || differs(&pins.revision, revision)
                 || differs(&pins.digest, &embedded.digest)
@@ -664,7 +678,8 @@ impl Verifier {
         let hash: [u8; SHA256_SIZE] = digest
             .try_into()
             .map_err(|_| Refused::rejected("config digest is not a SHA-256"))?;
-        let (measurements, runtime) = self.resolve_runtime(trust, document, &expected_runtime, now)?;
+        let (measurements, runtime) =
+            self.resolve_runtime(trust, document, &expected_runtime, now)?;
         let (endorsements, platform) = self.resolve_platform(trust, document, now)?;
         let freshness_expires_at = freshness_expiration(
             self.freshness_max_age,
@@ -806,7 +821,9 @@ impl Verifier {
             ));
         }
         let material = document.runtime()?;
-        let authenticated = trust.endorsements.authenticate_runtime(material, expected)?;
+        let authenticated = trust
+            .endorsements
+            .authenticate_runtime(material, expected)?;
         let approved_at = self
             .authenticate_artifact_freshness(
                 trust,

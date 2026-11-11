@@ -77,7 +77,7 @@ impl VendorRoots {
     /// ARK, PEM) that replaces the embedded chain of every product line,
     /// and an Intel SGX root certificate (PEM). `None` keeps the embedded
     /// anchor of that vendor.
-    #[cfg(tinfoil_conformance)]
+    #[cfg(any(test, tinfoil_conformance))]
     pub fn dangerous_test_only(
         amd_cert_chain_pem: Option<Vec<u8>>,
         intel_root_pem: Option<Vec<u8>>,
@@ -377,8 +377,7 @@ pub fn assemble_with_report_data<'q>(
                     resolution.policy_name
                 )));
             };
-            let expectations =
-                tdx::assemble(policy, &expected, report_data, &resolved.config_id)?;
+            let expectations = tdx::assemble(policy, &expected, report_data, &resolved.config_id)?;
             Ok(AssembledPolicy::Tdx {
                 quote,
                 expectations: Box::new(expectations),

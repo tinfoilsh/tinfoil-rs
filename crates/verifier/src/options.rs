@@ -383,11 +383,23 @@ impl VerifierBuilder {
         self
     }
 
-    /// Replaces the provenance client, for tests that mint their own
-    /// Sigstore material.
+    /// Replaces trust anchors, for tests that verify minted material: a
+    /// Sigstore trusted root document, an AMD certificate chain and an
+    /// Intel root certificate. `None` keeps the embedded anchor.
     #[cfg(test)]
-    pub(crate) fn endorsements(mut self, client: ProvenanceClient) -> Self {
-        self.endorsements = Some(client);
+    pub(crate) fn test_roots(
+        mut self,
+        trusted_root_json: Option<&[u8]>,
+        amd_cert_chain_pem: Option<Vec<u8>>,
+        intel_root_pem: Option<Vec<u8>>,
+    ) -> Self {
+        if let Some(trusted_root_json) = trusted_root_json {
+            match ProvenanceClient::from_trusted_root_json(trusted_root_json) {
+                Ok(client) => self.endorsements = Some(client),
+                Err(cause) => self.fail(cause),
+            }
+        }
+        self.vendor_roots = VendorRoots::dangerous_test_only(amd_cert_chain_pem, intel_root_pem);
         self
     }
 
@@ -402,7 +414,8 @@ impl VerifierBuilder {
     /// config authorizer or config signing keys; freshness signing keys
     /// when both the runtime and the platform are embedded.
     pub fn build(self) -> Result<Verifier, Error> {
-        self.build_parts().map_err(|cause| UsageError::new(cause).into())
+        self.build_parts()
+            .map_err(|cause| UsageError::new(cause).into())
     }
 
     /// Builds the verifier with the defaults. A failure can only come from
