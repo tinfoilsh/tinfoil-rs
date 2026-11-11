@@ -14,42 +14,48 @@
 // lints (see clippy.toml). Overflow in a test is a test failure, not a risk.
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
 
-// The verification entry point that drives the internal modules is not in
-// the crate yet, so much of them has no caller in an ordinary build.
-#[allow(dead_code)]
 mod canonical;
-#[allow(dead_code, unused_imports)]
 mod document;
-#[allow(dead_code, unused_imports)]
+mod embedded;
 mod endorsement;
 mod error;
-#[allow(dead_code)]
+mod fingerprint;
 mod instant;
-#[allow(dead_code)]
 mod json;
 mod measurement;
-#[allow(dead_code, unused_imports)]
+mod options;
 mod policy;
 #[cfg(test)]
 mod probes;
-#[allow(dead_code, unused_imports, unused_variables)]
 mod quote;
-#[allow(dead_code, unused_imports)]
 mod runtime;
-#[allow(dead_code)]
 mod semver;
-#[allow(dead_code, unused_imports, unused_variables)]
 mod sigstore;
-#[allow(dead_code, unused_macros, unused_imports)]
 mod stub;
-#[allow(dead_code, unused_imports)]
 mod trust;
-#[allow(dead_code, unused_imports, unused_variables)]
+mod verification;
+mod verifier;
 mod x509;
 
-pub use document::{NONCE_SIZE, random_nonce};
-pub use error::{Error, Layer, UsageError, VerificationError};
+pub use document::collateral::RuntimeReference;
+pub use document::{
+    ATTESTATION_V3_FORMAT, CRYPTO_MATERIAL_ID_HPKE, CRYPTO_MATERIAL_ID_TLS,
+    CRYPTO_MATERIAL_V1_FORMAT, CryptoMaterialItem, DEVICE_EVIDENCE_V1_FORMAT,
+    KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_SPKI_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT, NONCE_SIZE,
+    NVIDIA_GPU_EVIDENCE_V1_FORMAT, REPORT_DATA_V1_ALGORITHM, SEV_SNP_REPORT_V1_FORMAT,
+    TDX_QUOTE_V1_FORMAT, random_nonce,
+};
+pub use embedded::{EmbeddedConfig, EmbeddedReferences};
+pub use endorsement::{PUBLIC_REGISTRY_ID, Reference};
+pub use error::{BoxError, Error, Layer, UsageError, VerificationError};
+pub use fingerprint::cert_pubkey_fp;
 pub use measurement::{Expected, Measurement, REGISTER_SIZE, Register};
+pub use options::{ConfigEndorsement, PublicKey, VerifierBuilder};
+pub use verification::{
+    ArtifactVerification, ConfigVerification, ReferenceSource, SoftwareIdentity, Verification,
+    VerificationMetadata, crypto_material_data,
+};
+pub use verifier::{Verifier, parse_reference};
 
 /// Internal modules, exposed to the conformance adapter only. This module
 /// exists only in builds that pass `--cfg tinfoil_conformance`; it is not
