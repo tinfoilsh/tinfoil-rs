@@ -2332,8 +2332,10 @@ dependencies = [
 name = "tinfoil-conformance"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
+ "tinfoil-verifier",
 ]
 
 [[package]]
@@ -2363,6 +2365,11 @@ dependencies = [
 [[package]]
 name = "tinfoil-verifier"
 version = "0.1.0"
+dependencies = [
+ "base64",
+ "getrandom 0.3.4",
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "tinystr"

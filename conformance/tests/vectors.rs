@@ -37,7 +37,13 @@ const FACTS: [&str; 7] = [
 
 /// Vector directories whose fixtures must all pass, not merely not fail.
 /// A directory is added here when the stages behind it are implemented.
-const MUST_PASS: [&str; 0] = [];
+#[cfg(tinfoil_conformance)]
+const MUST_PASS: &[&str] = &["envelope"];
+
+/// Without the stages compiled in, every fixture is skipped and none is
+/// required to pass; a fixture that runs must still not fail.
+#[cfg(not(tinfoil_conformance))]
+const MUST_PASS: &[&str] = &[];
 
 enum Outcome {
     Pass,
@@ -77,6 +83,16 @@ fn shared_vectors() {
 
     for (directory, (passed, skipped)) in &counts {
         eprintln!("{directory}: {passed} passed, {skipped} skipped");
+    }
+    for directory in MUST_PASS {
+        if counts
+            .get(*directory)
+            .is_none_or(|(passed, _)| *passed == 0)
+        {
+            failures.push(format!(
+                "{directory}: no fixture of a must-pass directory ran"
+            ));
+        }
     }
     assert!(
         failures.is_empty(),
