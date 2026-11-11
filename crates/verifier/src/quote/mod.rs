@@ -24,7 +24,7 @@ use crate::document::collateral::CpuEndorsements;
 use crate::document::{CpuEvidence, Document, REPORT_DATA_SIZE};
 use crate::instant::Instant;
 use crate::measurement::{Expected, Measurement};
-use crate::stub::{message_error, pending};
+use crate::stub::message_error;
 
 pub use config::ConfigReferenceValues;
 pub use legacy::LegacyReferenceValues;
@@ -313,7 +313,15 @@ pub fn assemble<'q>(
     pins: Option<&Expected>,
     quote: &'q Authenticated,
 ) -> Result<AssembledPolicy<'q>, AssemblyError> {
-    pending("quote::assemble")
+    let report_data = document.expected_report_data().ok_or_else(|| {
+        AssemblyError::new("a document whose challenge was checked against a nonce is required")
+    })?;
+    if !quote.is_evidence(document.cpu_evidence()) {
+        return Err(AssemblyError::new(
+            "authenticated quote is not this document's CPU evidence",
+        ));
+    }
+    assemble_with_report_data(references, pins, &report_data, quote)
 }
 
 /// Assembles the policy for a quote against an explicit report data value.
@@ -335,5 +343,55 @@ pub fn assemble_with_report_data<'q>(
     report_data: &[u8; REPORT_DATA_SIZE],
     quote: &'q Authenticated,
 ) -> Result<AssembledPolicy<'q>, AssemblyError> {
-    pending("quote::assemble_with_report_data")
+    let resolved = match references {
+        ReferenceValues::Legacy(values) => values.resolve(quote, pins)?,
+        ReferenceValues::Config(values) => values.resolve(quote, pins)?,
+    };
+    let expected = resolve::complete(&resolved.expected)?;
+    let resolution = Resolution {
+        code_measurement: resolved.code,
+        policy_name: resolved.policy_name,
+        platform_measurement_name: resolved.platform_measurement_name,
+    };
+    match (&expected, quote) {
+        (Measurement::SevSnp { launch }, Authenticated::SevSnp(quote)) => {
+            let Some(policy) = resolved.policy.as_sev_snp() else {
+                return Err(AssemblyError::new(format!(
+                    "policy {:?} is not for sev-snp",
+                    resolution.policy_name
+                )));
+            };
+            let mut policy = policy.clone();
+            policy.host_data = resolved.host_data;
+            let expectations = sev::assemble(&policy, quote, *launch, report_data)?;
+            Ok(AssembledPolicy::SevSnp {
+                quote,
+                expectations: Box::new(expectations),
+                resolution,
+            })
+        }
+        (Measurement::Tdx { .. }, Authenticated::Tdx(quote)) => {
+            let Some(policy) = resolved.policy.as_tdx() else {
+                return Err(AssemblyError::new(format!(
+                    "policy {:?} is not for tdx",
+                    resolution.policy_name
+                )));
+            };
+            let expectations =
+                tdx::assemble(policy, &expected, report_data, &resolved.config_id)?;
+            Ok(AssembledPolicy::Tdx {
+                quote,
+                expectations: Box::new(expectations),
+                resolution,
+            })
+        }
+        (Measurement::SevSnp { .. }, quote) => Err(AssemblyError::new(format!(
+            "expected an SEV-SNP measurement for a {} quote",
+            quote.platform()
+        ))),
+        (Measurement::Tdx { .. }, quote) => Err(AssemblyError::new(format!(
+            "expected a TDX measurement for a {} quote",
+            quote.platform()
+        ))),
+    }
 }
