@@ -417,21 +417,51 @@ pub fn bit_string(content: &[u8]) -> Result<(u8, &[u8]), X509Error> {
     }
 }
 
-/// Checks that an OBJECT IDENTIFIER's contents are in the shortest form:
-/// not empty, no sub-identifier that starts with a padding octet, and a
-/// last sub-identifier that ends.
+/// The largest value of one sub-identifier of an OBJECT IDENTIFIER.
+pub const MAX_OID_SUB_IDENTIFIER: u64 = (1 << 31) - 1;
+
+/// Checks the contents of an OBJECT IDENTIFIER.
+///
+/// The contents are a run of sub-identifiers, each in base 128 with the
+/// high bit set on every octet but its last. Rules, each an error when
+/// broken:
+///
+/// - the contents are not empty, and the last sub-identifier ends;
+/// - no sub-identifier starts with the padding octet `80`: each is in its
+///   shortest form;
+/// - no sub-identifier is longer than five octets or greater than
+///   [`MAX_OID_SUB_IDENTIFIER`]. The first sub-identifier, which packs the
+///   first two arcs of the identifier, is bound by the same limit.
 pub fn check_object_identifier(content: &[u8]) -> Result<(), X509Error> {
-    let mut at_start = true;
+    let malformed = || X509Error::new("malformed DER OBJECT IDENTIFIER");
+    if content.is_empty() {
+        return Err(malformed());
+    }
+    let mut value = 0u64;
+    let mut octets = 0usize;
     for byte in content {
-        if at_start && *byte == 0x80 {
+        if octets == 0 && *byte == 0x80 {
             return Err(X509Error::new(
                 "DER OBJECT IDENTIFIER is not in its shortest form",
             ));
         }
-        at_start = byte & 0x80 == 0;
+        octets = octets.saturating_add(1);
+        // The value is below 2^31 before each step, so nothing saturates.
+        value = value
+            .saturating_mul(128)
+            .saturating_add(u64::from(byte & 0x7f));
+        if octets > 5 || value > MAX_OID_SUB_IDENTIFIER {
+            return Err(X509Error::new(
+                "DER OBJECT IDENTIFIER has a sub-identifier that is too large",
+            ));
+        }
+        if byte & 0x80 == 0 {
+            value = 0;
+            octets = 0;
+        }
     }
-    if content.is_empty() || !at_start {
-        return Err(X509Error::new("malformed DER OBJECT IDENTIFIER"));
+    if octets != 0 {
+        return Err(malformed());
     }
     Ok(())
 }
@@ -772,6 +802,20 @@ mod tests {
         assert!(check_object_identifier(&[0x80, 0x2a]).is_err());
         assert!(check_object_identifier(&[0x2a, 0x86]).is_err());
         assert!(check_object_identifier(&[]).is_err());
+        // The largest sub-identifier, in first place and later, and the
+        // values just past it.
+        check_object_identifier(&[0x87, 0xff, 0xff, 0xff, 0x7f]).unwrap();
+        check_object_identifier(&[0x2a, 0x87, 0xff, 0xff, 0xff, 0x7f, 0x01]).unwrap();
+        check_object_identifier(&[0x2a, 0x81, 0x80, 0x80, 0x80, 0x00]).unwrap();
+        for too_large in [
+            &[0x2a, 0x88, 0x80, 0x80, 0x80, 0x00][..],
+            &[0x88, 0x80, 0x80, 0x80, 0x00, 0x01],
+            &[0x2a, 0xff, 0xff, 0xff, 0xff, 0x7f],
+            &[0x2a, 0x81, 0x80, 0x80, 0x80, 0x80, 0x00],
+            &[0x2a, 0x90, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00],
+        ] {
+            assert!(check_object_identifier(too_large).is_err(), "{too_large:02x?}");
+        }
 
         // SEQUENCE { [0] { SET { OID 1.2.3 } }, OCTET STRING { OID, padded } }
         let good = [
