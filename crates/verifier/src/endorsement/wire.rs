@@ -173,8 +173,8 @@ mod tests {
     }
 
     #[test]
-    fn a_digest_map_of_any_size_is_read_in_one_pass() {
-        // As many entries as a statement of the greatest size can hold.
+    fn a_large_digest_map_keeps_every_entry_at_its_place() {
+        // Thousands of entries, within the size that a statement may have.
         const ENTRIES: usize = 12_000;
         let digests: Vec<String> = (0..ENTRIES)
             .map(|index| format!(r#""{index}":"""#))
