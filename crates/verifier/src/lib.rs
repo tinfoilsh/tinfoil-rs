@@ -34,6 +34,8 @@ mod probes;
 mod runtime;
 #[allow(dead_code)]
 mod semver;
+#[allow(dead_code, unused_imports, unused_variables)]
+mod sigstore;
 #[allow(dead_code, unused_macros, unused_imports)]
 mod stub;
 #[allow(dead_code, unused_imports, unused_variables)]
