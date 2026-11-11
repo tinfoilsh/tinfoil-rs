@@ -90,8 +90,11 @@ impl Crl {
     ///
     /// Rules, each an error when broken:
     ///
-    /// - at most [`MAX_CRL_SIZE`] bytes of canonical DER with nothing after
-    ///   it, and nothing unread inside it;
+    /// - at most [`MAX_CRL_SIZE`] bytes of DER, with definite lengths in
+    ///   their shortest form, nothing after the list and nothing unread
+    ///   inside it. The order of the elements of a SET inside the issuer
+    ///   name is not checked: the name is used only as bytes, compared with
+    ///   a certificate's subject;
     /// - version 2;
     /// - the inner and outer signature algorithms are identical, and the
     ///   algorithm's object identifier is in its shortest form;
