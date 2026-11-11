@@ -28,6 +28,8 @@ mod measurement;
 mod policy;
 #[cfg(test)]
 mod probes;
+#[allow(dead_code, unused_imports)]
+mod runtime;
 #[allow(dead_code)]
 mod semver;
 
