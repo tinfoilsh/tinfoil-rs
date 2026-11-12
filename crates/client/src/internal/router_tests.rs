@@ -582,6 +582,30 @@ async fn the_list_and_the_probes_share_thirty_seconds_and_the_fallback_is_outsid
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_router_that_would_answer_at_once_is_not_tried_after_the_budget() {
+    unstuck(async {
+        // The first probe fails at the very instant that the budget ends.
+        let world = World::new(vec![
+            (
+                "a.example",
+                vec![Step::After(
+                    DISCOVERY_BUDGET,
+                    Err(Error::network("slow failure")),
+                )],
+            ),
+            ("b.example", vec![good("b")]),
+            (FALLBACK_ROUTER, vec![good("fallback")]),
+        ]);
+        let transport = discovered(&world, hosts(&["a.example", "b.example"]))
+            .await
+            .unwrap();
+        assert_eq!(transport.current().name, "fallback");
+        assert_eq!(world.asked(), ["a.example", FALLBACK_ROUTER]);
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_list_that_takes_the_whole_budget_leaves_only_the_fallback() {
     unstuck(async {
         let world = World::new(vec![
