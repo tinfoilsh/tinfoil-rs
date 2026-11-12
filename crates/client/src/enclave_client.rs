@@ -291,6 +291,10 @@ impl EnclaveHttpClientBuilder {
     ///
     /// Dropping the future stops the verification and closes its
     /// connection. No client exists and nothing is left behind.
+    ///
+    /// **Not implemented yet.** In this version of the crate the call always
+    /// fails with an error that says so; the text above is the contract
+    /// that it will meet.
     pub async fn connect(self) -> Result<EnclaveHttpClient, Error> {
         Err(Error::not_implemented("EnclaveHttpClient::connect"))
     }

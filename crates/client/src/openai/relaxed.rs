@@ -63,6 +63,10 @@ impl RelaxedChat<'_> {
     /// Dropping the future cancels the request, as
     /// [`EnclaveHttpClient::execute`](crate::EnclaveHttpClient::execute)
     /// describes.
+    ///
+    /// **Not implemented yet.** In this version of the crate the call always
+    /// fails with an error that says so; the text above is the contract
+    /// that it will meet.
     pub async fn create(&self, body: impl Into<Value>) -> Result<RelaxedResponse, OpenAIError> {
         Err(not_implemented("RelaxedChat::create"))
     }
@@ -75,6 +79,10 @@ impl RelaxedChat<'_> {
     /// The future resolves when the response headers have arrived; an
     /// error status is reported then. Dropping the future cancels the
     /// request, and dropping the stream closes the connection.
+    ///
+    /// **Not implemented yet.** In this version of the crate the call always
+    /// fails with an error that says so; the text above is the contract
+    /// that it will meet.
     pub async fn create_stream(
         &self,
         body: impl Into<Value>,

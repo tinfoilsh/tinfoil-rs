@@ -159,6 +159,10 @@ impl Client {
     ///
     /// The errors and the cancel safety are those of
     /// [`RouterHttpClientBuilder::connect`] with no option set.
+    ///
+    /// **Not implemented yet.** In this version of the crate the call always
+    /// fails with an error that says so; the text above is the contract
+    /// that it will meet.
     pub async fn connect(config: OpenAIConfig) -> Result<Self, Error> {
         Err(Error::not_implemented("Client::connect"))
     }
@@ -362,6 +366,10 @@ impl EnclaveOpenAIClientBuilder {
     /// Checks the options, verifies the enclave and returns the client, as
     /// [`EnclaveHttpClientBuilder::connect`] does, with its errors and its
     /// cancel safety.
+    ///
+    /// **Not implemented yet.** In this version of the crate the call always
+    /// fails with an error that says so; the text above is the contract
+    /// that it will meet.
     pub async fn connect(self) -> Result<EnclaveOpenAIClient, Error> {
         Err(Error::not_implemented("EnclaveOpenAIClient::connect"))
     }
@@ -382,6 +390,10 @@ impl RouterOpenAIClientBuilder {
     /// Checks the options, discovers and verifies a router and returns the
     /// client, as [`RouterHttpClientBuilder::connect`] does, with its
     /// errors and its cancel safety.
+    ///
+    /// **Not implemented yet.** In this version of the crate the call always
+    /// fails with an error that says so; the text above is the contract
+    /// that it will meet.
     pub async fn connect(self) -> Result<RouterOpenAIClient, Error> {
         Err(Error::not_implemented("RouterOpenAIClient::connect"))
     }

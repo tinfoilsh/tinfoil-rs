@@ -140,6 +140,10 @@ impl GatewayOpenAIClientBuilder {
     /// Checks the options, fetches the catalog and returns the client, as
     /// [`GatewayHttpClientBuilder::connect`] does, with its errors and its
     /// cancel safety.
+    ///
+    /// **Not implemented yet.** In this version of the crate the call always
+    /// fails with an error that says so; the text above is the contract
+    /// that it will meet.
     pub async fn connect(self) -> Result<GatewayOpenAIClient, Error> {
         Err(Error::not_implemented("GatewayOpenAIClient::connect"))
     }

@@ -33,6 +33,10 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<Value, OpenAIError>> + S
 /// - a payload is not JSON: the error carries the payload.
 ///
 /// Dropping the returned stream drops the byte stream.
+///
+/// **Not implemented yet.** In this version of the crate the returned
+/// stream drops `byte_stream`, yields one error that says so and ends;
+/// the text above is the contract that it will meet.
 pub fn parse_event_stream<S, E>(byte_stream: S) -> EventStream
 where
     S: Stream<Item = Result<Bytes, E>> + Send + 'static,

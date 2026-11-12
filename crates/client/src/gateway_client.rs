@@ -85,6 +85,10 @@ pub struct ReplicaVerification {
 /// which is a configuration error.
 ///
 /// Dropping the future closes the connection and leaves nothing behind.
+///
+/// **Not implemented yet.** In this version of the crate the call always
+/// fails with an error that says so; the text above is the contract
+/// that it will meet.
 pub async fn fetch_catalog(host: &str) -> Result<Catalog, Error> {
     crate::internal::gateway::fetch_catalog(host).await
 }
@@ -328,6 +332,10 @@ impl GatewayHttpClientBuilder {
     ///
     /// Dropping the future closes the catalog fetch. No client exists.
     /// The cache secret file, if this call created it, stays.
+    ///
+    /// **Not implemented yet.** In this version of the crate the call always
+    /// fails with an error that says so; the text above is the contract
+    /// that it will meet.
     pub async fn connect(self) -> Result<GatewayHttpClient, Error> {
         Err(Error::not_implemented("GatewayHttpClient::connect"))
     }
