@@ -390,7 +390,7 @@ impl Verifier {
     ///
     /// # Errors
     ///
-    /// [`Error::Usage`] for an empty `repo`, a nonce of the wrong length,
+    /// [`Error::Usage`] for a `repo` of `Some("")`, a nonce of the wrong length,
     /// a `repo` that this verifier cannot verify against, or a clock outside the years
     /// 0000 to 9999; [`Error::Verification`], with the layer that rejected
     /// it, for a document that must not be trusted.
