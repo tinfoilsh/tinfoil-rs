@@ -1051,15 +1051,48 @@ async fn an_error_to_an_empty_streamed_body_passes_through() {
 }
 
 #[tokio::test]
-async fn the_key_configuration_problem_to_an_empty_streamed_body_is_a_key_failure() {
+async fn the_key_configuration_problem_to_an_empty_streamed_body_is_an_error_but_no_key_failure() {
     let key = key(1);
-    let server = serve(&key, |_| Reply::key_mismatch()).await;
-    let failure = bound(&key)
-        .round_trip(post(server.url("/v1/chat"), empty_stream()))
+    let server = serve(&key, |seen| {
+        if seen.target == "/problem" {
+            Reply::key_mismatch()
+        } else {
+            Reply::ok("ok")
+        }
+    })
+    .await;
+    let (script, transport) = transport(vec![evidence("a", Some(&key.public_hex))]).await;
+
+    let result = transport
+        .round_trip(post(server.url("/problem"), empty_stream()))
+        .await;
+    let error = ordinary(result, ErrorKind::Attestation);
+    assert!(error.to_string().contains("sent unsealed"), "{error}");
+    assert!(!server.seen()[0].sealed);
+
+    // The verification stays: the next request is sent under it.
+    let response = transport
+        .round_trip(post(server.url("/v1/chat"), "{}"))
+        .await
+        .expect("a response");
+    assert_eq!(text(response).await, "ok");
+    assert_eq!(script.calls(), 1);
+}
+
+#[tokio::test]
+async fn the_key_configuration_problem_to_a_streamed_body_with_data_is_a_key_failure() {
+    let (attested, held) = (key(1), key(2));
+    let server = serve(&held, |_| Reply::ok("unreachable")).await;
+    let (script, transport) = transport(vec![evidence("a", Some(&attested.public_hex))]).await;
+    let parts = ["", "data"].map(Ok::<_, std::io::Error>);
+    let body = reqwest::Body::wrap_stream(futures_util::stream::iter(parts));
+
+    let failure = transport
+        .round_trip(post(server.url("/v1/chat"), body))
         .await
         .expect_err("rejected");
-    assert_eq!(failure.key, KeyFailure::PeerLacksKey);
-    assert_eq!(failure.error.kind(), ErrorKind::Attestation);
+    assert_eq!(failure.key, KeyFailure::Rejected);
+    assert_eq!(script.calls(), 1);
 }
 
 #[tokio::test]

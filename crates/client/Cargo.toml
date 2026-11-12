@@ -62,6 +62,8 @@ reqwest = { version = "0.13.5", default-features = false, features = ["json", "q
 http = "1"
 # The host type of the URLs that reqwest takes.
 url = "2"
+# Observes whether a streamed request body produces any data.
+http-body-util = "0.1"
 
 # TLS, on the `ring` provider only. `default-features = false` keeps
 # `aws_lc_rs` out of rustls's feature set.

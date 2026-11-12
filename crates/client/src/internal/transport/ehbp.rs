@@ -3,8 +3,10 @@
 use std::error::Error as StdError;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures_util::StreamExt;
+use http_body_util::BodyExt;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderName, TRANSFER_ENCODING, UPGRADE};
 use reqwest::{Method, Request, Response, ResponseBuilderExt, StatusCode};
 use tinfoil_ehbp::{Code, ServerIdentity};
@@ -48,8 +50,9 @@ const MAX_PROBLEM_BYTES: usize = 64 * 1024;
 ///   out without a body and without the protocol's header, so no response
 ///   to it can be opened; the rules for a sealed request are applied to
 ///   the response all the same. A `2xx` response, or one that carries a
-///   response nonce, is an attestation error; the key-configuration
-///   problem is a rejection; any other response passes through.
+///   response nonce, is an attestation error. So is the key-configuration
+///   problem, but it is no rejection: nothing was sealed to a key, so the
+///   verification stays. Any other response passes through.
 /// - **Responses.** A response to a sealed request carries the protocol's
 ///   response nonce, and is opened whatever its status. Without the nonce,
 ///   a response with a status outside `2xx` passes through as an ordinary
@@ -197,7 +200,7 @@ struct Sealing {
 }
 
 impl RoundTrip for Sealing {
-    fn round_trip(&self, request: Request) -> BoxFuture<Result<Response, Failure>> {
+    fn round_trip(&self, mut request: Request) -> BoxFuture<Result<Response, Failure>> {
         // The protocol's client is scoped to one origin and refuses any
         // other. The origin of a request is checked by the layer in front
         // of the transport, so each request gets a client for its own
@@ -215,28 +218,46 @@ impl RoundTrip for Sealing {
         );
         // A body in memory is known to be empty or not, and the protocol's
         // client treats it accordingly. A stream is a body whatever it
-        // produces.
-        let streamed = request.body().is_some_and(|body| body.as_bytes().is_none());
+        // produces, so what it produces is observed.
+        let produced = watch_stream(&mut request);
         Box::pin(async move {
             let sealing = sealing.map_err(failure)?;
             let response = sealing.execute(request).await.map_err(failure)?;
-            // The client holds the keys of the response for as long as the
-            // response is being opened, and this client has sent no other
-            // request. Without them, the response is as the server sent it:
-            // the request was sealed and the client let an error without a
-            // nonce through, or the stream was empty and nothing was
-            // sealed. The checks below change nothing in the first case.
-            if streamed && sealing.get_session_recovery_token().is_none() {
-                return unopened(response).await;
+            // The client reads a stream up to its first data, or to its
+            // end, before it sends anything. A stream that has produced
+            // none by now was empty, and the request went out unsealed.
+            if produced.is_some_and(|produced| !produced.load(Ordering::SeqCst)) {
+                return unsealed(response).await;
             }
             Ok(response)
         })
     }
 }
 
+/// Puts a watch on the body of `request` if it is a stream: the flag is
+/// set once the stream has produced data. `None` for a request without a
+/// body or with a body in memory.
+fn watch_stream(request: &mut Request) -> Option<Arc<AtomicBool>> {
+    if request.body()?.as_bytes().is_some() {
+        return None;
+    }
+    let body = request.body_mut().take()?;
+    let produced = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&produced);
+    let watched = body.map_frame(move |frame| {
+        if frame.data_ref().is_some_and(|data| !data.is_empty()) {
+            flag.store(true, Ordering::SeqCst);
+        }
+        frame
+    });
+    *request.body_mut() = Some(reqwest::Body::wrap(watched));
+    Some(produced)
+}
+
 /// Applies the rules for the response to a sealed request to `response`,
-/// which was not opened.
-async fn unopened(response: Response) -> Result<Response, Failure> {
+/// the answer to a request whose streamed body was empty and which was
+/// therefore sent unsealed.
+async fn unsealed(response: Response) -> Result<Response, Failure> {
     if response.status().is_success()
         || response
             .headers()
@@ -268,9 +289,11 @@ fn is_problem(response: &Response) -> bool {
         })
 }
 
-/// Reads the body of a `422` problem response, up to
-/// [`MAX_PROBLEM_BYTES`]. The key-configuration problem is a rejection;
-/// anything else is returned as a response with the same body.
+/// Reads the body of a `422` problem response to an unsealed request, up
+/// to [`MAX_PROBLEM_BYTES`]. The key-configuration problem is an error, as
+/// it is for a request with a body, but it says nothing about the keys:
+/// the request carried nothing that was sealed to one, so the verification
+/// stays. Anything else is returned as a response with the same body.
 async fn key_configuration_problem(mut response: Response) -> Result<Response, Failure> {
     let mut read = Vec::new();
     let mut size = 0usize;
@@ -295,9 +318,11 @@ async fn key_configuration_problem(mut response: Response) -> Result<Response, F
             .and_then(|problem| problem.get("type"))
             .and_then(serde_json::Value::as_str);
         if problem_type == Some(tinfoil_ehbp::KEY_CONFIG_PROBLEM_TYPE) {
-            return Err(Failure::peer_lacks_key(Error::attestation(
-                "the enclave reported a key configuration mismatch",
-            )));
+            return Err(Error::attestation(
+                "the server reported a key configuration mismatch for a request whose \
+                 streamed body produced no data and was sent unsealed",
+            )
+            .into());
         }
     }
 
