@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use crate::error::{Error, ErrorKind};
 use crate::internal::BoxFuture;
 use crate::internal::enclave::Evidence;
-use crate::internal::fetch::{compiled_in_roots, lower_hex, never_proxied, route};
+use crate::internal::fetch::{alpn_protocols, compiled_in_roots, lower_hex, never_proxied, route};
 use crate::internal::transport::{Failure, Mode, RoundTrip};
 
 /// Pins connections to the TLS key of the current verification.
@@ -30,7 +30,9 @@ use crate::internal::transport::{Failure, Mode, RoundTrip};
 /// - **Binding.** [`bind`](Mode::bind) builds one `reqwest::Client` for the
 ///   fingerprint, with a TLS configuration of its own on the `ring`
 ///   provider (TLS 1.2 and 1.3), handed to `reqwest` as a preconfigured
-///   TLS stack so that connections are pooled as usual. Evidence without a
+///   TLS stack so that connections are pooled as usual. A connection
+///   offers HTTP/2 and HTTP/1.1; over HTTP/2 the requests of a binding
+///   share one connection, which was checked when it was opened. Evidence without a
 ///   TLS key is an attestation error, and an empty fingerprint is a
 ///   configuration error. The client follows no redirect: a `3xx` is
 ///   returned to the caller.
@@ -124,6 +126,7 @@ impl<V: Evidence> Mode<V> for TlsMode {
         // A resumed session skips the certificate, and with it the
         // verifier. Without resumption every connection is checked.
         tls.resumption = rustls::client::Resumption::disabled();
+        tls.alpn_protocols = alpn_protocols();
         Ok(Arc::new(TlsBound {
             proxied: self.client(tls.clone(), false)?,
             direct: self.client(tls, true)?,
@@ -348,6 +351,10 @@ pub(crate) fn leaf_fingerprint(certificate: &CertificateDer<'_>) -> Result<Strin
 pub(crate) fn spki_fingerprint(spki_der: &[u8]) -> String {
     lower_hex(&Sha256::digest(spki_der))
 }
+
+#[cfg(test)]
+#[path = "tls_testing.rs"]
+pub(crate) mod testing;
 
 #[cfg(test)]
 #[path = "tls_tests.rs"]
