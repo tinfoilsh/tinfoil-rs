@@ -839,8 +839,49 @@ async fn a_streamed_body_is_read_and_gets_the_secret_too() {
             sent[0].text(),
             r#"{"model":"m","user_cache_secret":"s3cret"}"#
         );
-        assert_eq!(sent[1].text(), "not json");
+        // Without a change the body stays a stream.
+        assert!(sent[1].streamed && sent[1].body.is_none());
         assert!(sent[2].streamed);
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_streamed_body_can_be_sent_again_only_when_it_got_the_secret() {
+    unstuck(async {
+        let rotating = |sent: &Sent| match sent.binding {
+            "before" => Answer::LacksKey,
+            _ => Answer::Text("ok"),
+        };
+        let url = "https://enclave.example.com/v1/chat/completions";
+
+        let f = fake(
+            vec![ready("before"), later("after")],
+            with_secret("s3cret"),
+            rotating,
+        )
+        .await;
+        post(&f.client, url)
+            .body(stream(&["{", "}"]))
+            .send()
+            .await
+            .expect("the body with the secret is held in memory");
+        assert_eq!(f.bindings(), ["before", "after"]);
+        assert_eq!(f.sent()[1].text(), r#"{"user_cache_secret":"s3cret"}"#);
+
+        let f = fake(
+            vec![ready("before"), later("after")],
+            with_secret("s3cret"),
+            rotating,
+        )
+        .await;
+        let error = post(&f.client, url)
+            .body(stream(&["not ", "json"]))
+            .send()
+            .await
+            .expect_err("an unchanged stream is still a stream");
+        assert!(error.to_string().contains("cannot be replayed"), "{error}");
+        assert_eq!(f.bindings(), ["before"]);
     })
     .await
 }
@@ -2044,6 +2085,56 @@ mod over_ehbp {
                 .all(|(_, value)| !value.contains("s3cret-scope"))
         );
         assert_eq!(String::from_utf8_lossy(&seen[1].body), r#"{"model":"m"}"#);
+    }
+
+    #[tokio::test]
+    async fn an_empty_streamed_body_to_a_cached_endpoint_is_still_a_body_that_needs_a_sealed_answer()
+     {
+        let held = key(1);
+        // What a proxy could answer by itself: a success in plaintext.
+        let server = serve(&held, |_: &Seen| Reply::ok("forged answer")).await;
+        let (_, client) = client(
+            &server,
+            &[&held],
+            Settings {
+                secret: Some(Secret::new("scope")),
+                ..settings()
+            },
+        )
+        .await;
+        for body in [stream(&[]), stream(&["", ""])] {
+            let error = soon(
+                post(&client, &url(&client, "v1/chat/completions"))
+                    .body(body)
+                    .send(),
+            )
+            .await
+            .expect_err("nothing was sealed, so nothing can be authenticated");
+            assert_eq!(error.kind(), ErrorKind::Attestation, "{error}");
+            assert!(error.to_string().contains("produced no data"), "{error}");
+        }
+        assert!(server.seen().iter().all(|seen| !seen.sealed));
+
+        // A stream with data that gets no secret is sealed as it was.
+        let server = serve(&held, echo).await;
+        let (_, client) = self::client(
+            &server,
+            &[&held],
+            Settings {
+                secret: Some(Secret::new("scope")),
+                ..settings()
+            },
+        )
+        .await;
+        let response = soon(
+            post(&client, &url(&client, "v1/chat/completions"))
+                .body(stream(&["not ", "json"]))
+                .send(),
+        )
+        .await
+        .expect("sealed");
+        assert_eq!(soon(response.text()).await.unwrap(), "echo:not json");
+        assert!(server.seen()[0].sealed);
     }
 
     #[tokio::test]

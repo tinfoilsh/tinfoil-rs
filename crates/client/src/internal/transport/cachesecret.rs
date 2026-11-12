@@ -34,9 +34,12 @@ const PATHS: [&str; 3] = ["/chat/completions", "/completions", "/responses"];
 /// sends the body with the member.
 ///
 /// A body that is a stream is read to its end first, into memory, so that
-/// it gets the member like any other; it is then sent from memory whether
-/// or not it was changed. A stream that fails is a network error, and
-/// nothing is sent.
+/// it gets the member like any other. With the member it is sent from
+/// memory, and can be sent again after a key rejection. Without a change
+/// it stays a stream, of the bytes that were read: it cannot be sent
+/// again, and a stream that produced no data is still a body to the
+/// transport mode, which matters where bodies are sealed. A stream that
+/// fails is a network error, and nothing is sent.
 pub(crate) fn with_cache_secret(
     next: Arc<dyn RoundTrip>,
     secret: Option<Secret>,
@@ -82,7 +85,15 @@ impl RoundTrip for CacheSecret {
                     let read = read.to_bytes();
                     match inject(&read, secret.expose()) {
                         Some(body) => set_body(&mut request, body),
-                        None => *request.body_mut() = Some(reqwest::Body::from(read)),
+                        // Still a stream, of what was read: the layers
+                        // below treat it as they would have treated the
+                        // caller's stream.
+                        None => {
+                            let again = futures_util::stream::once(async move {
+                                Ok::<_, std::convert::Infallible>(read)
+                            });
+                            *request.body_mut() = Some(reqwest::Body::wrap_stream(again));
+                        }
                     }
                     next.round_trip(request).await
                 });
