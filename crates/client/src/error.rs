@@ -64,6 +64,7 @@ pub struct Error {
     inner: Arc<Inner>,
 }
 
+#[derive(Clone)]
 struct Inner {
     kind: ErrorKind,
     timeout: bool,
@@ -71,9 +72,11 @@ struct Inner {
     earlier_attempt: Option<Error>,
 }
 
+#[derive(Clone)]
 enum Cause {
     Message(String),
-    Source(BoxError),
+    // Shared, so that a copy of the error keeps the same source.
+    Source(Arc<dyn StdError + Send + Sync + 'static>),
 }
 
 impl Error {
@@ -151,7 +154,7 @@ impl Error {
     pub(crate) fn wrap(kind: ErrorKind, source: impl Into<BoxError>) -> Self {
         match source.into().downcast::<Error>() {
             Ok(classified) => *classified,
-            Err(source) => Self::new(kind, Cause::Source(source)),
+            Err(source) => Self::new(kind, Cause::Source(Arc::from(source))),
         }
     }
 
@@ -165,21 +168,22 @@ impl Error {
         self.rebuild(|inner| inner.earlier_attempt = Some(earlier))
     }
 
-    /// The error of a function whose body is not written yet.
+    /// The error of a function whose body is not written yet. Its kind is
+    /// [`ErrorKind::Configuration`], because retrying cannot help, and its
+    /// message says that `what` is not implemented yet in this version of
+    /// the crate, so that it cannot be read as a problem with the caller's
+    /// options.
     pub(crate) fn not_implemented(what: &'static str) -> Self {
-        Self::configuration(format!("{what} is not implemented"))
+        Self::configuration(format!(
+            "{what} is not implemented yet in this version of the crate"
+        ))
     }
 
+    /// The same error with `change` applied. An error that other holders
+    /// share is copied first, with its cause, its source chain and its
+    /// earlier attempt as they are.
     fn rebuild(self, change: impl FnOnce(&mut Inner)) -> Self {
-        let mut inner = match Arc::try_unwrap(self.inner) {
-            Ok(inner) => inner,
-            Err(shared) => Inner {
-                kind: shared.kind,
-                timeout: shared.timeout,
-                cause: Cause::Source(Box::new(Error { inner: shared })),
-                earlier_attempt: None,
-            },
-        };
+        let mut inner = Arc::try_unwrap(self.inner).unwrap_or_else(|shared| (*shared).clone());
         change(&mut inner);
         Self {
             inner: Arc::new(inner),
@@ -191,9 +195,6 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.inner.cause {
             Cause::Message(message) => write!(f, "{} error: {message}", self.inner.kind),
-            // A shared error that was rebuilt wraps itself; its message
-            // already carries the prefix.
-            Cause::Source(source) if source.is::<Error>() => source.fmt(f),
             Cause::Source(source) => write!(f, "{} error: {source}", self.inner.kind),
         }
     }
@@ -221,7 +222,7 @@ impl StdError for Error {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match &self.inner.cause {
             Cause::Message(_) => None,
-            Cause::Source(source) => Some(source.as_ref()),
+            Cause::Source(source) => Some(source.as_ref() as &(dyn StdError + 'static)),
         }
     }
 }
@@ -272,11 +273,41 @@ mod tests {
     }
 
     #[test]
-    fn a_placeholder_reports_what_is_missing() {
+    fn marking_a_shared_error_keeps_its_source_chain_and_its_earlier_attempt() {
+        let source = std::io::Error::other("connection reset");
+        let retry = Error::wrap(ErrorKind::Network, source).after(Error::attestation("first"));
+        let kept = retry.clone();
+        let marked = retry.timed_out();
+
+        assert!(marked.is_timeout());
+        assert!(!kept.is_timeout());
+        assert_eq!(marked.to_string(), "network error: connection reset");
+        // The source is still the I/O error itself, not a copy of the
+        // client error in front of it.
+        let source = marked.source().expect("the I/O error");
+        assert!(source.is::<std::io::Error>());
+        assert!(source.source().is_none());
+        assert_eq!(
+            marked.earlier_attempt().map(Error::to_string).as_deref(),
+            Some("attestation error: first")
+        );
+
+        let shared = marked.clone();
+        let later = marked.after(Error::network("second"));
+        assert!(later.is_timeout());
+        assert!(later.source().is_some_and(|s| s.is::<std::io::Error>()));
+        assert_eq!(
+            shared.earlier_attempt().map(Error::to_string).as_deref(),
+            Some("attestation error: first")
+        );
+    }
+
+    #[test]
+    fn a_placeholder_says_that_the_function_is_not_implemented_yet() {
         let error = Error::not_implemented("router discovery");
         assert_eq!(
             error.to_string(),
-            "configuration error: router discovery is not implemented"
+            "configuration error: router discovery is not implemented yet in this version of the crate"
         );
     }
 
