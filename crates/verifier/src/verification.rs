@@ -45,6 +45,10 @@ impl fmt::Display for ReferenceSource {
 /// What is known depends on the source: an embedded config has no
 /// endorsement reference, key hint or times, and a config that the caller's
 /// authorizer accepted has a digest only.
+///
+/// A record is a plain value. It is evidence of a verification only while
+/// it is read from the [`Verification`] that holds it: a copy can be
+/// changed, and carries no proof of where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ConfigVerification {
@@ -378,8 +382,8 @@ impl Json {
 }
 
 /// Appends `value` as a JSON string: the quotation mark, the reverse
-/// solidus and the control characters are escaped, everything else is
-/// written as it is.
+/// solidus and the control characters are escaped, with the short escape
+/// where JSON has one, and everything else is written as it is.
 pub(crate) fn write_string(value: &str, out: &mut String) {
     out.push('"');
     for character in value.chars() {
@@ -389,6 +393,8 @@ pub(crate) fn write_string(value: &str, out: &mut String) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
             control if control < ' ' => {
                 out.push_str(&format!("\\u{:04x}", u32::from(control)));
             }

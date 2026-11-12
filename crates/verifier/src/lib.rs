@@ -47,13 +47,13 @@
 //! [`VerifierBuilder::freshness_signing_keys`] replace the keys that
 //! config endorsements and artifact approvals are verified under.
 //!
-#![cfg_attr(not(tinfoil_conformance), doc = "```compile_fail")]
+#![cfg_attr(not(tinfoil_conformance), doc = "```compile_fail,E0599")]
 #![cfg_attr(tinfoil_conformance, doc = "```no_run")]
 //! // An ordinary build has no way to supply a Sigstore trusted root.
 //! let _ = tinfoil_verifier::Verifier::builder().dangerous_test_only_sigstore_root(b"{}");
 //! ```
 //!
-#![cfg_attr(not(tinfoil_conformance), doc = "```compile_fail")]
+#![cfg_attr(not(tinfoil_conformance), doc = "```compile_fail,E0599")]
 #![cfg_attr(tinfoil_conformance, doc = "```no_run")]
 //! // Nor a vendor root.
 //! let _ = tinfoil_verifier::Verifier::builder().dangerous_test_only_vendor_roots(None, None);

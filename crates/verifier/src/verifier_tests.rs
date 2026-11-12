@@ -1558,6 +1558,18 @@ mod serde_feature {
             verified.to_json()
         );
 
+        // Every character that a JSON string must or might escape.
+        let awkward: String = (0..=0x20u8)
+            .chain([0x22, 0x2f, 0x5c, 0x7f])
+            .map(char::from)
+            .chain(['\u{80}', '\u{2028}', '\u{ffff}', '\u{1f600}'])
+            .collect();
+        let verified = verification(vec![item(&awkward, KEY_SPKI_FP_SHA256_V1_FORMAT, "aabb")]);
+        assert_eq!(
+            serde_json::to_string(&verified).unwrap(),
+            verified.to_json()
+        );
+
         let fixture = Fixture::load();
         for name in ["legacy-tdx/default", "config-sev/full-same"] {
             let case = fixture.case(name);
