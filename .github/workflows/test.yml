@@ -59,6 +59,12 @@ jobs:
       - name: Test the verifier crate
         run: cargo test --locked -p tinfoil-verifier --verbose
 
+      - name: Test the client crate
+        run: cargo test --locked -p tinfoil-next --verbose
+
+      - name: Test the client crate with every feature
+        run: cargo test --locked -p tinfoil-next --all-features --verbose
+
       - name: Check if API key is available
         # Bash only — Windows runner uses pwsh by default, but bash is
         # available there too. Force it explicitly so the heredoc syntax
@@ -113,6 +119,12 @@ jobs:
       - name: Test the verifier crate on MSRV
         run: cargo test --locked -p tinfoil-verifier --verbose
 
+      - name: Test the client crate on MSRV
+        run: cargo test --locked -p tinfoil-next --verbose
+
+      - name: Test the client crate with every feature on MSRV
+        run: cargo test --locked -p tinfoil-next --all-features --verbose
+
   lint:
     name: Format and clippy (v3 crates)
     runs-on: ubuntu-latest
@@ -127,10 +139,29 @@ jobs:
         run: rustup update stable && rustup default stable && rustup component add rustfmt clippy
 
       - name: Check formatting
-        run: cargo fmt --check -p tinfoil-verifier -p tinfoil-conformance
+        run: cargo fmt --check -p tinfoil-verifier -p tinfoil-conformance -p tinfoil-next
 
       - name: Run clippy
-        run: cargo clippy --locked -p tinfoil-verifier -p tinfoil-conformance --all-targets -- -D warnings
+        run: cargo clippy --locked -p tinfoil-verifier -p tinfoil-conformance -p tinfoil-next --all-targets -- -D warnings
+
+      # The client's OpenAI and gateway code is behind cargo features.
+      - name: Run clippy on the client without its default features
+        run: cargo clippy --locked -p tinfoil-next --all-targets --no-default-features -- -D warnings
+
+      - name: Run clippy on the client with every feature
+        run: cargo clippy --locked -p tinfoil-next --all-targets --all-features -- -D warnings
+
+      - name: Build the client's documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps -p tinfoil-next --all-features
+
+      # Without the OpenAI feature, links to its items must not be left
+      # dangling.
+      - name: Build the client's documentation without its default features
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps -p tinfoil-next --no-default-features
 
       # The conformance adapter's stages, and the verifier modules that they
       # reach, are compiled only with this flag.
