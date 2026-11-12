@@ -3,8 +3,9 @@
 use std::error::Error as StdError;
 use std::fmt;
 
-/// The underlying cause carried by an error of this crate.
-type BoxError = Box<dyn StdError + Send + Sync + 'static>;
+/// A boxed error that can cross threads: the cause carried by an error of
+/// this crate, and the error type of a caller's config authorizer.
+pub type BoxError = Box<dyn StdError + Send + Sync + 'static>;
 
 /// An error returned by the verifier: either the caller's mistake or a
 /// document that must not be trusted.
@@ -119,13 +120,6 @@ pub struct VerificationError {
 }
 
 impl VerificationError {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the verifier that classifies rejections is not in the crate yet"
-        )
-    )]
     pub(crate) fn new(layer: Layer, source: impl Into<BoxError>) -> Self {
         Self {
             layer,

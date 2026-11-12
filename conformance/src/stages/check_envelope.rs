@@ -9,9 +9,6 @@ use crate::{
     malformed,
 };
 
-/// Whether this stage is implemented.
-pub(crate) const SUPPORTED: bool = true;
-
 /// Runs the stage. The nonce is the one in the input, never the
 /// document's own.
 pub(crate) fn run(input: &Input) -> (Output, i32) {

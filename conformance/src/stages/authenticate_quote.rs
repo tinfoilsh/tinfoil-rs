@@ -4,69 +4,25 @@
 use std::time::SystemTime;
 
 use tinfoil_verifier::Measurement as Registers;
-use tinfoil_verifier::conformance::document::collateral::{
-    AmdCrl, AmdVcek, CpuEndorsements, IntelPcs,
-};
-use tinfoil_verifier::conformance::document::{
-    self, CpuEvidence, SEV_SNP_REPORT_V1_FORMAT, TDX_QUOTE_V1_FORMAT,
-};
+use tinfoil_verifier::conformance::document;
 use tinfoil_verifier::conformance::instant::Instant;
 use tinfoil_verifier::conformance::quote::{self, VendorRoots};
 
-use super::{accepted, appraisal_time, rejected, trusted_root};
+use super::{accepted, appraisal_time, rejected, trusted_root, vendor_roots};
 use crate::{
     AcceptOutputs, CODE_QUOTE_REJECTED, Input, Measurement, Output, STAGE_AUTHENTICATE_QUOTE,
-    decode_base64, malformed, unsupported,
+    decode_base64, malformed,
 };
 
 /// The measurement type of an SEV-SNP quote on the wire.
-const SEV_SNP_MEASUREMENT_TYPE: &str = "https://tinfoil.sh/predicate/sev-snp-guest/v2";
+pub(crate) const SEV_SNP_MEASUREMENT_TYPE: &str = "https://tinfoil.sh/predicate/sev-snp-guest/v2";
 /// The measurement type of a TDX quote on the wire.
-const TDX_MEASUREMENT_TYPE: &str = "https://tinfoil.sh/predicate/tdx-guest/v2";
-
-/// Whether quote authentication is built for evidence of `format`: an
-/// authentication that is not built says so for any evidence, before it
-/// looks at it.
-fn is_built(format: &str) -> bool {
-    let evidence = CpuEvidence {
-        format: format.to_owned(),
-        report: Vec::new(),
-    };
-    let endorsements = CpuEndorsements {
-        amd_vcek: Some(AmdVcek {
-            vcek_der: Vec::new(),
-            cert_chain_pem: String::new(),
-        }),
-        amd_crl: Some(AmdCrl {
-            crl_der: Vec::new(),
-        }),
-        intel_pcs: Some(IntelPcs::default()),
-    };
-    match quote::authenticate(
-        &evidence,
-        &endorsements,
-        Instant::UNIX_EPOCH,
-        &VendorRoots::embedded(),
-    ) {
-        Ok(_) => true,
-        Err(error) => !error.is_not_implemented(),
-    }
-}
-
-/// Whether SEV-SNP quote authentication is built.
-pub(crate) fn sev_snp_is_built() -> bool {
-    is_built(SEV_SNP_REPORT_V1_FORMAT)
-}
-
-/// Whether TDX quote authentication is built.
-pub(crate) fn tdx_is_built() -> bool {
-    is_built(TDX_QUOTE_V1_FORMAT)
-}
+pub(crate) const TDX_MEASUREMENT_TYPE: &str = "https://tinfoil.sh/predicate/tdx-guest/v2";
 
 /// Lays out authenticated registers for the wire, in platform order.
 /// `None` for a measurement of a platform that the wire contract does not
 /// know.
-fn measurement(registers: &Registers) -> Option<Measurement> {
+pub(crate) fn measurement(registers: &Registers) -> Option<Measurement> {
     Some(match registers {
         Registers::SevSnp { launch } => Measurement {
             kind: SEV_SNP_MEASUREMENT_TYPE.to_owned(),
@@ -92,8 +48,7 @@ fn measurement(registers: &Registers) -> Option<Measurement> {
 /// Runs the stage.
 ///
 /// A document that does not decode and a trusted root that is not one are
-/// malformed input; a quote that does not authenticate is a rejection. A
-/// quote of a platform whose authentication is not built is unsupported.
+/// malformed input; a quote that does not authenticate is a rejection.
 pub(crate) fn run(input: &Input) -> (Output, i32) {
     let stage = STAGE_AUTHENTICATE_QUOTE;
     let Some(doc) = decode_base64(&input.document_b64) else {
@@ -109,17 +64,7 @@ pub(crate) fn run(input: &Input) -> (Output, i32) {
     let Ok(document) = document::decode(&doc) else {
         return malformed(stage);
     };
-    let amd = (!input.ask_pem.is_empty()).then(|| {
-        // The chain is the intermediate and then the root.
-        format!(
-            "{}\n{}\n",
-            input.ask_pem.trim(),
-            input.amd_root_ca_pem.trim()
-        )
-        .into_bytes()
-    });
-    let intel = (!input.intel_sgx_root_pem.is_empty())
-        .then(|| input.intel_sgx_root_pem.clone().into_bytes());
+    let (amd, intel) = vendor_roots(input);
     let roots = VendorRoots::dangerous_test_only(amd, intel);
     match quote::authenticate(
         document.cpu_evidence(),
@@ -134,7 +79,6 @@ pub(crate) fn run(input: &Input) -> (Output, i32) {
                 ..AcceptOutputs::default()
             }),
         ),
-        Err(error) if error.is_not_implemented() => unsupported(stage),
         Err(_) => rejected(stage, CODE_QUOTE_REJECTED),
     }
 }

@@ -9,8 +9,8 @@ use crate::json::{self, Object, Value};
 use crate::quote::QuoteError;
 use crate::x509::Certificate;
 use crate::x509::der::{
-    DerReader, Element, TAG_BOOLEAN, TAG_INTEGER, TAG_OCTET_STRING, TAG_OID, TAG_SEQUENCE, TAG_SET,
-    boolean, check_integer, single_element,
+    Element, TAG_BOOLEAN, TAG_INTEGER, TAG_OCTET_STRING, TAG_OID, TAG_SEQUENCE, TAG_SET, boolean,
+    check_integer, single_element,
 };
 use crate::x509::extension::object_identifier;
 

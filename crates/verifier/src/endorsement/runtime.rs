@@ -88,7 +88,7 @@ impl ProvenanceClient {
 
 /// The tag that a runtime version is released at: the version in full,
 /// without build metadata. Empty when `version` is not a version.
-pub(super) fn release_tag(version: &str) -> String {
+pub(crate) fn release_tag(version: &str) -> String {
     semver::parse(version)
         .map(|version| {
             format!(

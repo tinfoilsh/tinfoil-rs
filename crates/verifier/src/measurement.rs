@@ -51,7 +51,8 @@ impl FromStr for Register {
     }
 }
 
-fn parse_register(s: &str) -> Result<Register, String> {
+/// Parses a register from hex in either case; the error is a message.
+pub(crate) fn parse_register(s: &str) -> Result<Register, String> {
     let want = REGISTER_SIZE.saturating_mul(2);
     if s.len() != want {
         return Err(format!(

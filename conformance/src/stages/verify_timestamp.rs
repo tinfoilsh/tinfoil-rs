@@ -10,9 +10,6 @@ use crate::{
     malformed,
 };
 
-/// Whether this stage is implemented.
-pub(crate) const SUPPORTED: bool = true;
-
 /// Runs the stage.
 ///
 /// An input without an appraisal time, fields that do not decode and a
