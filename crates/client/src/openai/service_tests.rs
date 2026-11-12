@@ -72,6 +72,14 @@ fn chat_request() -> CreateChatCompletionRequest {
         .unwrap()
 }
 
+/// The same request, asking for a stream. With the `openai-byot` feature
+/// `async_openai` leaves the member to the caller.
+fn streaming_chat_request() -> CreateChatCompletionRequest {
+    let mut request = chat_request();
+    request.stream = Some(true);
+    request
+}
+
 const CHAT_RESPONSE: &str = r#"{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}"#;
 
 const EMBEDDING_RESPONSE: &str = r#"{"object":"list","model":"m","data":[{"index":0,"object":"embedding","embedding":[0.5,0.25]}],"usage":{"prompt_tokens":1,"total_tokens":1}}"#;
@@ -597,7 +605,11 @@ async fn a_body_that_fails_while_it_is_read_carries_the_clients_error() {
         assert!(found.is_timeout());
 
         // Read as a stream: the events before the deadline arrive.
-        let mut stream = openai.chat().create_stream(chat_request()).await.unwrap();
+        let mut stream = openai
+            .chat()
+            .create_stream(streaming_chat_request())
+            .await
+            .unwrap();
         let first = stream.next().await.unwrap().unwrap();
         assert_eq!(first.choices[0].delta.content.as_deref(), Some("a"));
         assert!(stream.next().await.unwrap().is_err());
@@ -692,7 +704,7 @@ mod over_ehbp {
         let held = key(1);
         let server = serve(&held, app).await;
         let openai = client(&server, &held.public_hex).await;
-        let mut stream = soon(openai.chat().create_stream(chat_request()))
+        let mut stream = soon(openai.chat().create_stream(streaming_chat_request()))
             .await
             .unwrap();
         let mut text = String::new();
@@ -879,7 +891,7 @@ mod over_tls {
         let response = soon(openai.chat().create(chat_request())).await.unwrap();
         assert_eq!(response.id, "c1");
 
-        let mut stream = soon(openai.chat().create_stream(chat_request()))
+        let mut stream = soon(openai.chat().create_stream(streaming_chat_request()))
             .await
             .unwrap();
         let mut text = String::new();
