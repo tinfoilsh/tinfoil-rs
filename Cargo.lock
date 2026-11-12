@@ -2003,7 +2003,7 @@ dependencies = [
 
 [[package]]
 name = "tinfoil"
-version = "0.3.0-rc.1"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "async-openai",
@@ -2074,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "tinfoil-verifier"
-version = "0.3.0-rc.1"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "cms",

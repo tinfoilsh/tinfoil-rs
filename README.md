@@ -20,7 +20,7 @@ Releases are git tags of this repository. Depend on a tag:
 
 ```toml
 [dependencies]
-tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.3.0-rc.1" }
+tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.3.0" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -28,7 +28,7 @@ For the verifier alone:
 
 ```toml
 [dependencies]
-tinfoil-verifier = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.3.0-rc.1" }
+tinfoil-verifier = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.3.0" }
 ```
 
 The clients need a Tokio runtime. There is no blocking API.

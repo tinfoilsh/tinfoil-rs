@@ -33,7 +33,7 @@ differences.
 tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.2.3" }
 
 # 0.3
-tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.3.0-rc.1" }
+tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.3.0" }
 ```
 
 The minimum supported Rust version is still 1.88. The package is still named
