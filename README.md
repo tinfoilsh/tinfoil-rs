@@ -204,7 +204,9 @@ Errors of the SDK are `tinfoil::Error` values. `kind()` says what to do about on
 |---|---|---|
 | `Configuration` | Invalid options, or a request that the client cannot protect (another origin, a reserved header). | Fix the caller; retrying will not help. |
 | `Network` | The client could not reach what it needed, or a deadline passed (`is_timeout()`). | Retry later with the same client. |
-| `Attestation` | The enclave could not be trusted. Nothing was sent to it. | The client verifies again on the next request. A failure that persists deserves an investigation. |
+| `Attestation` | The enclave could not be trusted, or its answer could not be authenticated. | The client verifies again on the next request. A failure that persists deserves an investigation. |
+
+An attestation error from a verification (`connect`, `ensure_verified`, `reverify`, or the verification before a request) means that nothing was sent, and in TLS mode every attestation error means that the request was not delivered: the certificate check fails before the request is written. In EHBP mode an attestation error can also arise after the sealed request has left: the answer says that the enclave does not hold the key, a success response carries no valid proof that the enclave sent it, or a part of the response body does not authenticate while it is read. Nobody else could read the request, but the enclave may have received it and acted on it. Send requests that must not take effect twice with an idempotency key, or check what became of them before sending them again.
 
 The message starts with the kind, as in `attestation error: ...`, and `source()` returns the underlying error.
 

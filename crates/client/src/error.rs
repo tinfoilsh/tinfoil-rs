@@ -20,9 +20,35 @@ pub enum ErrorKind {
     /// later with the same client.
     Network,
     /// Rejected evidence, policy or channel binding: the enclave could not
-    /// be trusted, and nothing was sent to it. The client verifies again by
-    /// itself on the next request; a failure that persists deserves an
-    /// investigation.
+    /// be trusted, or what it answered could not be authenticated. The
+    /// client verifies again by itself on the next request; a failure that
+    /// persists deserves an investigation.
+    ///
+    /// Whether the request was delivered depends on where the error arose:
+    ///
+    /// - **Not delivered.** A verification failed (in `connect`,
+    ///   `ensure_verified`, `reverify`, or before a request that needed
+    ///   one): nothing was sent. In
+    ///   [`TransportMode::Tls`](crate::TransportMode::Tls) every
+    ///   attestation error is of this kind, because the certificate check
+    ///   fails in the handshake, before the request is written.
+    /// - **Possibly delivered.** In
+    ///   [`TransportMode::Ehbp`](crate::TransportMode::Ehbp) the body is
+    ///   sealed to the attested key, so nobody else can read it, but the
+    ///   error can arise after the sealed request has left: the answer
+    ///   says that the enclave does not hold the key, a success response
+    ///   carries no valid proof that the enclave sent it, or a part of
+    ///   the response body does not authenticate while it is read (found
+    ///   with [`Error::from_reqwest`]). None of these says whether the
+    ///   enclave received the request and acted on it.
+    ///
+    /// So, in the EHBP mode, do not conclude from an attestation error on
+    /// a request that the request had no effect. Send a request that must
+    /// not take effect twice with an idempotency key, or find out what
+    /// became of it before sending it again. The client itself sends a
+    /// request a second time in one case only, after a key rejection and
+    /// a new verification; in the EHBP mode that rejection is an answer
+    /// that is not authenticated.
     Attestation,
 }
 
