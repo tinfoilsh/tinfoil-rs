@@ -6,6 +6,7 @@
 
 use std::error::Error as StdError;
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -270,7 +271,7 @@ impl<V: Evidence> Enclave<V> {
     ///    that nothing limits in time;
     /// 3. the caller's veto, given the evidence; a rejection is an
     ///    attestation error that names the host and has the caller's error
-    ///    in its source chain;
+    ///    in its source chain, and a veto that panics is a rejection;
     /// 4. the freshness deadline again, since the veto may have run past
     ///    it.
     ///
@@ -301,7 +302,13 @@ impl<V: Evidence> Enclave<V> {
         let evidence = (self.source)().await?;
         self.check_freshness(&evidence)?;
         if let Some(check) = &self.check {
-            check(&evidence).map_err(|source| {
+            // The check is the caller's code. If it panics, the panic ends
+            // here as a rejection: it must not unwind through a
+            // verification that other callers share, each of whom would
+            // otherwise panic too.
+            let verdict = catch_unwind(AssertUnwindSafe(|| check(&evidence)))
+                .unwrap_or_else(|_| Err(Box::new(Panicked)));
+            verdict.map_err(|source| {
                 Error::wrap(
                     ErrorKind::Attestation,
                     Rejected {
@@ -355,6 +362,20 @@ impl StdError for Rejected {
         Some(self.source.as_ref())
     }
 }
+
+/// What stands in for the caller's error when the caller's veto panicked
+/// instead of answering. Evidence that the check did not accept is
+/// rejected.
+#[derive(Debug)]
+struct Panicked;
+
+impl fmt::Display for Panicked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the check panicked")
+    }
+}
+
+impl StdError for Panicked {}
 
 /// Whether a failed attempt is worth one more: a network or attestation
 /// error that is not the caller's veto.
@@ -614,6 +635,38 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), ["a"]);
         assert_eq!(script.calls(), 1);
         assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_veto_that_panics_is_a_rejection_that_is_not_tried_again() {
+        let clock = tokio_clock();
+        let script = Script::new([
+            Step::Ready(Ok(record("a", &clock, HOUR))),
+            Step::Ready(Ok(record("b", &clock, HOUR))),
+        ]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let check: Check<Record> = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |evidence: &Record| {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("the check of {} went wrong", evidence.name);
+                }
+                Ok(())
+            })
+        };
+        let enclave = enclave(&script, &clock, Some(check));
+        let error = enclave.verify().await.expect_err("rejected");
+        assert_eq!(error.kind(), ErrorKind::Attestation);
+        assert_eq!(
+            error.to_string(),
+            "attestation error: verification check rejected enclave.example.com: the check panicked"
+        );
+        assert!(error.earlier_attempt().is_none());
+        assert_eq!(script.calls(), 1);
+
+        // The next verification calls the check again, and it answers.
+        assert_eq!(enclave.verify().await.expect("verified").name, "b");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test(start_paused = true)]
