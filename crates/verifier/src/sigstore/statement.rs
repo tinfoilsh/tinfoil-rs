@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use super::SigstoreError;
 use super::wire::Members;
 use crate::canonical::encode_lower_hex;
-use crate::json::{self, Value};
+use crate::json::{self, Object, Value};
 use crate::x509::{KeyAlgorithm, PublicKey};
 
 /// The `_type` of an in-toto v1 statement.
@@ -123,11 +123,11 @@ impl Statement {
                 digest,
             });
         }
-        let predicate = match statement.get("predicate") {
-            None => json::parse(b"{}").map_err(|cause| error(cause.to_string()))?,
+        let has_predicate = match statement.get("predicate") {
+            None => false,
             Some(found @ Value::Object(_)) => {
                 check_predicate_numbers(found)?;
-                predicate_of(payload)?
+                true
             }
             Some(other) => {
                 return Err(error(format!(
@@ -136,13 +136,21 @@ impl Statement {
                 )));
             }
         };
+        let statement_type = statement.string("_type")?.unwrap_or_default().to_string();
+        let predicate_type = statement
+            .string("predicateType")?
+            .unwrap_or_default()
+            .to_string();
+        // Nothing borrows the parsed statement any more, so the predicate
+        // is moved out of it.
+        let predicate = has_predicate
+            .then(|| take_predicate(value))
+            .flatten()
+            .unwrap_or_else(|| Value::Object(Object::default()));
         Ok(Self {
-            statement_type: statement.string("_type")?.unwrap_or_default().to_string(),
+            statement_type,
             subjects,
-            predicate_type: statement
-                .string("predicateType")?
-                .unwrap_or_default()
-                .to_string(),
+            predicate_type,
             predicate,
         })
     }
@@ -328,24 +336,16 @@ fn check_predicate_numbers(predicate: &Value) -> Result<(), SigstoreError> {
     Ok(())
 }
 
-/// The `predicate` member of a statement, parsed on its own so that it can
-/// be owned apart from the rest of the statement.
-fn predicate_of(payload: &[u8]) -> Result<Value, SigstoreError> {
-    let value = json::parse(payload)
-        .map_err(|cause| SigstoreError::new(format!("parsing statement: {cause}")))?;
-    let Value::Object(_) = &value else {
-        return Err(SigstoreError::new("statement is not an object"));
-    };
-    let mut value = value;
-    let Value::Object(object) = &mut value else {
-        return Err(SigstoreError::new("statement is not an object"));
+/// Moves the `predicate` member out of a parsed statement.
+fn take_predicate(mut statement: Value) -> Option<Value> {
+    let Value::Object(object) = &mut statement else {
+        return None;
     };
     std::mem::take(object)
         .into_members()
         .into_iter()
         .find(|(name, _)| name == "predicate")
         .map(|(_, predicate)| predicate)
-        .ok_or_else(|| SigstoreError::new("statement has no predicate"))
 }
 
 #[cfg(test)]
