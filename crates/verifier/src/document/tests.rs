@@ -174,7 +174,8 @@ fn a_document_without_a_checked_challenge_has_no_expected_report_data() {
     let decoded = decode(text.as_bytes()).unwrap();
     assert_eq!(decoded.expected_report_data(), None);
     // A replayed document decodes; only the nonce check tells it apart.
-    assert!(parse_text(&text, &[0xff; NONCE_SIZE]).is_err());
+    let other: Vec<u8> = nonce.iter().map(|byte| !byte).collect();
+    assert!(parse_text(&text, &other).is_err());
 }
 
 #[test]
@@ -684,7 +685,8 @@ fn device_evidence_items_keep_their_payload() {
 
 #[test]
 fn rejects_uppercase_hex() {
-    let nonce = [0xab; NONCE_SIZE];
+    // Every byte has a letter in its hex form.
+    let nonce: Vec<u8> = (0..NONCE_SIZE as u8).map(|i| 0xa0 | (i & 0x0f)).collect();
     let text = TestDocument::new(&nonce).render();
     let upper = replace_once(&text, &hex(&nonce), &hex(&nonce).to_uppercase());
     let error = parse_text(&upper, &nonce).unwrap_err();
@@ -916,11 +918,11 @@ fn computes_report_data() {
     assert_eq!(got[32..], [0u8; 32]);
     // A fixed vector, so that the derivation cannot drift with the code.
     assert_eq!(
-        hex(&compute_report_data(&[0; 32], &[1; 32], &[2; 32]).unwrap()),
+        hex(&compute_report_data(&nonce, &[1; 32], &[2; 32]).unwrap()),
         hex(&Sha256::digest(
             [
                 REPORT_DATA_V1_ALGORITHM.as_bytes(),
-                &[0; 32],
+                &nonce[..],
                 &[1; 32],
                 &[2; 32]
             ]
