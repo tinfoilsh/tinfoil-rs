@@ -133,7 +133,9 @@ impl EnclaveHttpClient {
     ///   mode can use, its freshness has expired, or `verification_check`
     ///   rejected it.
     /// - A deadline from the `timeout` option is a network error whose
-    ///   [`is_timeout`](Error::is_timeout) is `true`.
+    ///   [`is_timeout`](Error::is_timeout) is `true`. It ends this call's
+    ///   wait; a verification that other callers also wait for goes on
+    ///   for them.
     ///
     /// # Cancel safety
     ///
@@ -265,6 +267,12 @@ impl EnclaveHttpClientBuilder {
     /// [`ensure_verified`] and [`reverify`], and each request, from the
     /// call until the response body has been read. A request's own
     /// [`timeout`] replaces it for that request.
+    ///
+    /// For a request the deadline is one instant. It includes the wait for
+    /// a verification that the request needs, also one that another
+    /// request started, and a replay. A response that is read as a stream
+    /// must be read to its end before the deadline: a read after it fails,
+    /// whether or not data is still arriving.
     ///
     /// Unset, there is no deadline other than the client's fixed bounds on
     /// fetching attestation material. Dropping a future is the other way

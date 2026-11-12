@@ -269,6 +269,26 @@ macro_rules! http_request_methods {
             /// A failure to connect, or a connection that breaks, is a
             /// network error with the `reqwest` error as its source.
             ///
+            /// # Deadline
+            ///
+            /// The request's own timeout, or else the client's `timeout`
+            /// option, is one deadline counted from the first poll of the
+            /// returned future. It covers a verification that the request
+            /// waits for, the request, its replay, and the read of the
+            /// response body. When it passes before the response arrives,
+            /// the error is a network error whose
+            /// [`is_timeout`]($crate::Error::is_timeout) is `true`.
+            ///
+            /// # Reading the body
+            ///
+            /// The body is read with `reqwest`'s methods, and a failed
+            /// read is a `reqwest::Error`.
+            /// [`Error::from_reqwest`]($crate::Error::from_reqwest) returns
+            /// the client's error inside it: an attestation error when a
+            /// sealed body stops authenticating, a network error when the
+            /// connection breaks or the deadline passes. After a failed
+            /// read nothing more of the body is delivered.
+            ///
             /// # Cancel safety
             ///
             /// Dropping the future cancels the request. The enclave may or

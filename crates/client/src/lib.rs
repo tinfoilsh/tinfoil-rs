@@ -11,13 +11,14 @@
 //!
 //! # Status
 //!
-//! This version of the crate is its API without the machinery behind it:
-//! the types, the signatures and their documented contracts are in place,
-//! and every function that would perform network I/O (each `connect`,
-//! `fetch_catalog`, the relaxed chat calls and `parse_event_stream`) fails
-//! with an error whose message says that the function is not implemented
-//! yet. That error has the kind [`ErrorKind::Configuration`], since
-//! retrying cannot help; it does not mean that an option is wrong.
+//! [`EnclaveHttpClient`] is complete. The other clients are their API
+//! without the machinery behind it: the types, the signatures and their
+//! documented contracts are in place, and each of their functions that
+//! would perform network I/O (their `connect`, `fetch_catalog`, the
+//! relaxed chat calls and `parse_event_stream`) fails with an error whose
+//! message says that the function is not implemented yet. That error has
+//! the kind [`ErrorKind::Configuration`], since retrying cannot help; it
+//! does not mean that an option is wrong.
 //!
 //! # Choosing a client
 //!
@@ -65,7 +66,9 @@
 //!   option and [`RequestBuilder::timeout`]. There is no blocking API; the
 //!   clients need a Tokio runtime.
 //! - **Errors** are [`Error`] values with an [`ErrorKind`]: configuration,
-//!   network or attestation. Errors from the OpenAI API keep
+//!   network or attestation. A response body is read with `reqwest`'s
+//!   methods, whose error is `reqwest`'s; [`Error::from_reqwest`] returns
+//!   the client's error inside it. Errors from the OpenAI API keep
 //!   `async_openai`'s type.
 //!
 //! # What is protected
