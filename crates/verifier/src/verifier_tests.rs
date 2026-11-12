@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 
 use crate::canonical::encode_lower_hex;
-use crate::differential_tests::{Fixture, instant, text};
+use crate::differential_tests::{Fixture, instant, pin, text};
 use crate::document::DocumentError;
 use crate::endorsement::EndorsementError;
 use crate::error::{BoxError, Error, Layer};
@@ -777,14 +777,23 @@ fn a_repository_pin_is_checked_without_a_document() {
             false,
         ),
     ];
+    // In this table an empty text stands for no pin.
     for (name, builder, repo, valid) in cases {
         let verifier = builder.build().unwrap();
-        let result = verifier.check_repo_verifiability(repo);
+        let result = verifier.check_repo_verifiability(pin(repo));
         if valid {
             result.unwrap_or_else(|error| panic!("{name}: {error}"));
         } else {
             usage(result);
         }
+    }
+    // An empty pin is refused whatever the verifier; only `None` sets no
+    // pin.
+    for builder in [Verifier::builder(), embedded(), authorizer()] {
+        let verifier = builder.build().unwrap();
+        verifier.check_repo_verifiability(None).unwrap();
+        let message = usage(verifier.check_repo_verifiability(Some("")));
+        assert!(message.contains("repository pin is empty"), "{message}");
     }
 }
 
@@ -847,7 +856,7 @@ fn arguments_are_checked_before_the_document() {
     let verifier = fixture.verifier(case).unwrap();
     let document = fixture.document(text(case, "doc")).unwrap();
     let nonce = Fixture::nonce(case);
-    let repo = text(case, "repo");
+    let repo = pin(text(case, "repo"));
     let at = instant(case).to_system_time().unwrap();
     verifier.verify_v3_at(&document, &nonce, repo, at).unwrap();
 
@@ -863,7 +872,17 @@ fn arguments_are_checked_before_the_document() {
     assert!(message.contains("verification time"), "{message}");
     // The repository pin is the caller's too, once the document carries the
     // code that it would be matched against.
-    usage(verifier.verify_v3_at(&document, &nonce, "not a reference", at));
+    usage(verifier.verify_v3_at(&document, &nonce, Some("not a reference"), at));
+    // An empty pin is refused before the nonce and the document are read;
+    // only `None` sets no pin.
+    for result in [
+        verifier.verify_v3_at(&document, &nonce, Some(""), at),
+        verifier.verify_v3_at(b"{", &nonce[..31], Some(""), at),
+        verifier.verify_v3(b"{", &nonce[..31], Some("")),
+    ] {
+        let message = usage(result);
+        assert!(message.contains("repository pin is empty"), "{message}");
+    }
 }
 
 #[test]
@@ -876,7 +895,7 @@ fn verify_v3_reads_the_clock_once_and_reports_it() {
     // not the recorded one.
     let before = SystemTime::now();
     let error = verifier
-        .verify_v3(&document, &Fixture::nonce(case), text(case, "repo"))
+        .verify_v3(&document, &Fixture::nonce(case), pin(text(case, "repo")))
         .unwrap_err();
     assert!(before > instant(case).to_system_time().unwrap());
     let Error::Verification(rejected) = error else {
@@ -886,7 +905,12 @@ fn verify_v3_reads_the_clock_once_and_reports_it() {
 
     let at = instant(case).to_system_time().unwrap();
     let verified = verifier
-        .verify_v3_at(&document, &Fixture::nonce(case), text(case, "repo"), at)
+        .verify_v3_at(
+            &document,
+            &Fixture::nonce(case),
+            pin(text(case, "repo")),
+            at,
+        )
         .unwrap();
     assert_eq!(verified.metadata().verified_at, at);
     assert_eq!(verified.metadata().verifier.name, "tinfoil-rs");
