@@ -2447,6 +2447,7 @@ dependencies = [
  "tinfoil-ehbp",
  "tinfoil-verifier",
  "tokio",
+ "tokio-rustls",
  "tower-layer",
  "tower-service",
  "url",
