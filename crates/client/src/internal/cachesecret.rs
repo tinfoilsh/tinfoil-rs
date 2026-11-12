@@ -62,7 +62,7 @@ pub(crate) fn resolve(explicit: Option<Secret>) -> Option<Secret> {
 ///
 /// An environment value that is empty, or that is not Unicode and so could
 /// not be written into a JSON body, counts as unset.
-fn resolve_from(
+pub(crate) fn resolve_from(
     explicit: Option<Secret>,
     env: Option<OsString>,
     home: Option<PathBuf>,

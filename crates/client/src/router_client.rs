@@ -7,7 +7,9 @@ use std::time::Duration;
 use reqwest::Url;
 
 use crate::error::Error;
-use crate::internal::attested::AttestedClient;
+use crate::internal::attested::{AttestedClient, Settings, mode_for};
+use crate::internal::enclave::{self, Enclave};
+use crate::internal::{cachesecret, router, system_clock};
 use crate::options::{RouteOptions, Secret, TransportMode};
 use crate::request::http_request_methods;
 use crate::verifier::{BoxError, Verification, Verifier};
@@ -210,43 +212,85 @@ impl RouterHttpClientBuilder {
     ///
     /// Then discovery runs, for at most 30 seconds in all. The router list
     /// is fetched; a list that cannot be fetched or read counts as empty.
-    /// Its routers are tried one at a time, each with a single
-    /// verification, and the first that passes, `verification_check`
-    /// included, becomes the client's router. When none passes, or the 30
-    /// seconds run out, the client verifies `inference.tinfoil.sh`, and a
-    /// failure of that verification is the error returned, as
+    /// Its routers are tried one at a time, in the order of the list, each
+    /// with a single verification, and the first that passes,
+    /// `verification_check` included, becomes the client's router. A
+    /// router that fails, for whatever reason, is skipped. When none
+    /// passes, or the 30 seconds run out, the client verifies
+    /// `inference.tinfoil.sh`, and a failure of that verification is the
+    /// error returned, as
     /// [`ensure_verified`](RouterHttpClient::ensure_verified) reports it.
     ///
-    /// The user cache secret is resolved after discovery; resolving it
-    /// never fails.
+    /// The client keeps the router that it chose: it verifies that router
+    /// again when it must, and never discovers another. Every `connect`
+    /// discovers anew. The `timeout` option bounds the whole call.
+    ///
+    /// The user cache secret is resolved last, once the client is certain
+    /// to be created; resolving it never fails. Unless the option or the
+    /// environment supplies the secret, this reads or creates one small
+    /// file in the home directory, synchronously.
     ///
     /// # Cancel safety
     ///
     /// Dropping the future stops discovery and closes its connections. No
     /// client exists. The cache secret file, if this call created it,
     /// stays.
-    ///
-    /// **Not implemented yet.** In this version of the crate the call makes the
-    /// checks that need no network and then fails with an error that says so;
-    /// the text above is the contract that it will meet.
     pub async fn connect(self) -> Result<RouterHttpClient, Error> {
-        self.check()?;
-        Err(Error::not_implemented("RouterHttpClient::connect"))
+        let (fallback, settings) = self.prepare()?;
+        let mode = mode_for(settings.mode)?;
+        // Every router is verified under the policy that was checked, and
+        // against the router repository.
+        let verifier = Arc::clone(fallback.verifier());
+        let check = fallback.verification_check().cloned();
+        let enclave_for = move |host: &str| {
+            let checked = enclave::Config {
+                host: host.to_owned(),
+                relay: None,
+                repo: Some(router::ROUTER_REPO.to_owned()),
+                verifier: Some(Arc::clone(&verifier)),
+                verification_check: check.clone(),
+            }
+            .check()?;
+            Ok(Enclave::from_checked(
+                checked,
+                system_clock(),
+                enclave::network_fetch(),
+            ))
+        };
+        let inner = router::connect(
+            router::router_list(),
+            enclave_for,
+            mode,
+            settings,
+            cachesecret::resolve,
+        )
+        .await?;
+        Ok(RouterHttpClient {
+            inner: Arc::new(inner),
+        })
     }
 
     /// The checks that `connect` makes before any network I/O, in the
     /// order that it documents.
     pub(crate) fn check(&self) -> Result<(), Error> {
-        let base = self.options.checked_base_url()?;
-        if base.is_some() && self.options.mode() == TransportMode::Tls {
+        self.clone().prepare().map(drop)
+    }
+
+    /// Checks the options, in the order that `connect` documents, and
+    /// returns the checked description of the fallback router, which holds
+    /// the verifier for every router, and what the client is made from. It
+    /// does no I/O.
+    pub(crate) fn prepare(self) -> Result<(enclave::Checked, Settings), Error> {
+        let base_url = self.options.checked_base_url()?;
+        let mode = self.options.mode();
+        if base_url.is_some() && mode == TransportMode::Tls {
             return Err(Error::configuration(
                 "a base URL is a proxy when the router is discovered, which requires TransportMode::Ehbp",
             ));
         }
         self.options.common.check()?;
-        if self
-            .options
-            .common
+        let common = self.options.common;
+        if common
             .verifier
             .as_ref()
             .is_some_and(|verifier| verifier.caller_authorizes_config())
@@ -255,6 +299,22 @@ impl RouterHttpClientBuilder {
                 "a verifier that supplies or authorizes the config requires an explicit enclave",
             ));
         }
-        Ok(())
+        let fallback = enclave::Config {
+            host: router::FALLBACK_ROUTER.to_owned(),
+            relay: None,
+            repo: Some(router::ROUTER_REPO.to_owned()),
+            verifier: common.verifier,
+            verification_check: common.verification_check,
+        }
+        .check()?;
+        Ok((
+            fallback,
+            Settings {
+                mode,
+                base_url,
+                secret: common.user_cache_secret,
+                timeout: common.timeout,
+            },
+        ))
     }
 }

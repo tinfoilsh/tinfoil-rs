@@ -15,7 +15,7 @@ use crate::internal::transport::base_url::{self, authority_url};
 use crate::internal::transport::cachesecret::with_cache_secret;
 use crate::internal::transport::ehbp::EhbpMode;
 use crate::internal::transport::header::with_enclave_url;
-use crate::internal::transport::origin::with_origin_restriction;
+use crate::internal::transport::origin::allowed_origins;
 use crate::internal::transport::replay::with_replay;
 use crate::internal::transport::tls::TlsMode;
 use crate::internal::transport::{Mode, RoundTrip, Transport};
@@ -61,6 +61,14 @@ pub(crate) struct Settings {
     pub(crate) timeout: Option<Duration>,
 }
 
+/// The implementation of a transport mode.
+pub(crate) fn mode_for(mode: TransportMode) -> Result<Arc<dyn Mode<Verification>>, Error> {
+    Ok(match mode {
+        TransportMode::Tls => Arc::new(TlsMode::new()),
+        TransportMode::Ehbp => Arc::new(EhbpMode::new()?),
+    })
+}
+
 impl AttestedClient<Verification> {
     /// Verifies the enclave of `checked` and returns the client for it:
     /// the transport in the mode of `settings`, with the verification's
@@ -76,10 +84,7 @@ impl AttestedClient<Verification> {
         clock: Clock,
         fetch: Fetch,
     ) -> Result<Self, Error> {
-        let mode: Arc<dyn Mode<Verification>> = match settings.mode {
-            TransportMode::Tls => Arc::new(TlsMode::new()),
-            TransportMode::Ehbp => Arc::new(EhbpMode::new()?),
-        };
+        let mode = mode_for(settings.mode)?;
         let enclave = Enclave::from_checked(checked, clock, fetch);
         let transport = within(settings.timeout, Transport::connect(enclave, mode, true)).await?;
         Self::new(transport, settings)
@@ -97,6 +102,20 @@ impl<V: Evidence> AttestedClient<V> {
     /// secret, one replay after a key rejection, the enclave header for a
     /// proxy, the transport.
     pub(crate) fn new(transport: Transport<V>, settings: Settings) -> Result<Self, Error> {
+        Self::new_with(transport, settings, |secret| secret)
+    }
+
+    /// As [`new`](Self::new), with the client's cache secret made from the
+    /// `secret` of `settings` by `resolve`.
+    ///
+    /// `resolve` may store a secret. It runs last, after everything that
+    /// can fail, so that nothing is stored for a client that cannot be
+    /// made.
+    pub(crate) fn new_with(
+        transport: Transport<V>,
+        settings: Settings,
+        resolve: impl FnOnce(Option<Secret>) -> Option<Secret>,
+    ) -> Result<Self, Error> {
         let Settings {
             mode,
             base_url,
@@ -108,13 +127,7 @@ impl<V: Evidence> AttestedClient<V> {
             base_url::validate_for_tls(base_url, &host)?;
         }
         let origin = authority_url(&host)?;
-
-        let chain: Arc<dyn RoundTrip> = Arc::new(transport.clone());
-        let chain = with_enclave_url(chain, &host, base_url.as_ref())?;
-        let chain = with_replay(chain);
-        let chain = with_cache_secret(chain, secret);
-        let chain = with_origin_restriction(chain, Some(&host), base_url.as_ref())?;
-
+        let allowed = allowed_origins(Some(&host), base_url.as_ref())?;
         let openai_url = match &base_url {
             Some(base_url) => base_url.clone(),
             None => origin
@@ -124,6 +137,13 @@ impl<V: Evidence> AttestedClient<V> {
         let parts = fetch::tls_builder()?
             .build()
             .map_err(|error| Error::wrap(crate::ErrorKind::Configuration, error))?;
+        let chain: Arc<dyn RoundTrip> = Arc::new(transport.clone());
+        let chain = with_enclave_url(chain, &host, base_url.as_ref())?;
+        let chain = with_replay(chain);
+
+        // Nothing below can fail.
+        let chain = with_cache_secret(chain, resolve(secret));
+        let chain = allowed.guard(chain);
         Ok(Self {
             transport,
             chain,
@@ -178,7 +198,7 @@ impl<V: Evidence> AttestedClient<V> {
 /// `operation`, ended with a network error that is marked as a timeout if
 /// it has not finished after `timeout`. Without a timeout it runs as it
 /// is. The operation is dropped when its time is up.
-async fn within<T>(
+pub(crate) async fn within<T>(
     timeout: Option<Duration>,
     operation: impl Future<Output = Result<T, Error>>,
 ) -> Result<T, Error> {

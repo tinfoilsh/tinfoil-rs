@@ -113,6 +113,11 @@ impl Checked {
         &self.host
     }
 
+    /// The caller's veto, if there is one.
+    pub(crate) fn verification_check(&self) -> Option<&VerificationCheck> {
+        self.verification_check.as_ref()
+    }
+
     /// The verification policy: the configured one, or the default
     /// verifier, which was built for the checks and is the one that the
     /// enclave then verifies with.
