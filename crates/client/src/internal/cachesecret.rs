@@ -34,6 +34,11 @@ pub(crate) const DIR_NAME: &str = ".tinfoil";
 /// so that one machine has one cache namespace across tools.
 pub(crate) const FILE_NAME: &str = "user_cache_secret";
 
+/// `FILE_FLAG_OPEN_REPARSE_POINT`: open a symbolic link or another reparse
+/// point itself, not what it leads to.
+#[cfg(windows)]
+const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
 /// How many names are tried for the temporary file of a new secret.
 const CANDIDATE_ATTEMPTS: usize = 16;
 
@@ -190,6 +195,10 @@ fn read_secret(path: &Path) -> io::Result<Option<Secret>> {
     // taken its place since, the open fails instead of following it.
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+    // On Windows the open takes the link itself instead of its target, and
+    // the check of the open handle below then refuses it.
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::custom_flags(&mut options, OPEN_REPARSE_POINT);
     let mut file = options.open(path)?;
     if !file.metadata()?.is_file() {
         return Err(not_regular());
@@ -394,6 +403,47 @@ mod tests {
         symlink(home.0.join("missing"), home.file()).unwrap();
         assert!(load_or_generate(&home.0).is_none());
         assert!(!home.0.join("missing").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_replaces_the_file_after_the_first_check_is_not_followed_by_the_open() {
+        use std::os::unix::fs::symlink;
+        // The open by itself, as it would meet a link that was put in
+        // place after the path had been seen to be a regular file.
+        let home = Home::new();
+        home.store(b"planted");
+        let link = home.0.join("link");
+        symlink(home.file(), &link).unwrap();
+        let mut options = OpenOptions::new();
+        options.read(true);
+        std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+        assert!(options.open(&link).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_symbolic_link_is_not_followed_on_windows() {
+        use std::os::windows::fs::symlink_file;
+
+        let elsewhere = Home::new();
+        elsewhere.store(b"planted");
+        let home = Home::new();
+        fs::create_dir(home.dir()).unwrap();
+        // Creating a link needs a privilege that a test run may lack.
+        if symlink_file(elsewhere.file(), home.file()).is_err() {
+            return;
+        }
+        assert!(load_or_generate(&home.0).is_none());
+        assert_eq!(fs::read(elsewhere.file()).unwrap(), b"planted");
+
+        // The open by itself takes the link and not its target, so the
+        // check of the open handle refuses it.
+        let mut options = OpenOptions::new();
+        options.read(true);
+        std::os::windows::fs::OpenOptionsExt::custom_flags(&mut options, OPEN_REPARSE_POINT);
+        let opened = options.open(home.file()).unwrap();
+        assert!(!opened.metadata().unwrap().is_file());
     }
 
     #[test]
