@@ -807,7 +807,7 @@ async fn a_connection_through_a_proxys_tunnel_is_pinned_like_a_direct_one() {
     let pinned = mode.bind(&evidence("pinned", &LEAF_A)).unwrap();
     let response = pinned.send(server.get_by_name("/tunnelled")).await.unwrap();
     assert_eq!(response.body().await.unwrap(), "/tunnelled");
-    assert_eq!(*lines.lock().unwrap(), [connect.clone()]);
+    assert_eq!(*lines.lock().unwrap(), std::slice::from_ref(&connect));
     assert_eq!(server.requests(), ["GET /tunnelled HTTP/1.1"]);
 
     // Pinned to key B: the tunnel opens, the handshake inside it presents
