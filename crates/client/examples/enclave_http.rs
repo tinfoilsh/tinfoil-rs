@@ -4,6 +4,9 @@
 //! ```sh
 //! TINFOIL_API_KEY=... cargo run -p tinfoil --example enclave_http
 //! ```
+//!
+//! The second part runs only when `TINFOIL_PROXY_URL` names a proxy that
+//! forwards to the enclave, for example `https://proxy.example.com/tinfoil/`.
 
 use std::time::Duration;
 
@@ -14,7 +17,7 @@ const REPO: &str = "tinfoilsh/confidential-model-router";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("TINFOIL_API_KEY")?;
+    let api_key = api_key()?;
 
     // The enclave is verified before `connect` returns.
     let client = EnclaveHttpClient::connect(ENCLAVE, Some(REPO)).await?;
@@ -40,9 +43,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Configured: bodies are sealed to the enclave's HPKE key and travel
     // through a proxy, which sees only the method, the URL and the headers.
+    let Ok(proxy_url) = std::env::var("TINFOIL_PROXY_URL") else {
+        println!("set TINFOIL_PROXY_URL to send a sealed request through a proxy");
+        return Ok(());
+    };
     let proxied = EnclaveHttpClient::builder(ENCLAVE, Some(REPO))
         .transport_mode(TransportMode::Ehbp)
-        .base_url("https://proxy.example.com/tinfoil/")
+        .base_url(proxy_url)
         .timeout(Duration::from_secs(60))
         .connect()
         .await?;
@@ -60,4 +67,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", response.status());
 
     Ok(())
+}
+
+/// The API key from the environment, or an error that says what to set.
+fn api_key() -> Result<String, Box<dyn std::error::Error>> {
+    match std::env::var("TINFOIL_API_KEY") {
+        Ok(key) if !key.is_empty() => Ok(key),
+        _ => Err("set the TINFOIL_API_KEY environment variable to a Tinfoil API key".into()),
+    }
 }
