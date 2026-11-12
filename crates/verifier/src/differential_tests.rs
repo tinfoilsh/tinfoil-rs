@@ -591,11 +591,12 @@ fn group_of(name: &str) -> &str {
 }
 
 /// Replays the cases of one group and requires every outcome to be the
-/// recorded one, or a listed stricter one.
-fn replay_group(group: &str) {
+/// recorded one, or a listed stricter one. Returns how many cases came out
+/// in each way.
+fn replay_group(group: &str) -> BTreeMap<&'static str, usize> {
     let fixture = Fixture::load();
     let cases = member(fixture.root_object(), "cases").as_array().unwrap();
-    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut failures = Vec::new();
     for case in cases {
         let case = object(case);
@@ -632,6 +633,7 @@ fn replay_group(group: &str) {
         failures.len(),
         failures.join("\n")
     );
+    counts
 }
 
 #[test]
@@ -639,9 +641,21 @@ fn recorded_builds_and_repository_checks() {
     replay_group("build");
 }
 
+/// Without a checkout of the shared vectors every case of this group is
+/// skipped. Where the environment names a checkout, the cases must have
+/// been replayed: a run that is meant to cover them cannot pass by
+/// skipping them.
 #[test]
 fn recorded_verifications_of_the_shared_vectors() {
-    replay_group("vector");
+    let counts = replay_group("vector");
+    if std::env::var_os(VECTORS_ENV).is_some() {
+        assert_eq!(
+            counts.get("skipped"),
+            None,
+            "{VECTORS_ENV} is set, yet cases were skipped: {counts:?}"
+        );
+        assert!(counts.get("agree").is_some_and(|agree| *agree >= 72));
+    }
 }
 
 #[test]

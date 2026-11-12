@@ -59,6 +59,9 @@ jobs:
       - name: Test the verifier crate
         run: cargo test --locked -p tinfoil-verifier --verbose
 
+      - name: Test the verifier crate with serde
+        run: cargo test --locked -p tinfoil-verifier --features serde --verbose
+
       - name: Check if API key is available
         # Bash only — Windows runner uses pwsh by default, but bash is
         # available there too. Force it explicitly so the heredoc syntax
@@ -112,6 +115,9 @@ jobs:
 
       - name: Test the verifier crate on MSRV
         run: cargo test --locked -p tinfoil-verifier --verbose
+
+      - name: Test the verifier crate with serde on MSRV
+        run: cargo test --locked -p tinfoil-verifier --features serde --verbose
 
   lint:
     name: Format and clippy (v3 crates)
@@ -169,9 +175,12 @@ jobs:
           # Documentation tests are built by rustdoc, which takes its own flags.
           RUSTDOCFLAGS: --cfg tinfoil_conformance
           TINFOIL_CONFORMANCE_VECTORS: ${{ github.workspace }}/tinfoil-conformance/vectors/v3
+        # The verifier's own tests run here too: with the vectors at hand
+        # its replay of them checks every recorded verdict, and it fails
+        # if a case is skipped.
         run: |
           cargo test --locked -p tinfoil-conformance -- --nocapture
-          cargo test --locked -p tinfoil-verifier --doc
+          cargo test --locked -p tinfoil-verifier
 
   deny:
     name: Banned dependencies
