@@ -81,6 +81,42 @@
 //! attested HPKE key and stay private through a proxy; the method, URL and
 //! headers are not sealed, and neither is a request without a body.
 //!
+//! # Limits of the protection
+//!
+//! - **[`TransportMode::Ehbp`] does not authenticate the end of a
+//!   response.** Each part of a sealed response body is authenticated, and
+//!   so is the order of the parts: the content cannot be forged, altered
+//!   or reordered. Nothing marks the last part, so whoever controls the
+//!   connection can end a sealed response early between two parts, or
+//!   return one with no parts, and the read ends without an error. A
+//!   response that is cut inside a part is an error. A caller that needs
+//!   to know that a response is complete checks the response's own
+//!   terminator: that the JSON document is whole, or that the final event
+//!   of a stream arrived. The event-stream parser reports a stream that
+//!   is cut inside an event.
+//! - **In [`TransportMode::Ehbp`] a request without a body is sent as it
+//!   is**, and its response is returned as it arrives, neither encrypted
+//!   nor authenticated. An error response to a sealed request that is not
+//!   sealed itself is passed through as received, since a proxy may
+//!   refuse a request before it reaches the enclave; nothing of it is
+//!   authenticated. A `2xx` response to a sealed request that is not
+//!   sealed is refused.
+//! - **A request without a cache secret uses the prompt-cache namespace
+//!   that all such requests share.** No secret is added by an enclave
+//!   client whose `user_cache_secret` option is unset; to a request that
+//!   is not a `POST` with a body to a path ending in `/chat/completions`,
+//!   `/completions` or `/responses`; to a body that is not a single JSON
+//!   object; to a body in which `user_cache_secret` appears more than
+//!   once or with a value that is not a string; or, on a router client
+//!   that has no secret from its option, the environment or its file,
+//!   when the operating system supplies no random bytes for a new one. A
+//!   non-empty `user_cache_secret` string in the body is kept.
+//! - **The router list is not trusted.** [`RouterHttpClient`] takes its
+//!   candidates from a list that is fetched over ordinary HTTPS, and
+//!   verifies each router like any other enclave before it uses it. A
+//!   wrong list can only cause attempts that fail, within the fixed time
+//!   that discovery may take.
+//!
 //! # Features
 //!
 //! | feature | what it adds |
