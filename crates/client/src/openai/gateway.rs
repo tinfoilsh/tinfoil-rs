@@ -135,8 +135,9 @@ impl GatewayOpenAIClientBuilder {
         self
     }
 
-    /// See [`GatewayHttpClientBuilder::timeout`]. It also bounds each
-    /// attempt of an OpenAI call.
+    /// See [`GatewayHttpClientBuilder::timeout`]. Of an OpenAI call it
+    /// bounds each request that the call sends and each wait between two
+    /// attempts, not the call as a whole.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.http = self.http.timeout(timeout);
         self

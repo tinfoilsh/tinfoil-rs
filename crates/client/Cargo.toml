@@ -24,7 +24,6 @@ openai = [
     "dep:base64",
     "dep:bytes",
     "dep:futures-core",
-    "dep:tower-layer",
     "dep:tower-service",
 ]
 # Further API families of async-openai. Each implies `openai` and enables
@@ -130,8 +129,7 @@ async-stream = { version = "0.3", optional = true }
 base64 = { version = "0.22", optional = true }
 bytes = { version = "1", optional = true }
 futures-core = { version = "0.3", optional = true }
-# The traits of the service that is installed under async-openai.
-tower-layer = { version = "0.3", optional = true }
+# The trait of the service that is installed under async-openai.
 tower-service = { version = "0.3", optional = true }
 
 # Gateway (feature `unstable-gateway`): the cache salt and the cache prefix.

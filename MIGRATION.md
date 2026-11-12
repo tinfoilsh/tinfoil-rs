@@ -370,6 +370,13 @@ the `tinfoil-verifier` crate:
 - A `429` or `5xx` response is tried again at most twice, except a `429` whose
   error is `insufficient_quota`, which is reported at once. A failure of the
   attested client (verification, connection, deadline) is reported once.
+- The wait is 0.5 s before the first retry and 1 s before the second, each
+  shortened at random by up to a quarter. `Retry-After-Ms` and `Retry-After`
+  (seconds or an HTTP date) are obeyed up to 2 minutes, or up to the `timeout`
+  option if that is shorter; a response that asks for more is not tried again
+  and is reported at once.
+- `timeout` bounds each attempt and each wait between attempts, not the call
+  as a whole.
 
 ## New in 0.3
 

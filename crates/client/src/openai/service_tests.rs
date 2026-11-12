@@ -27,6 +27,7 @@ use crate::internal::enclave::Enclave;
 use crate::internal::testing::{Record, Script, Step, record, tokio_clock};
 use crate::internal::transport::{Failure, Mode, RoundTrip, Transport};
 use crate::openai::relaxed::RelaxedChat;
+use crate::openai::retry::Waits;
 use crate::options::{Secret, TransportMode};
 use crate::request::Execute;
 
@@ -65,8 +66,13 @@ struct Kit {
 impl Kit {
     fn new(client: AttestedClient<Record>, mode: TransportMode) -> Self {
         let api_base = client.openai_url().clone();
+        let waits = Waits {
+            timeout: client.timeout(),
+            clock: tokio_clock(),
+        };
         let http: Arc<dyn Execute> = Arc::new(client);
-        let (openai, sender) = openai_client(config(), &api_base, Arc::clone(&http), mode).unwrap();
+        let (openai, sender) =
+            openai_client(config(), &api_base, Arc::clone(&http), mode, waits).unwrap();
         Self {
             openai,
             sender,
@@ -159,6 +165,8 @@ struct Sent {
 enum Answer {
     Respond(u16, &'static str),
     RespondWith(u16, &'static str, &'static str, &'static str),
+    /// This response as it is.
+    Whole(Response),
     LacksKey,
     Fail(Error),
     /// A response whose body delivers this text and then breaks.
@@ -221,6 +229,7 @@ impl RoundTrip for Binding {
                         .body(body);
                     Ok(Response::from(response.unwrap()))
                 }
+                Answer::Whole(response) => Ok(response),
                 Answer::LacksKey => Err(Failure::peer_lacks_key(Error::attestation(
                     "the peer does not hold the attested key",
                 ))),
@@ -262,6 +271,16 @@ async fn fake(
     secret: Option<&str>,
     answers: impl Fn(&Sent, usize) -> Answer + Send + Sync + 'static,
 ) -> Fake {
+    fake_within(None, steps, secret, answers).await
+}
+
+/// As [`fake`], with the `timeout` option.
+async fn fake_within(
+    timeout: Option<Duration>,
+    steps: Vec<Step>,
+    secret: Option<&str>,
+    answers: impl Fn(&Sent, usize) -> Answer + Send + Sync + 'static,
+) -> Fake {
     let script = Script::new(steps);
     let sent = Arc::new(Mutex::new(Vec::new()));
     let mode = Scripted {
@@ -278,7 +297,7 @@ async fn fake(
             mode: TransportMode::Tls,
             base_url: None,
             secret: secret.map(Secret::new),
-            timeout: None,
+            timeout,
         },
     )
     .unwrap();
@@ -369,8 +388,39 @@ async fn a_rate_limit_or_a_server_error_is_tried_three_times_in_all() {
     .await
 }
 
+/// A response that fails with `status` and one header, and then, on the
+/// next attempt, a success. Returns how long the call took and how many
+/// requests were sent.
+async fn retried_after(
+    timeout: Option<Duration>,
+    status: u16,
+    header: (&'static str, &'static str),
+) -> (Duration, usize, Result<(), OpenAIError>) {
+    const LIMITED: &str = r#"{"error":{"message":"slow down","type":"rate_limit"}}"#;
+    let f = fake_within(timeout, vec![ready("first")], None, move |_, before| {
+        if before == 0 {
+            Answer::RespondWith(status, header.0, header.1, LIMITED)
+        } else {
+            Answer::Respond(200, CHAT_RESPONSE)
+        }
+    })
+    .await;
+    let started = tokio::time::Instant::now();
+    let result = f.openai.chat().create(chat_request()).await.map(|_| ());
+    (started.elapsed(), f.sent().len(), result)
+}
+
+/// The backoff before the first retry: half a second, less up to a
+/// quarter.
+fn assert_first_backoff(waited: Duration) {
+    assert!(
+        waited > Duration::from_millis(375) && waited <= Duration::from_millis(500),
+        "{waited:?}"
+    );
+}
+
 #[tokio::test(start_paused = true)]
-async fn a_retry_waits_for_its_backoff_or_for_what_the_response_asks() {
+async fn a_retry_waits_for_its_backoff_or_for_what_the_response_asks_within_the_limit() {
     unstuck(async {
         const BROKEN: &str = r#"{"error":{"message":"broken","type":"server_error"}}"#;
         let f = fake(vec![ready("first")], None, |_, _| {
@@ -379,19 +429,243 @@ async fn a_retry_waits_for_its_backoff_or_for_what_the_response_asks() {
         .await;
         let started = tokio::time::Instant::now();
         f.openai.chat().create(chat_request()).await.unwrap_err();
-        assert_eq!(started.elapsed(), Duration::from_millis(100 + 200));
+        let waited = started.elapsed();
+        assert!(
+            waited > Duration::from_millis(375 + 750) && waited <= Duration::from_millis(1500),
+            "{waited:?}"
+        );
 
-        let f = fake(vec![ready("first")], None, |_, before| {
-            if before == 0 {
-                Answer::RespondWith(503, "retry-after", "7", BROKEN)
-            } else {
-                Answer::Respond(200, CHAT_RESPONSE)
+        for status in [429, 503] {
+            // Seconds, with or without a fraction, and milliseconds.
+            let (waited, sent, result) = retried_after(None, status, ("retry-after", "7")).await;
+            assert_eq!((waited, sent), (Duration::from_secs(7), 2));
+            result.unwrap();
+            let (waited, sent, _) = retried_after(None, status, ("retry-after", "1.5")).await;
+            assert_eq!((waited, sent), (Duration::from_millis(1500), 2));
+            let (waited, sent, _) = retried_after(None, status, ("retry-after-ms", "250")).await;
+            assert_eq!((waited, sent), (Duration::from_millis(250), 2));
+            // The longest wait that is obeyed.
+            let (waited, sent, _) = retried_after(None, status, ("retry-after", "120")).await;
+            assert_eq!((waited, sent), (Duration::from_secs(120), 2));
+            // No wait at all.
+            let (waited, sent, _) = retried_after(None, status, ("retry-after", "0")).await;
+            assert_eq!((waited, sent), (Duration::ZERO, 2));
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_response_that_asks_for_too_long_a_wait_ends_the_call_at_once() {
+    unstuck(async {
+        // The clock of the tests starts at this instant, so these are
+        // three minutes and a century ahead.
+        const SOON: &str = "Fri, 15 Jan 2027 08:03:00 GMT";
+        const FAR: &str = "Thu, 15 Jan 2126 08:00:00 GMT";
+        for header in [
+            ("retry-after", "121"),
+            ("retry-after", "120.001"),
+            ("retry-after", "4000000000"),
+            ("retry-after", "18446744073709551616"),
+            ("retry-after", "1e400"),
+            ("retry-after", "inf"),
+            ("retry-after-ms", "120001"),
+            ("retry-after-ms", "99999999999999999999999"),
+            ("retry-after", SOON),
+            ("retry-after", FAR),
+        ] {
+            // A server error is returned as the response that it was.
+            let (waited, sent, result) = retried_after(None, 503, header).await;
+            assert_eq!((waited, sent), (Duration::ZERO, 1), "{header:?}");
+            match result {
+                Err(OpenAIError::ApiError(error)) => assert_eq!(error.status_code, 503),
+                other => panic!("{header:?}: {other:?}"),
             }
+            // A rate limit is the API's error.
+            let (waited, sent, result) = retried_after(None, 429, header).await;
+            assert_eq!((waited, sent), (Duration::ZERO, 1), "{header:?}");
+            match result {
+                Err(OpenAIError::ApiError(error)) => {
+                    assert_eq!(error.status_code, 429);
+                    assert_eq!(error.api_error.message, "slow down");
+                }
+                other => panic!("{header:?}: {other:?}"),
+            }
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wait_never_outlasts_the_timeout_option() {
+    unstuck(async {
+        let five = Some(Duration::from_secs(5));
+        // Within the timeout: obeyed.
+        let (waited, sent, result) = retried_after(five, 503, ("retry-after", "5")).await;
+        assert_eq!((waited, sent), (Duration::from_secs(5), 2));
+        result.unwrap();
+        // Beyond it, though within the fixed limit: the call ends.
+        for header in [
+            ("retry-after", "6"),
+            ("retry-after", "4000000000"),
+            ("retry-after-ms", "5001"),
+            ("retry-after", "Fri, 15 Jan 2027 08:00:06 GMT"),
+        ] {
+            let (waited, sent, result) = retried_after(five, 503, header).await;
+            assert_eq!((waited, sent), (Duration::ZERO, 1), "{header:?}");
+            assert!(matches!(result, Err(OpenAIError::ApiError(_))), "{header:?}");
+        }
+        // The backoff is cut to the timeout.
+        let brief = Some(Duration::from_millis(100));
+        let (waited, sent, _) = retried_after(brief, 503, ("x-unrelated", "1")).await;
+        assert_eq!(sent, 2);
+        assert!(
+            waited > Duration::from_millis(75) && waited <= Duration::from_millis(100),
+            "{waited:?}"
+        );
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wait_that_cannot_be_read_is_the_backoff() {
+    unstuck(async {
+        for header in [
+            ("retry-after", "-1"),
+            ("retry-after", "-4000000000"),
+            ("retry-after", "-inf"),
+            ("retry-after", "nan"),
+            ("retry-after", "soon"),
+            ("retry-after", "7 seconds"),
+            ("retry-after", "0x10"),
+            ("retry-after", ""),
+            ("retry-after-ms", "-5"),
+            ("retry-after-ms", "Fri, 15 Jan 2027 08:01:00 GMT"),
+            // Not in the preferred format of an HTTP date.
+            ("retry-after", "Friday, 15-Jan-27 08:01:00 GMT"),
+            ("retry-after", "Fri, 15 Jan 2027 08:01:00 PST"),
+        ] {
+            let (waited, sent, result) = retried_after(None, 503, header).await;
+            assert_eq!(sent, 2, "{header:?}");
+            assert_first_backoff(waited);
+            result.unwrap();
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_date_is_waited_for_and_a_date_in_the_past_is_no_wait() {
+    unstuck(async {
+        // The clock of the tests starts at 2027-01-15 08:00:00 UTC.
+        let (waited, sent, result) =
+            retried_after(None, 429, ("retry-after", "Fri, 15 Jan 2027 08:01:30 GMT")).await;
+        assert_eq!((waited, sent), (Duration::from_secs(90), 2));
+        result.unwrap();
+        for past in [
+            "Fri, 15 Jan 2027 08:00:00 GMT",
+            "Fri, 15 Jan 2027 07:59:59 GMT",
+            "Thu, 01 Jan 1970 00:00:00 GMT",
+        ] {
+            let (waited, sent, _) = retried_after(None, 503, ("retry-after", past)).await;
+            assert_eq!((waited, sent), (Duration::ZERO, 2), "{past}");
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn milliseconds_are_preferred_and_a_bad_value_falls_through_to_the_seconds() {
+    unstuck(async {
+        const BROKEN: &str = r#"{"error":{"message":"broken","type":"server_error"}}"#;
+        let both = |ms: &'static str, seconds: &'static str| async move {
+            let f = fake(vec![ready("first")], None, move |_, before| {
+                if before == 0 {
+                    let response = http::Response::builder()
+                        .status(503)
+                        .header("retry-after", seconds)
+                        .header("retry-after-ms", ms)
+                        .body(BROKEN);
+                    Answer::Whole(Response::from(response.unwrap()))
+                } else {
+                    Answer::Respond(200, CHAT_RESPONSE)
+                }
+            })
+            .await;
+            let started = tokio::time::Instant::now();
+            let result = f.openai.chat().create(chat_request()).await.map(|_| ());
+            (started.elapsed(), f.sent().len(), result.is_ok())
+        };
+        assert_eq!(both("300", "9").await, (Duration::from_millis(300), 2, true));
+        assert_eq!(both("-1", "9").await, (Duration::from_secs(9), 2, true));
+        assert_eq!(both("soon", "9").await, (Duration::from_secs(9), 2, true));
+        // Too long in the preferred header: the other is not consulted.
+        assert_eq!(both("120001", "1").await, (Duration::ZERO, 1, false));
+        assert_eq!(both("1", "4000000000").await, (Duration::from_millis(1), 2, true));
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_wait_of_a_call_is_bounded_and_the_last_attempt_waits_for_nothing() {
+    unstuck(async {
+        const BROKEN: &str = r#"{"error":{"message":"broken","type":"server_error"}}"#;
+        // Each response asks for the longest wait that is obeyed.
+        let f = fake(vec![ready("first")], None, |_, _| {
+            Answer::RespondWith(503, "retry-after", "120", BROKEN)
         })
         .await;
         let started = tokio::time::Instant::now();
-        f.openai.chat().create(chat_request()).await.unwrap();
-        assert_eq!(started.elapsed(), Duration::from_secs(7));
+        f.openai.chat().create(chat_request()).await.unwrap_err();
+        assert_eq!(started.elapsed(), Duration::from_secs(240));
+        assert_eq!(f.sent().len(), 3);
+
+        // The last response asks for too long a wait, which changes
+        // nothing: no attempt would follow it.
+        let f = fake(vec![ready("first")], None, |_, before| {
+            let wait = if before < 2 { "1" } else { "4000000000" };
+            Answer::RespondWith(503, "retry-after", wait, BROKEN)
+        })
+        .await;
+        let started = tokio::time::Instant::now();
+        f.openai.chat().create(chat_request()).await.unwrap_err();
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        assert_eq!(f.sent().len(), 3);
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_relaxed_request_obeys_the_same_bounds_on_its_waits() {
+    unstuck(async {
+        let relaxed = |timeout: Option<Duration>, wait: &'static str| async move {
+            let f = fake_within(timeout, vec![ready("first")], None, move |_, before| {
+                if before == 0 {
+                    Answer::RespondWith(503, "retry-after", wait, BROKEN)
+                } else {
+                    Answer::Respond(200, CHAT_RESPONSE)
+                }
+            })
+            .await;
+            let started = tokio::time::Instant::now();
+            let result = f.openai.relaxed().create(serde_json::json!({})).await;
+            (started.elapsed(), f.sent().len(), result.is_ok())
+        };
+        assert_eq!(relaxed(None, "7").await, (Duration::from_secs(7), 2, true));
+        assert_eq!(relaxed(None, "4000000000").await, (Duration::ZERO, 1, false));
+        assert_eq!(relaxed(None, "-3").await.1, 2);
+        let five = Some(Duration::from_secs(5));
+        assert_eq!(relaxed(five, "6").await, (Duration::ZERO, 1, false));
+
+        // And a relaxed stream, before it starts.
+        let f = fake(vec![ready("first")], None, |_, _| {
+            Answer::RespondWith(503, "retry-after", "4000000000", BROKEN)
+        })
+        .await;
+        let started = tokio::time::Instant::now();
+        let result = f.openai.relaxed().create_stream(serde_json::json!({})).await;
+        assert!(matches!(result, Err(OpenAIError::ApiError(_))));
+        assert_eq!((started.elapsed(), f.sent().len()), (Duration::ZERO, 1));
     })
     .await
 }
@@ -508,9 +782,19 @@ async fn an_api_base_on_another_origin_is_refused_by_the_client_underneath() {
         )
         .unwrap();
         let elsewhere = Url::parse("https://evil.example.com/v1/").unwrap();
-        let openai = openai_client(config(), &elsewhere, Arc::new(client), TransportMode::Tls)
-            .unwrap()
-            .0;
+        let waits = Waits {
+            timeout: None,
+            clock: tokio_clock(),
+        };
+        let openai = openai_client(
+            config(),
+            &elsewhere,
+            Arc::new(client),
+            TransportMode::Tls,
+            waits,
+        )
+        .unwrap()
+        .0;
         let error = openai.chat().create(chat_request()).await.unwrap_err();
         let found = client_error(&error);
         assert_eq!(found.kind(), ErrorKind::Configuration);

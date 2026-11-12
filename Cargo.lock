@@ -2034,7 +2034,6 @@ dependencies = [
  "tinfoil-verifier",
  "tokio",
  "tokio-rustls",
- "tower-layer",
  "tower-service",
  "url",
  "webpki-roots",

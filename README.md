@@ -247,7 +247,7 @@ See also the [error handling guide](https://docs.tinfoil.sh/sdk/error-handling).
 
 ## Timeouts and retries
 
-**Deadlines.** By default a client sets no overall deadline. The builders' `timeout(duration)` bounds each operation of the client: `connect`, each `ensure_verified` and `reverify`, and each request from the call until the response body has been read, including the wait for a verification that the request needs. A request's own `timeout` replaces it for that request. On the OpenAI clients it bounds each attempt of a call, not the backoff between attempts. Dropping a future cancels its operation.
+**Deadlines.** By default a client sets no overall deadline. The builders' `timeout(duration)` bounds each operation of the client: `connect`, each `ensure_verified` and `reverify`, and each request from the call until the response body has been read, including the wait for a verification that the request needs. A request's own `timeout` replaces it for that request. On the OpenAI clients it bounds each request that a call sends and each wait between two attempts, not the call as a whole: a call has up to three attempts and two waits, so it can take several times the timeout. Dropping a future cancels its operation.
 
 These bounds are fixed:
 
@@ -261,7 +261,7 @@ These bounds are fixed:
 
 - A verification that fails with a network or attestation error is tried once more after one second. A configuration error and a rejection by `verification_check` are not tried again. During discovery, each listed router gets a single verification.
 - A request that the enclave rejects because its keys changed is sent once more after a new verification, if its body can be sent again. A streamed body cannot; the OpenAI clients rebuild an upload once.
-- The OpenAI clients send a call again at most twice (three attempts) when the response has status `429` or `5xx`, after a backoff or the response's `Retry-After`. A `429` whose error is `insufficient_quota` is not tried again. An error of the SDK itself (a refused verification, a refused request, a failed connection, a deadline) is reported once. Nothing is tried again once a stream has started.
+- The OpenAI clients send a call again at most twice (three attempts) when the response has status `429` or `5xx`. The wait is half a second before the first retry and one second before the second, each shortened at random by up to a quarter. A response can name the wait itself, in `Retry-After-Ms` (milliseconds) or `Retry-After` (seconds or an HTTP date); it is obeyed up to two minutes, or up to the `timeout` option if that is shorter. A response that asks for a longer wait is not tried again, and the call returns its error at once. A `429` whose error is `insufficient_quota` is not tried again. An error of the SDK itself (a refused verification, a refused request, a failed connection, a deadline) is reported once. Nothing is tried again once a stream has started.
 - The HTTP clients do not retry on a status code.
 
 ## More on the OpenAI clients
