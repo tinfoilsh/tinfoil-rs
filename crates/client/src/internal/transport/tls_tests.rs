@@ -150,11 +150,13 @@ mod made {
         )
     }
 
-    /// The names of the local server: its address and `localhost`.
+    /// The names of the local server: its address, `localhost`, and the
+    /// name that the tests reach it by through a proxy.
     fn local() -> Vec<GeneralName> {
         vec![
             GeneralName::IpAddress(OctetString::new([127, 0, 0, 1]).unwrap()),
             GeneralName::DnsName(Ia5String::new("localhost").unwrap()),
+            GeneralName::DnsName(Ia5String::new("enclave.test").unwrap()),
         ]
     }
 
@@ -247,6 +249,13 @@ struct Server {
 impl Server {
     fn url(&self, path: &str) -> Url {
         Url::parse(&format!("https://127.0.0.1:{}{path}", self.port)).unwrap()
+    }
+    /// A request for the server by a name that is not a loopback name, so
+    /// that a configured proxy applies to it. Only a proxy that connects to
+    /// the server on its own can deliver it.
+    fn get_by_name(&self, path: &str) -> Request {
+        let url = format!("https://enclave.test:{}{path}", self.port);
+        Request::new(Method::GET, Url::parse(&url).unwrap())
     }
     fn get(&self, path: &str) -> Request {
         Request::new(Method::GET, self.url(path))
@@ -741,6 +750,83 @@ async fn silent_proxy() -> (reqwest::Proxy, Arc<AtomicUsize>) {
     });
     let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).unwrap();
     (proxy, connections)
+}
+
+/// A forward proxy that answers each `CONNECT` by opening a tunnel to the
+/// local server on `port`, whatever host the client named, and records the
+/// request lines that it received.
+async fn tunnel_proxy(port: u16) -> (reqwest::Proxy, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&lines);
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let log = Arc::clone(&log);
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match client.read(&mut buffer).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&buffer[..n]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&head).into_owned();
+                log.lock()
+                    .unwrap()
+                    .push(head.lines().next().unwrap_or_default().to_owned());
+                let Ok(mut upstream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await
+                else {
+                    return;
+                };
+                if client
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            });
+        }
+    });
+    let proxy = reqwest::Proxy::all(format!("http://{address}")).unwrap();
+    (proxy, lines)
+}
+
+#[tokio::test]
+async fn a_connection_through_a_proxys_tunnel_is_pinned_like_a_direct_one() {
+    // The server holds key A.
+    let server = serve(&LEAF_A, &KEY_A, OK).await;
+    let (proxy, lines) = tunnel_proxy(server.port).await;
+    let mode = TlsMode::for_test(roots(), Some(proxy));
+    let connect = format!("CONNECT enclave.test:{} HTTP/1.1", server.port);
+
+    // Pinned to key A: the request goes through the tunnel and arrives.
+    let pinned = mode.bind(&evidence("pinned", &LEAF_A)).unwrap();
+    let response = pinned.send(server.get_by_name("/tunnelled")).await.unwrap();
+    assert_eq!(response.body().await.unwrap(), "/tunnelled");
+    assert_eq!(*lines.lock().unwrap(), [connect.clone()]);
+    assert_eq!(server.requests(), ["GET /tunnelled HTTP/1.1"]);
+
+    // Pinned to key B: the tunnel opens, the handshake inside it presents
+    // a certificate that is valid for the name, and the pin refuses it.
+    let other = mode.bind(&evidence("other", &LEAF_B)).unwrap();
+    let failure = other.send(server.get_by_name("/secret")).await.unwrap_err();
+    assert_eq!(failure.key, KeyFailure::PeerLacksKey);
+    assert_eq!(failure.error.kind(), ErrorKind::Attestation);
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("does not carry the attested key"),
+        "{}",
+        failure.error
+    );
+    assert_eq!(*lines.lock().unwrap(), [connect.clone(), connect]);
+    // Nothing was sent to the server by the refused client.
+    assert_eq!(server.requests(), ["GET /tunnelled HTTP/1.1"]);
 }
 
 #[tokio::test]
