@@ -28,6 +28,15 @@ const OID_CRL_NUMBER: ::der::asn1::ObjectIdentifier =
 /// `id-ce-cRLReasons`.
 const OID_REASON_CODE: ::der::asn1::ObjectIdentifier =
     ::der::asn1::ObjectIdentifier::new_unwrap("2.5.29.21");
+/// `id-ce-deltaCRLIndicator`.
+const OID_DELTA_CRL_INDICATOR: ::der::asn1::ObjectIdentifier =
+    ::der::asn1::ObjectIdentifier::new_unwrap("2.5.29.27");
+/// `id-ce-issuingDistributionPoint`.
+const OID_ISSUING_DISTRIBUTION_POINT: ::der::asn1::ObjectIdentifier =
+    ::der::asn1::ObjectIdentifier::new_unwrap("2.5.29.28");
+/// `id-ce-certificateIssuer`.
+const OID_CERTIFICATE_ISSUER: ::der::asn1::ObjectIdentifier =
+    ::der::asn1::ObjectIdentifier::new_unwrap("2.5.29.29");
 
 /// A parsed certificate revocation list. Parsing establishes its form only;
 /// [`Crl::verify_issued_by`] establishes who issued it and
@@ -105,15 +114,16 @@ impl Crl {
     ///   [`parse_utc_time`](super::der::parse_utc_time) and
     ///   [`parse_generalized_time`](super::der::parse_generalized_time)
     ///   without a fraction;
-    /// - an entry is a serial number, a revocation time and optional
-    ///   extensions, none of them critical: a critical certificate issuer
-    ///   extension would mean that the list covers other issuers'
+    /// - an entry is a serial number that is not negative, a revocation
+    ///   time and optional extensions, none of them critical. A
+    ///   certificate issuer extension rejects whether or not it is marked
+    ///   critical: it would mean that the list covers other issuers'
     ///   certificates. A reason code is an ENUMERATED;
-    /// - no critical list extension other than the CRL number; in
-    ///   particular a delta CRL indicator or an issuing distribution point
-    ///   rejects, because such a list does not speak for every certificate
-    ///   of its issuer. An authority key identifier is well formed and not
-    ///   critical, and a CRL number is an INTEGER;
+    /// - no critical list extension other than the CRL number. A delta CRL
+    ///   indicator or an issuing distribution point rejects whether or not
+    ///   it is marked critical, because such a list does not speak for
+    ///   every certificate of its issuer. An authority key identifier is
+    ///   well formed and not critical, and a CRL number is an INTEGER;
     /// - the signature bit string has no unused bits.
     pub fn from_der(der: &[u8]) -> Result<Self, X509Error> {
         if der.len() > MAX_CRL_SIZE {
@@ -169,6 +179,12 @@ impl Crl {
                 let mut entry = entries.expect(TAG_SEQUENCE)?.reader();
                 let serial = entry.expect(TAG_INTEGER)?.content;
                 check_integer(serial)?;
+                // No certificate has a negative serial number, and one
+                // must not be mistaken for the positive number with the
+                // same magnitude.
+                if serial.first().is_some_and(|first| first & 0x80 != 0) {
+                    return Err(error("revocation list entry has a negative serial number"));
+                }
                 time(&mut entry)?;
                 if let Some(extensions) = entry.optional(TAG_SEQUENCE)? {
                     let mut extensions = extensions.reader();
@@ -178,6 +194,11 @@ impl Crl {
                             return Err(error(format!(
                                 "revocation list entry has a critical extension {oid}"
                             )));
+                        }
+                        // The entry would be for another issuer's
+                        // certificate, however the extension is marked.
+                        if oid == OID_CERTIFICATE_ISSUER {
+                            return Err(error("revocation list entry names a certificate issuer"));
                         }
                         if oid == OID_REASON_CODE {
                             let reason = single_element(value)?;
@@ -209,6 +230,12 @@ impl Crl {
                 } else if critical {
                     return Err(error(format!(
                         "revocation list has a critical extension {oid}"
+                    )));
+                } else if oid == OID_DELTA_CRL_INDICATOR || oid == OID_ISSUING_DISTRIBUTION_POINT {
+                    // Such a list covers only part of what its issuer has
+                    // revoked, however the extension is marked.
+                    return Err(error(format!(
+                        "revocation list carries extension {oid}, which limits what it covers"
                     )));
                 }
             }
