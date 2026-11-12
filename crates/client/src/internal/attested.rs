@@ -110,7 +110,7 @@ impl<V: Evidence> AttestedClient<V> {
         let origin = authority_url(&host)?;
 
         let chain: Arc<dyn RoundTrip> = Arc::new(transport.clone());
-        let chain = with_enclave_url(chain, &host, base_url.as_ref());
+        let chain = with_enclave_url(chain, &host, base_url.as_ref())?;
         let chain = with_replay(chain);
         let chain = with_cache_secret(chain, secret);
         let chain = with_origin_restriction(chain, Some(&host), base_url.as_ref())?;
