@@ -137,6 +137,7 @@ impl From<Fault> for OpenAIError {
 /// The state of reading an event stream: the line and the event that are
 /// being collected.
 #[derive(Default)]
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct Decoder {
     /// The bytes of the current line, without its end.
     line: Vec<u8>,
@@ -223,12 +224,10 @@ impl Decoder {
             // A comment.
             "" => {}
             "data" => {
-                // The data, with the line feed after each of its lines.
-                let size = self
-                    .data
-                    .len()
-                    .saturating_add(value.len())
-                    .saturating_add(1);
+                // The data as it would be joined: `data` already ends
+                // with the line feed that separates this line from the
+                // ones before it.
+                let size = self.data.len().saturating_add(value.len());
                 if size > MAX_EVENT_BYTES {
                     return Err(Fault::EventTooLarge);
                 }
@@ -484,9 +483,20 @@ mod tests {
             assert_eq!(decoder.feed(line.as_bytes(), &mut events), Ok(false));
         }
         assert_eq!(
-            decoder.feed(line.as_bytes(), &mut events),
+            decoder.clone().feed(line.as_bytes(), &mut events),
             Err(Fault::EventTooLarge)
         );
+        assert!(events.is_empty());
+
+        // The limit is on the joined data: an empty last line brings it
+        // to the limit exactly, and one more does not fit.
+        assert_eq!(decoder.feed(b"data:\n", &mut events), Ok(false));
+        assert_eq!(
+            decoder.clone().feed(b"data:\n", &mut events),
+            Err(Fault::EventTooLarge)
+        );
+        assert_eq!(decoder.feed(b"\n", &mut events), Ok(false));
+        assert_eq!(events.pop().map(|data| data.len()), Some(MAX_EVENT_BYTES));
         assert!(events.is_empty());
 
         // Events that are each within the limit are not added up.
