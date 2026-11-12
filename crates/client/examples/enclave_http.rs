@@ -1,0 +1,59 @@
+//! An HTTP client for one enclave: first with the defaults, then
+//! configured to send sealed bodies through a proxy.
+//!
+//! ```sh
+//! cargo run -p tinfoil-next --example enclave_http
+//! ```
+
+use std::time::Duration;
+
+use tinfoil_next::{EnclaveHttpClient, ErrorKind, TransportMode};
+
+const ENCLAVE: &str = "inference.tinfoil.sh";
+const REPO: &str = "tinfoilsh/confidential-model-router";
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The enclave is verified before `connect` returns.
+    let client = EnclaveHttpClient::connect(ENCLAVE, REPO).await?;
+
+    let verified = client.current();
+    println!("enclave:     {}", client.enclave());
+    println!("code digest: {}", verified.code_digest());
+    println!("TLS key:     {:?}", verified.tls_public_key_fp());
+
+    // Requests use reqwest's types and go only to the verified enclave.
+    let models = client
+        .get(client.base_url().join("v1/models")?)
+        .bearer_auth(std::env::var("TINFOIL_API_KEY")?)
+        .send()
+        .await?;
+    println!("{}", models.text().await?);
+
+    // A request to any other origin is refused before anything is sent.
+    match client.get("https://example.com/").send().await {
+        Err(error) if error.kind() == ErrorKind::Configuration => println!("refused: {error}"),
+        other => println!("unexpected: {other:?}"),
+    }
+
+    // Configured: bodies are sealed to the enclave's HPKE key and travel
+    // through a proxy, which sees only the method, the URL and the headers.
+    let proxied = EnclaveHttpClient::builder(ENCLAVE, REPO)
+        .transport_mode(TransportMode::Ehbp)
+        .base_url("https://proxy.example.com/tinfoil/")
+        .timeout(Duration::from_secs(60))
+        .connect()
+        .await?;
+
+    let response = proxied
+        .post(proxied.base_url().join("v1/chat/completions")?)
+        .json(&serde_json::json!({
+            "model": "gpt-oss-120b",
+            "messages": [{"role": "user", "content": "Hello!"}],
+        }))
+        .send()
+        .await?;
+    println!("{}", response.status());
+
+    Ok(())
+}

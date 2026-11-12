@@ -1,0 +1,526 @@
+//! The public surface of the crate, as a consumer sees it.
+//!
+//! Every public name is imported from the crate root and every signature is
+//! used once, so that a change to a name, a parameter or a return type
+//! fails to compile here. The async methods are used in functions that are
+//! compiled and never run; the test bodies check the trait implementations
+//! that the clients promise and the few values that need no network.
+
+// The signatures are spelled out in full because they are what the test
+// pins.
+#![allow(clippy::type_complexity)]
+
+use std::error::Error as StdError;
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tinfoil_next::reqwest::header::{HeaderMap, HeaderValue};
+use tinfoil_next::reqwest::{Method, Request, Response, Url};
+use tinfoil_next::verifier::{BoxError, Verification, Verifier};
+use tinfoil_next::{
+    EnclaveHttpClient, EnclaveHttpClientBuilder, Error, ErrorKind, RequestBuilder, ResponseFuture,
+    RouterHttpClient, RouterHttpClientBuilder, TransportMode, VERSION,
+};
+
+fn handle<T: Clone + Send + Sync + std::fmt::Debug + 'static>() {}
+fn service<T>()
+where
+    T: tower_service::Service<Request, Response = Response, Error = Error, Future = ResponseFuture>,
+{
+}
+fn send<T: Send>(value: T) -> T {
+    value
+}
+fn check(_: &Verification) -> Result<(), BoxError> {
+    Ok(())
+}
+
+#[test]
+fn the_version_and_the_enums_read_as_documented() {
+    assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
+
+    assert_eq!(TransportMode::default(), TransportMode::Tls);
+    let _: fn(&TransportMode) -> &'static str = TransportMode::as_str;
+    assert_eq!(
+        [
+            TransportMode::Tls.to_string(),
+            TransportMode::Ehbp.to_string()
+        ],
+        ["tls", "ehbp"]
+    );
+
+    let _: fn(&ErrorKind) -> &'static str = ErrorKind::as_str;
+    assert_eq!(
+        [
+            ErrorKind::Configuration.to_string(),
+            ErrorKind::Network.to_string(),
+            ErrorKind::Attestation.to_string(),
+        ],
+        ["configuration", "network", "attestation"]
+    );
+}
+
+#[test]
+fn the_error_has_a_kind_a_timeout_flag_and_a_source() {
+    let _: fn(&Error) -> ErrorKind = Error::kind;
+    let _: fn(&Error) -> bool = Error::is_timeout;
+    let _: for<'a> fn(&'a Error) -> Option<&'a Error> = Error::earlier_attempt;
+    let _: for<'a> fn(&'a Error) -> Option<&'a (dyn StdError + 'static)> = StdError::source;
+    fn shared<T: StdError + Clone + Send + Sync + 'static>() {}
+    shared::<Error>();
+}
+
+#[test]
+fn the_http_clients_are_handles_and_tower_services() {
+    handle::<EnclaveHttpClient>();
+    handle::<RouterHttpClient>();
+    handle::<EnclaveHttpClientBuilder>();
+    handle::<RouterHttpClientBuilder>();
+    service::<EnclaveHttpClient>();
+    service::<RouterHttpClient>();
+    fn future<T: Future<Output = Result<Response, Error>> + Send + 'static>() {}
+    future::<ResponseFuture>();
+}
+
+#[test]
+fn the_accessors_have_their_signatures() {
+    let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a Url = EnclaveHttpClient::base_url;
+    let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a str = EnclaveHttpClient::enclave;
+    let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a str = EnclaveHttpClient::repo;
+    let _: fn(&EnclaveHttpClient) -> TransportMode = EnclaveHttpClient::transport_mode;
+    let _: fn(&EnclaveHttpClient) -> Arc<Verification> = EnclaveHttpClient::current;
+
+    let _: for<'a> fn(&'a RouterHttpClient) -> &'a Url = RouterHttpClient::base_url;
+    let _: for<'a> fn(&'a RouterHttpClient) -> &'a str = RouterHttpClient::enclave;
+    let _: for<'a> fn(&'a RouterHttpClient) -> &'a str = RouterHttpClient::repo;
+    let _: fn(&RouterHttpClient) -> TransportMode = RouterHttpClient::transport_mode;
+    let _: fn(&RouterHttpClient) -> Arc<Verification> = RouterHttpClient::current;
+    let _: fn() -> RouterHttpClientBuilder = RouterHttpClient::builder;
+}
+
+#[test]
+fn a_builder_does_no_io_and_prints_no_secret() {
+    let builder = EnclaveHttpClient::builder("enclave.example.com", "org/repo")
+        .transport_mode(TransportMode::Ehbp)
+        .base_url("https://user:hunter2@proxy.example.com/")
+        .verifier(Verifier::new())
+        .verification_check(check)
+        .user_cache_secret("cache-scope-value")
+        .timeout(Duration::from_secs(30));
+    let printed = format!("{builder:?}");
+    assert!(!printed.contains("cache-scope-value"), "{printed}");
+    assert!(!printed.contains("hunter2"), "{printed}");
+}
+
+/// The enclave client, as a caller writes it.
+async fn enclave_client(verifier: Arc<Verifier>) -> Result<(), Box<dyn StdError>> {
+    let client: EnclaveHttpClient = send(EnclaveHttpClient::connect(
+        "enclave.example.com",
+        "org/repo",
+    ))
+    .await?;
+
+    let builder: EnclaveHttpClientBuilder =
+        EnclaveHttpClient::builder(String::from("enclave.example.com"), "org/repo@v1.2.3")
+            .transport_mode(TransportMode::Ehbp)
+            .base_url("https://proxy.example.com/")
+            .verifier(verifier)
+            .verification_check(|verified: &Verification| {
+                if verified.code_tag().is_empty() {
+                    return Err("untagged release".into());
+                }
+                Ok(())
+            })
+            .user_cache_secret("opaque-random-value")
+            .timeout(Duration::from_secs(30));
+    let configured: EnclaveHttpClient = send(builder.connect()).await?;
+
+    let current: Arc<Verification> = configured.current();
+    let valid: Arc<Verification> = send(configured.ensure_verified()).await?;
+    let renewed: Arc<Verification> = send(configured.reverify()).await?;
+    let _ = (current, valid, renewed);
+
+    let url: Url = client.base_url().join("v1/x")?;
+    let mut headers = HeaderMap::new();
+    headers.insert("x-trace", HeaderValue::from_static("1"));
+    let request: RequestBuilder = client
+        .post(url.clone())
+        .header("x-one", "1")
+        .headers(headers)
+        .bearer_auth("token")
+        .query(&[("page", "2")])
+        .json(&serde_json::json!({"k": "v"}))
+        .timeout(Duration::from_secs(5));
+    let copy: Option<RequestBuilder> = request.try_clone();
+    let response: Response = send(request.send()).await?;
+    let _ = (copy, response.status());
+
+    let _: RequestBuilder = client.get(url.as_str());
+    let _: RequestBuilder = client.put(url.clone()).body("text");
+    let _: RequestBuilder = client.patch(url.clone()).body(vec![1u8, 2, 3]);
+    let _: RequestBuilder = client.delete(url.clone());
+    let _: RequestBuilder = client.head(url.clone());
+    let built: Request = client.request(Method::OPTIONS, url).build()?;
+    let _: Response = send(client.execute(built)).await?;
+
+    // As a `tower::Service`.
+    let mut as_service = client.clone();
+    let request = Request::new(Method::GET, client.base_url().clone());
+    let pending: ResponseFuture = tower_service::Service::call(&mut as_service, request);
+    let _: Result<Response, Error> = pending.await;
+    Ok(())
+}
+
+/// The router client, as a caller writes it.
+async fn router_client() -> Result<(), Error> {
+    let client: RouterHttpClient = send(RouterHttpClient::connect()).await?;
+    let configured: RouterHttpClient = send(
+        RouterHttpClient::builder()
+            .transport_mode(TransportMode::Ehbp)
+            .base_url("https://proxy.example.com/")
+            .verifier(Arc::new(Verifier::new()))
+            .verification_check(check)
+            .user_cache_secret("opaque-random-value")
+            .timeout(Duration::from_secs(30))
+            .connect(),
+    )
+    .await?;
+    let _: Arc<Verification> = send(configured.ensure_verified()).await?;
+    let _: Arc<Verification> = send(configured.reverify()).await?;
+    let _: Response = client.get(client.base_url().clone()).send().await?;
+    let request = Request::new(Method::GET, client.base_url().clone());
+    let _: Response = send(client.execute(request)).await?;
+    match client.reverify().await {
+        Err(error) if error.is_timeout() => {}
+        Err(error) => match error.kind() {
+            ErrorKind::Configuration | ErrorKind::Network | ErrorKind::Attestation => {}
+            _ => {}
+        },
+        Ok(_) => {}
+    }
+    Ok(())
+}
+
+#[test]
+fn the_callers_of_the_async_surface_compile() {
+    // The functions above are compiled, which is the check; they are not
+    // run, because they would open connections.
+    let _ = enclave_client;
+    let _ = router_client;
+}
+
+#[cfg(feature = "openai")]
+mod openai {
+    use super::*;
+
+    use futures_core::Stream;
+    use serde_json::{Value, json};
+    use tinfoil_next::async_openai::config::OpenAIConfig;
+    use tinfoil_next::async_openai::error::OpenAIError;
+    use tinfoil_next::audio::{CreateTranscriptionRequest, CreateTranscriptionResponseJson};
+    use tinfoil_next::chat::{ImageUrl, InputAudio, InputAudioFormat};
+    use tinfoil_next::embeddings::CreateEmbeddingRequestArgs;
+    use tinfoil_next::multimodal::{ImageUrlExt, InputAudioExt};
+    use tinfoil_next::sse::{EventStream, parse_event_stream};
+    use tinfoil_next::{
+        Client, EnclaveOpenAIClient, EnclaveOpenAIClientBuilder, RelaxedChat,
+        RelaxedChatRequestBuilder, RelaxedResponse, RelaxedStream, RelaxedStreamChunk,
+        RelaxedToolCall, RouterOpenAIClient, RouterOpenAIClientBuilder,
+    };
+
+    type OpenAI = tinfoil_next::async_openai::Client<OpenAIConfig>;
+
+    fn derefs<T: std::ops::Deref<Target = OpenAI>>() {}
+
+    #[test]
+    fn the_openai_clients_are_handles_that_deref_to_async_openai() {
+        handle::<Client>();
+        handle::<EnclaveOpenAIClient>();
+        handle::<RouterOpenAIClient>();
+        handle::<EnclaveOpenAIClientBuilder>();
+        handle::<RouterOpenAIClientBuilder>();
+        derefs::<Client>();
+        derefs::<EnclaveOpenAIClient>();
+        derefs::<RouterOpenAIClient>();
+
+        let _: for<'a> fn(&'a Client) -> &'a RouterHttpClient = Client::http_client;
+        let _: for<'a> fn(&'a Client) -> &'a Url = Client::base_url;
+        let _: for<'a> fn(&'a EnclaveOpenAIClient) -> &'a EnclaveHttpClient =
+            EnclaveOpenAIClient::http_client;
+        let _: for<'a> fn(&'a RouterOpenAIClient) -> &'a RouterHttpClient =
+            RouterOpenAIClient::http_client;
+        let _: for<'a> fn(&'a Client) -> RelaxedChat<'a> = Client::chat_relaxed;
+        let _: for<'a> fn(&'a EnclaveOpenAIClient) -> RelaxedChat<'a> =
+            EnclaveOpenAIClient::chat_relaxed;
+        let _: for<'a> fn(&'a RouterOpenAIClient) -> RelaxedChat<'a> =
+            RouterOpenAIClient::chat_relaxed;
+        let _: for<'a> fn(&'a OpenAIError) -> Option<&'a Error> = Error::from_openai;
+    }
+
+    #[test]
+    fn an_openai_builder_prints_no_api_key() {
+        let config = OpenAIConfig::new().with_api_key("sk-secret-key");
+        let builder = EnclaveOpenAIClient::builder("enclave.example.com", "org/repo", config)
+            .transport_mode(TransportMode::Tls)
+            .base_url("https://enclave.example.com/api/")
+            .verifier(Verifier::new())
+            .verification_check(check)
+            .user_cache_secret("cache-scope-value")
+            .timeout(Duration::from_secs(30));
+        let printed = format!("{builder:?}");
+        assert!(!printed.contains("sk-secret-key"), "{printed}");
+        assert!(!printed.contains("cache-scope-value"), "{printed}");
+    }
+
+    #[test]
+    fn the_relaxed_types_and_the_multimodal_helpers_need_no_client() {
+        let body: Value = RelaxedChatRequestBuilder::new()
+            .model("m")
+            .messages([json!({"role": "user", "content": "hi"})])
+            .push_message(json!({"role": "user", "content": "more"}))
+            .web_search()
+            .web_search_with_options(json!({}))
+            .pii_check()
+            .pii_check_with_options(json!({}))
+            .structured_outputs_choice(["yes", "no"])
+            .structured_outputs_regex("a+")
+            .response_format_json_schema("answer", json!({"type": "object"}))
+            .set("seed", 7)
+            .build();
+        assert_eq!(body.get("model"), Some(&json!("m")));
+        let _: Value = RelaxedChatRequestBuilder::default().into();
+
+        let response = RelaxedResponse::from_value(json!({"choices": []}));
+        let _: Option<&str> = response.content();
+        let _: Option<&str> = response.finish_reason();
+        let _: &[Value] = response.tool_calls();
+        let _: &[Value] = response.annotations();
+        let _: Option<&str> = response.model();
+        let _: Option<&str> = response.id();
+        let _: usize = response.choices_len();
+        let calls: Vec<RelaxedToolCall> = response.typed_tool_calls();
+        for call in &calls {
+            let _: (&Option<String>, &Option<String>, &String) =
+                (&call.id, &call.function_name, &call.arguments_raw);
+            let _: Result<Value, serde_json::Error> = call.arguments();
+        }
+        let _: &Value = response.raw();
+        let _: Value = response.into_raw();
+
+        let chunk = RelaxedStreamChunk::from_value(json!({"type": "web_search_call"}));
+        let _: Option<&str> = chunk.event_type();
+        let _: bool = chunk.is_vendor_event();
+        let _: Option<&str> = chunk.delta_content();
+        let _: &[Value] = chunk.tool_call_deltas();
+        let _: &[Value] = chunk.annotation_deltas();
+        let _: Option<&str> = chunk.finish_reason();
+        let _: &Value = chunk.raw();
+        let _: Value = chunk.into_raw();
+
+        let image: ImageUrl = ImageUrl::from_bytes(b"abc", "image/png");
+        assert!(image.url.starts_with("data:image/png;base64,"));
+        let _: ImageUrl = ImageUrl::from_base64("YWJj", "image/png");
+        let _: std::io::Result<ImageUrl> = ImageUrl::from_path("missing.png");
+        let audio: InputAudio = InputAudio::from_bytes(b"abc", InputAudioFormat::Mp3);
+        assert_eq!(audio.data, "YWJj");
+        let _: std::io::Result<InputAudio> = InputAudio::from_path("missing.mp3");
+    }
+
+    /// The OpenAI clients, as a caller writes them.
+    async fn openai_clients(
+        key: String,
+        transcription: CreateTranscriptionRequest,
+    ) -> Result<(), Box<dyn StdError>> {
+        // The drop-in.
+        let client: Client = send(Client::connect(OpenAIConfig::new().with_api_key(&key))).await?;
+        let router: &RouterHttpClient = client.http_client();
+        let _: Arc<Verification> = router.ensure_verified().await?;
+        let _: Response = router.get(client.base_url().join("models")?).send().await?;
+
+        // `async_openai`'s own API, through `Deref`.
+        let request = CreateEmbeddingRequestArgs::default()
+            .model("nomic-embed-text")
+            .input("hello")
+            .build()?;
+        match client.embeddings().create(request).await {
+            Ok(_) => {}
+            Err(error) => match Error::from_openai(&error) {
+                Some(cause) => assert_ne!(cause.kind(), ErrorKind::Configuration),
+                None => return Err(error.into()),
+            },
+        }
+
+        // The shortcuts.
+        let text: CreateTranscriptionResponseJson = send(client.transcribe(transcription)).await?;
+        let vectors: Vec<Vec<f32>> =
+            send(client.embed_batch("nomic-embed-text", ["a", "b"])).await?;
+        let _ = (text, vectors);
+
+        // The relaxed chat.
+        let relaxed: RelaxedChat<'_> = client.chat_relaxed();
+        let body: RelaxedChatRequestBuilder = relaxed.request().model("m");
+        let response: RelaxedResponse = relaxed.create(body.clone()).await?;
+        let stream: RelaxedStream = relaxed.create_stream(body.build()).await?;
+        fn chunks(_: &impl Stream<Item = Result<RelaxedStreamChunk, OpenAIError>>) {}
+        chunks(&stream);
+        let _ = response;
+
+        // A raw event stream of the caller's own.
+        let raw: Response = router.get(client.base_url().clone()).send().await?;
+        let events: EventStream = parse_event_stream(raw.bytes_stream());
+        fn values(_: &impl Stream<Item = Result<Value, OpenAIError>>) {}
+        values(&events);
+
+        // An explicit enclave.
+        let config = OpenAIConfig::new().with_api_key(&key);
+        let enclave: EnclaveOpenAIClient = send(EnclaveOpenAIClient::connect(
+            "enclave.example.com",
+            "org/repo",
+            config.clone(),
+        ))
+        .await?;
+        let _: &EnclaveHttpClient = enclave.http_client();
+        let builder: EnclaveOpenAIClientBuilder =
+            EnclaveOpenAIClient::builder("enclave.example.com", "org/repo", config.clone())
+                .transport_mode(TransportMode::Ehbp)
+                .base_url("https://proxy.example.com/v1/");
+        let _: EnclaveOpenAIClient = send(builder.connect()).await?;
+
+        // The router, configured.
+        let _: RouterOpenAIClient = send(RouterOpenAIClient::connect(config.clone())).await?;
+        let builder: RouterOpenAIClientBuilder = RouterOpenAIClient::builder(config)
+            .transport_mode(TransportMode::Tls)
+            .verifier(Verifier::new())
+            .verification_check(check)
+            .user_cache_secret("opaque-random-value")
+            .timeout(Duration::from_secs(60));
+        let configured: RouterOpenAIClient = send(builder.connect()).await?;
+        let _: &RouterHttpClient = configured.http_client();
+        let _ = configured.chat_relaxed();
+        Ok(())
+    }
+
+    #[test]
+    fn the_callers_of_the_openai_surface_compile() {
+        let _ = openai_clients;
+    }
+}
+
+#[cfg(feature = "unstable-gateway")]
+mod gateway {
+    use super::*;
+
+    use tinfoil_next::{
+        Catalog, CatalogEntry, GatewayHttpClient, GatewayHttpClientBuilder, ModelPin,
+        ReplicaVerification, fetch_catalog,
+    };
+
+    #[test]
+    fn the_gateway_client_is_a_handle_and_a_tower_service() {
+        handle::<GatewayHttpClient>();
+        handle::<GatewayHttpClientBuilder>();
+        service::<GatewayHttpClient>();
+        let _: for<'a> fn(&'a GatewayHttpClient) -> &'a Url = GatewayHttpClient::base_url;
+        let _: fn(&GatewayHttpClient) -> Vec<ReplicaVerification> = GatewayHttpClient::current;
+    }
+
+    #[test]
+    fn a_pin_and_a_catalog_are_plain_values() {
+        let pin: ModelPin = ModelPin::new("tinfoilsh/model@v1").verifier(Verifier::new());
+        assert_eq!(pin.repo, "tinfoilsh/model@v1");
+        let _: &Option<Arc<Verifier>> = &pin.verifier;
+
+        let mut catalog = Catalog::new();
+        catalog.insert(
+            "model".to_owned(),
+            CatalogEntry {
+                repo: "tinfoilsh/model".to_owned(),
+                hosts: vec!["replica-1.example.com".to_owned()],
+            },
+        );
+        assert_eq!(catalog.len(), 1);
+    }
+
+    /// The gateway client, as a caller writes it.
+    async fn gateway_client(catalog: Arc<Catalog>) -> Result<(), Error> {
+        let fetched: Catalog = send(fetch_catalog("inference-gateway.tinfoil.sh")).await?;
+        let _ = fetched;
+
+        let client: GatewayHttpClient = send(GatewayHttpClient::connect()).await?;
+        let models: Vec<String> = send(client.models()).await?;
+        let verified: Arc<Verification> = send(client.ensure_verified("model")).await?;
+        for replica in client.current() {
+            let _: (
+                &String,
+                &Vec<String>,
+                &String,
+                &Option<String>,
+                &Arc<Verification>,
+            ) = (
+                &replica.host,
+                &replica.models,
+                &replica.reference,
+                &replica.pinned_model,
+                &replica.verification,
+            );
+        }
+        let _: Response = client
+            .post(client.base_url().clone())
+            .body("{}")
+            .send()
+            .await?;
+        let _ = (models, verified);
+
+        let builder: GatewayHttpClientBuilder = GatewayHttpClient::builder()
+            .model_pins([("model", ModelPin::new("tinfoilsh/model"))])
+            .pinned_models_only(true)
+            .verifier(Verifier::new())
+            .verification_check(check)
+            .user_cache_secret("opaque-random-value")
+            .url("https://gateway.example.com/v1/")
+            .catalog(move || Arc::clone(&catalog))
+            .timeout(Duration::from_secs(30));
+        let _: GatewayHttpClient = send(builder.connect()).await?;
+        Ok(())
+    }
+
+    #[test]
+    fn the_callers_of_the_gateway_surface_compile() {
+        let _ = gateway_client;
+    }
+
+    #[cfg(feature = "openai")]
+    mod openai {
+        use super::*;
+
+        use tinfoil_next::async_openai::config::OpenAIConfig;
+        use tinfoil_next::{GatewayOpenAIClient, GatewayOpenAIClientBuilder};
+
+        /// The gateway OpenAI client, as a caller writes it.
+        async fn gateway_openai_client(config: OpenAIConfig) -> Result<(), Error> {
+            let client: GatewayOpenAIClient =
+                send(GatewayOpenAIClient::connect(config.clone())).await?;
+            let _: &GatewayHttpClient = client.http_client();
+            let _ = client.chat_relaxed();
+            let builder: GatewayOpenAIClientBuilder = GatewayOpenAIClient::builder(config)
+                .model_pins([("model", ModelPin::new("tinfoilsh/model"))])
+                .pinned_models_only(true)
+                .verifier(Verifier::new())
+                .verification_check(check)
+                .user_cache_secret("opaque-random-value")
+                .url("https://gateway.example.com/v1/")
+                .catalog(|| Arc::new(Catalog::new()))
+                .timeout(Duration::from_secs(30));
+            let _: GatewayOpenAIClient = send(builder.connect()).await?;
+            Ok(())
+        }
+
+        #[test]
+        fn the_gateway_openai_client_is_a_handle() {
+            handle::<GatewayOpenAIClient>();
+            handle::<GatewayOpenAIClientBuilder>();
+            let _ = gateway_openai_client;
+        }
+    }
+}

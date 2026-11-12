@@ -2390,6 +2390,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinfoil-next"
+version = "0.0.0"
+dependencies = [
+ "async-openai",
+ "async-stream",
+ "base64",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hkdf",
+ "hmac",
+ "http",
+ "libc",
+ "reqwest",
+ "rustls",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tinfoil-ehbp",
+ "tinfoil-verifier",
+ "tokio",
+ "tower-layer",
+ "tower-service",
+ "webpki-roots",
+]
+
+[[package]]
 name = "tinfoil-verifier"
 version = "0.1.0"
 dependencies = [
