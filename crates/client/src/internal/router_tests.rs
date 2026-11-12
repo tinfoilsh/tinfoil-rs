@@ -909,6 +909,35 @@ mod options {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_client_that_fails_after_discovery_stores_no_secret() {
+        unstuck(async {
+            let home = Home::new();
+            let world = World::new(vec![("a.example", vec![good("a")])]);
+            let at = home.0.clone();
+            // A pinned client cannot take a base URL on another origin:
+            // the client is refused once its router is known.
+            let error = connect(
+                hosts(&["a.example"]),
+                world.enclave_for(),
+                Arc::new(Recording::default()),
+                Settings {
+                    base_url: Some(Url::parse("https://proxy.example.com/").unwrap()),
+                    ..settings(None)
+                },
+                move |option| cachesecret::resolve_from(option, None, Some(at)),
+            )
+            .await
+            .err()
+            .expect("no client");
+            assert_eq!(error.kind(), ErrorKind::Configuration);
+            // The router was discovered and verified, and nothing was stored.
+            assert_eq!(world.attempts("a.example"), 1);
+            assert!(!home.0.join(cachesecret::DIR_NAME).exists());
+        })
+        .await
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn the_router_client_takes_its_secret_from_the_option_the_environment_or_the_file() {
         unstuck(async {
             let home = Home::new();

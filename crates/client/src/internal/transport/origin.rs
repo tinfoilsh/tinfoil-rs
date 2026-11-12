@@ -33,6 +33,17 @@ pub(crate) fn with_origin_restriction(
     enclave_host: Option<&str>,
     base_url: Option<&Url>,
 ) -> Result<Arc<dyn RoundTrip>, Error> {
+    Ok(allowed_origins(enclave_host, base_url)?.guard(next))
+}
+
+/// The origins that a client's requests may go to: everything of
+/// [`with_origin_restriction`] that can fail, so that a caller can do it
+/// before the steps that must not happen for a client that cannot be
+/// made.
+pub(crate) fn allowed_origins(
+    enclave_host: Option<&str>,
+    base_url: Option<&Url>,
+) -> Result<AllowedOrigins, Error> {
     let mut allowed = Vec::with_capacity(2);
     if let Some(host) = enclave_host {
         allowed.push(enclave_origin(host)?);
@@ -40,11 +51,27 @@ pub(crate) fn with_origin_restriction(
     if let Some(base_url) = base_url {
         allowed.push(origin_of(base_url)?);
     }
-    Ok(Arc::new(OriginGuard {
+    Ok(AllowedOrigins {
         allowed,
         enclave: enclave_host.unwrap_or_default().to_owned(),
-        next,
-    }))
+    })
+}
+
+/// The origins of [`allowed_origins`].
+pub(crate) struct AllowedOrigins {
+    allowed: Vec<String>,
+    enclave: String,
+}
+
+impl AllowedOrigins {
+    /// `next` behind the guard for these origins.
+    pub(crate) fn guard(self, next: Arc<dyn RoundTrip>) -> Arc<dyn RoundTrip> {
+        Arc::new(OriginGuard {
+            allowed: self.allowed,
+            enclave: self.enclave,
+            next,
+        })
+    }
 }
 
 /// The guard of [`with_origin_restriction`].

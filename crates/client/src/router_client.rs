@@ -225,8 +225,10 @@ impl RouterHttpClientBuilder {
     /// again when it must, and never discovers another. Every `connect`
     /// discovers anew. The `timeout` option bounds the whole call.
     ///
-    /// The user cache secret is resolved after discovery; resolving it
-    /// never fails.
+    /// The user cache secret is resolved last, once the client is certain
+    /// to be created; resolving it never fails. Unless the option or the
+    /// environment supplies the secret, this reads or creates one small
+    /// file in the home directory, synchronously.
     ///
     /// # Cancel safety
     ///
