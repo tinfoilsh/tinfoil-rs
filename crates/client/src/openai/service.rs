@@ -23,6 +23,12 @@ mod tests;
 /// The `type` of the error in a `429` response that waiting cannot cure.
 const INSUFFICIENT_QUOTA: &str = "insufficient_quota";
 
+/// The largest body of an error response that this crate reads into
+/// memory by itself. An error of the API is a small JSON object; in
+/// [`TransportMode::Ehbp`] an error response can come from a proxy and is
+/// not authenticated, so its size is not left to whoever sent it.
+pub(crate) const MAX_ERROR_BODY_BYTES: usize = 1 << 20;
+
 /// An `async_openai` client that sends through `http`, and the service
 /// that it sends through.
 ///
@@ -43,7 +49,10 @@ const INSUFFICIENT_QUOTA: &str = "insufficient_quota";
 /// - **Retries.** The service sends a call again itself, at most
 ///   [`MAX_RETRIES`] times: after a response with status `429` (unless its
 ///   error is `insufficient_quota`) or `5xx`, and after the wait that
-///   [`Waits`] decides. A response that asks for a longer wait than
+///   [`Waits`] decides. The status decides: a `429` whose body is not the
+///   API's error object, is larger than [`MAX_ERROR_BODY_BYTES`] or
+///   cannot be read is tried again like any other, and is the call's
+///   error if the last attempt ends that way. A response that asks for a longer wait than
 ///   `waits` allows is the call's result at once. An error of `http` is
 ///   never tried again here, whatever its kind, so a refused verification
 ///   or a refused request is reported once.
@@ -132,7 +141,8 @@ impl Attested {
     ///
     /// A `5xx` response that is final is returned as a response. A `429`
     /// response is read here, to tell a rate limit from a spent quota, so
-    /// a final one is returned as the API's error.
+    /// a final one is returned as an error: the API's, or the one for a
+    /// body that could not be read as the API's error.
     async fn send(&self, factory: &HttpRequestFactory) -> Result<Response, OpenAIError> {
         let mut retries = 0_u32;
         loop {
@@ -148,7 +158,11 @@ impl Attested {
                 None
             };
             let last = if limited {
-                Err(rate_limit(response).await?)
+                let (error, spent) = rate_limit(response).await;
+                if spent {
+                    return Err(error);
+                }
+                Err(error)
             } else {
                 Ok(response)
             };
@@ -183,21 +197,52 @@ impl Attested {
     }
 }
 
-/// The API's error in a `429` response, to be tried again; or, as `Err`,
-/// what ends the call: the error of a spent quota, a body that could not
-/// be read, or one that is not the API's error object.
-async fn rate_limit(response: Response) -> Result<OpenAIError, OpenAIError> {
+/// The error of a `429` response, and whether it is that of a spent
+/// quota, which waiting cannot cure. The error is the API's when the body
+/// holds it; otherwise it says what was wrong with the body: it could not
+/// be read, is larger than [`MAX_ERROR_BODY_BYTES`], or is not the API's
+/// error object. Only a body that could be read can report a spent quota.
+async fn rate_limit(response: Response) -> (OpenAIError, bool) {
     let status_code = response.status();
-    let bytes = response.bytes().await.map_err(OpenAIError::Reqwest)?;
-    let wrapped = serde_json::from_slice::<WrappedError>(&bytes).map_err(|error| {
-        OpenAIError::JSONDeserialize(error, String::from_utf8_lossy(&bytes).into_owned())
-    })?;
-    let spent = wrapped.error.r#type.as_deref() == Some(INSUFFICIENT_QUOTA);
-    let error = OpenAIError::ApiError(ApiErrorResponse {
-        status_code,
-        api_error: wrapped.error,
-    });
-    if spent { Err(error) } else { Ok(error) }
+    let bytes = match read_within(response, MAX_ERROR_BODY_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(error) => return (error, false),
+    };
+    match serde_json::from_slice::<WrappedError>(&bytes) {
+        Ok(wrapped) => {
+            let spent = wrapped.error.r#type.as_deref() == Some(INSUFFICIENT_QUOTA);
+            let error = OpenAIError::ApiError(ApiErrorResponse {
+                status_code,
+                api_error: wrapped.error,
+            });
+            (error, spent)
+        }
+        Err(error) => {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            (OpenAIError::JSONDeserialize(error, text), false)
+        }
+    }
+}
+
+/// The whole body of `response`, if it is at most `limit` bytes long. The
+/// read stops at the first byte beyond the limit, and the error is then a
+/// network error of the client: nothing of a longer body is returned, and
+/// no more of it is held than the limit. A read that fails is
+/// `OpenAIError::Reqwest`.
+pub(crate) async fn read_within(
+    mut response: Response,
+    limit: usize,
+) -> Result<Vec<u8>, OpenAIError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(OpenAIError::Reqwest)? {
+        if chunk.len() > limit.saturating_sub(body.len()) {
+            return Err(boxed(Error::network(format!(
+                "the response body is larger than {limit} bytes"
+            ))));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 impl Service<HttpRequestFactory> for Attested {

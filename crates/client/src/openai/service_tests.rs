@@ -712,6 +712,208 @@ async fn other_statuses_are_reported_after_one_attempt() {
     .await
 }
 
+/// A response with `status` whose body never ends.
+fn endless(status: u16) -> Answer {
+    static CHUNK: [u8; 64 * 1024] = [b'x'; 64 * 1024];
+    let body = futures_util::stream::repeat_with(|| {
+        Ok::<_, std::io::Error>(bytes::Bytes::from_static(&CHUNK))
+    });
+    let response = http::Response::builder()
+        .status(status)
+        .body(reqwest::Body::wrap_stream(body));
+    Answer::Whole(Response::from(response.unwrap()))
+}
+
+/// A response with `status` whose body is `size` bytes of text.
+fn sized(status: u16, size: usize) -> Answer {
+    let response = http::Response::builder()
+        .status(status)
+        .body("x".repeat(size));
+    Answer::Whole(Response::from(response.unwrap()))
+}
+
+/// A response with `status` whose body breaks after its first bytes.
+fn broken(status: u16) -> Answer {
+    let body = futures_util::stream::iter([
+        Ok("{\"error\":"),
+        Err(std::io::Error::other("connection reset")),
+    ]);
+    let response = http::Response::builder()
+        .status(status)
+        .body(reqwest::Body::wrap_stream(body));
+    Answer::Whole(Response::from(response.unwrap()))
+}
+
+/// The message of the client's error for a body beyond `limit`.
+fn too_large(limit: usize) -> String {
+    format!("network error: the response body is larger than {limit} bytes")
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rate_limit_is_tried_again_whatever_its_body_holds() {
+    use super::MAX_ERROR_BODY_BYTES;
+    unstuck(async {
+        type Check = fn(&OpenAIError) -> bool;
+        let cases: [(fn() -> Answer, Check); 5] = [
+            // Not the API's error object.
+            (
+                || Answer::Respond(429, "slow down"),
+                |error| matches!(error, OpenAIError::JSONDeserialize(_, text) if text == "slow down"),
+            ),
+            (
+                || Answer::Respond(429, ""),
+                |error| matches!(error, OpenAIError::JSONDeserialize(..)),
+            ),
+            // Too large, by one byte and without an end.
+            (
+                || sized(429, MAX_ERROR_BODY_BYTES + 1),
+                |error| client_error(error).to_string() == too_large(MAX_ERROR_BODY_BYTES),
+            ),
+            (
+                || endless(429),
+                |error| client_error(error).to_string() == too_large(MAX_ERROR_BODY_BYTES),
+            ),
+            // Cut off while it is read.
+            (
+                || broken(429),
+                |error| matches!(error, OpenAIError::Reqwest(_)),
+            ),
+        ];
+        for (index, (answer, expected)) in cases.into_iter().enumerate() {
+            // Always: three attempts, then what was wrong with the body.
+            let f = fake(vec![ready("first")], None, move |_, _| answer()).await;
+            let error = f.openai.chat().create(chat_request()).await.unwrap_err();
+            assert!(expected(&error), "{index}: {error:?}");
+            assert_eq!(f.sent().len(), 3, "{index}");
+
+            // Twice: the third attempt answers.
+            let f = fake(vec![ready("first")], None, move |_, before| {
+                if before < 2 {
+                    answer()
+                } else {
+                    Answer::Respond(200, CHAT_RESPONSE)
+                }
+            })
+            .await;
+            f.openai.chat().create(chat_request()).await.unwrap();
+            assert_eq!(f.sent().len(), 3, "{index}");
+        }
+
+        // The wait that such a response names is obeyed like any other.
+        let f = fake(vec![ready("first")], None, |_, before| {
+            if before == 0 {
+                Answer::RespondWith(429, "retry-after", "7", "slow down")
+            } else {
+                Answer::Respond(200, CHAT_RESPONSE)
+            }
+        })
+        .await;
+        let started = tokio::time::Instant::now();
+        f.openai.chat().create(chat_request()).await.unwrap();
+        assert_eq!(started.elapsed(), Duration::from_secs(7));
+        // And one that asks for too long a wait ends the call.
+        let f = fake(vec![ready("first")], None, |_, _| {
+            Answer::RespondWith(429, "retry-after", "4000000000", "slow down")
+        })
+        .await;
+        let error = f.openai.chat().create(chat_request()).await.unwrap_err();
+        assert!(matches!(error, OpenAIError::JSONDeserialize(..)), "{error:?}");
+        assert_eq!(f.sent().len(), 1);
+
+        // A body of exactly the limit is read, and is what it is.
+        let f = fake(vec![ready("first")], None, |_, _| {
+            sized(429, MAX_ERROR_BODY_BYTES)
+        })
+        .await;
+        let error = f.openai.chat().create(chat_request()).await.unwrap_err();
+        match error {
+            OpenAIError::JSONDeserialize(_, text) => assert_eq!(text.len(), MAX_ERROR_BODY_BYTES),
+            other => panic!("{other:?}"),
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_relaxed_call_reads_no_more_of_a_body_than_its_limit() {
+    use super::MAX_ERROR_BODY_BYTES;
+    use crate::openai::relaxed::MAX_RESPONSE_BYTES;
+    unstuck(async {
+        // An error body without an end: a client error, a server error
+        // (after its retries) and a rate limit.
+        for (status, attempts) in [(400, 1), (404, 1), (502, 3), (429, 3)] {
+            let f = fake(vec![ready("first")], None, move |_, _| endless(status)).await;
+            let error = f
+                .openai
+                .relaxed()
+                .create(serde_json::json!({}))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                client_error(&error).to_string(),
+                too_large(MAX_ERROR_BODY_BYTES),
+                "{status}"
+            );
+            assert_eq!(client_error(&error).kind(), ErrorKind::Network);
+            assert_eq!(f.sent().len(), attempts, "{status}");
+
+            // The same before a stream starts.
+            let f = fake(vec![ready("first")], None, move |_, _| endless(status)).await;
+            let result = f
+                .openai
+                .relaxed()
+                .create_stream(serde_json::json!({}))
+                .await;
+            let error = result.err().expect("an error status");
+            assert_eq!(
+                client_error(&error).to_string(),
+                too_large(MAX_ERROR_BODY_BYTES),
+                "{status}"
+            );
+        }
+        // One byte beyond the limit, and exactly the limit.
+        let f = fake(vec![ready("first")], None, |_, _| {
+            sized(404, MAX_ERROR_BODY_BYTES + 1)
+        })
+        .await;
+        let error = f
+            .openai
+            .relaxed()
+            .create(serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            client_error(&error).to_string(),
+            too_large(MAX_ERROR_BODY_BYTES)
+        );
+        let f = fake(vec![ready("first")], None, |_, _| {
+            sized(502, MAX_ERROR_BODY_BYTES)
+        })
+        .await;
+        match f.openai.relaxed().create(serde_json::json!({})).await {
+            Err(OpenAIError::ApiError(error)) => {
+                assert_eq!(error.api_error.message.len(), MAX_ERROR_BODY_BYTES);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // A successful response without an end.
+        let f = fake(vec![ready("first")], None, |_, _| endless(200)).await;
+        let error = f
+            .openai
+            .relaxed()
+            .create(serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            client_error(&error).to_string(),
+            too_large(MAX_RESPONSE_BYTES)
+        );
+        assert_eq!(f.sent().len(), 1);
+    })
+    .await
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_failure_of_the_client_is_reported_once_and_found_in_the_openai_error() {
     unstuck(async {

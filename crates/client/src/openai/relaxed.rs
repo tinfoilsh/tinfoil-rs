@@ -18,11 +18,14 @@ use reqwest::{Method, Response, Url};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
-use crate::openai::service::Sender;
+use crate::openai::service::{MAX_ERROR_BODY_BYTES, Sender, read_within};
 use crate::request::Execute;
 
 /// The path of the chat-completion endpoint under an OpenAI base URL.
 pub(crate) const CHAT_COMPLETIONS_PATH: &str = "chat/completions";
+
+/// The largest response that [`RelaxedChat::create`] reads into memory.
+pub(crate) const MAX_RESPONSE_BYTES: usize = 64 << 20;
 
 /// The handle that an OpenAI client's `chat_relaxed` returns.
 ///
@@ -64,6 +67,11 @@ impl RelaxedChat<'_> {
     /// [`Error::from_openai`](crate::Error::from_openai) finds it. A `429`
     /// or `5xx` response is tried again as for a typed call.
     ///
+    /// The response is read into memory, up to 64 MiB, and the body of an
+    /// error response up to 1 MiB. A longer body is not read to its end,
+    /// and the call fails with a network error of the attested HTTP
+    /// client.
+    ///
     /// # Cancel safety
     ///
     /// Dropping the future cancels the request, as
@@ -71,7 +79,7 @@ impl RelaxedChat<'_> {
     /// describes.
     pub async fn create(&self, body: impl Into<Value>) -> Result<RelaxedResponse, OpenAIError> {
         let response = self.send(body.into(), false).await?;
-        let bytes = response.bytes().await.map_err(OpenAIError::Reqwest)?;
+        let bytes = read_within(response, MAX_RESPONSE_BYTES).await?;
         let body = serde_json::from_slice(&bytes).map_err(|error| not_json(error, &bytes))?;
         Ok(RelaxedResponse { body })
     }
@@ -159,12 +167,13 @@ fn not_json(error: serde_json::Error, body: &[u8]) -> OpenAIError {
 /// The error for a response with an error status, read as a typed call
 /// reads it: the body of a `5xx` response is the message as it is, since
 /// such a body need not be JSON; any other body must hold the API's
-/// error object.
+/// error object. A body of more than [`MAX_ERROR_BODY_BYTES`] is not read
+/// to its end: the error is then a network error of the client.
 async fn api_error(response: Response) -> OpenAIError {
     let status_code = response.status();
-    let bytes = match response.bytes().await {
+    let bytes = match read_within(response, MAX_ERROR_BODY_BYTES).await {
         Ok(bytes) => bytes,
-        Err(error) => return OpenAIError::Reqwest(error),
+        Err(error) => return error,
     };
     let parsed = if status_code.is_server_error() {
         let message = String::from_utf8_lossy(&bytes).into_owned();
