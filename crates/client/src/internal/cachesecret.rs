@@ -388,7 +388,7 @@ mod tests {
     fn a_new_secret_is_32_random_bytes_in_lowercase_hexadecimal() {
         let first = exposed(generate()).unwrap();
         let second = exposed(generate()).unwrap();
-        assert!(is_generated(&first), "{first}");
+        assert!(is_generated(&first));
         assert_ne!(first, second);
     }
 
@@ -418,7 +418,7 @@ mod tests {
     fn the_first_use_stores_a_secret_that_later_uses_read_back() {
         let home = Home::new();
         let first = exposed(load_or_generate(&home.0)).unwrap();
-        assert!(is_generated(&first), "{first}");
+        assert!(is_generated(&first));
         assert_eq!(fs::read_to_string(home.file()).unwrap(), first);
         assert_eq!(exposed(load_or_generate(&home.0)).unwrap(), first);
         // Nothing but the secret's file is left in the directory.
@@ -652,7 +652,7 @@ mod tests {
         fs::write(home.dir(), b"not a directory").unwrap();
         let first = exposed(resolve_from(None, None, Some(home.0.clone()))).unwrap();
         let second = exposed(resolve_from(None, None, None)).unwrap();
-        assert!(is_generated(&first), "{first}");
+        assert!(is_generated(&first));
         assert_eq!(first, second);
     }
 

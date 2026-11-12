@@ -329,7 +329,10 @@ mod tests {
 
     use super::*;
 
-    const NONCE: [u8; NONCE_SIZE] = [0xab; NONCE_SIZE];
+    /// A nonce for one test.
+    fn nonce() -> [u8; NONCE_SIZE] {
+        tinfoil_verifier::random_nonce().expect("the random source")
+    }
 
     /// What the local server does with one request.
     enum Reply {
@@ -503,15 +506,16 @@ mod tests {
 
     #[test]
     fn the_document_url_carries_the_nonce_in_lowercase_hex() {
-        let url = document_url("enclave.example.com", &NONCE).expect("url");
+        let nonce = nonce();
+        let url = document_url("enclave.example.com", &nonce).expect("url");
         assert_eq!(
             url.as_str(),
             format!(
                 "https://enclave.example.com/.well-known/tinfoil-attestation?nonce={}",
-                "ab".repeat(NONCE_SIZE)
+                lower_hex(&nonce)
             )
         );
-        let url = document_url("Enclave.Example.com:8443", &NONCE).expect("url");
+        let url = document_url("Enclave.Example.com:8443", &nonce).expect("url");
         assert_eq!(url.host_str(), Some("enclave.example.com"));
         assert_eq!(url.port(), Some(8443));
     }
@@ -527,7 +531,7 @@ mod tests {
             "enclave.example.com&enclave=evil.example",
             "enclave.example.com#x",
         ] {
-            let error = document_url(host, &NONCE).expect_err(host);
+            let error = document_url(host, &nonce()).expect_err(host);
             assert_eq!(error.kind(), ErrorKind::Configuration, "{host:?}");
         }
     }
@@ -828,7 +832,7 @@ mod tests {
                 drop(socket);
             }
         });
-        let error = document_through(&host, &NONCE, Some(proxy))
+        let error = document_through(&host, &nonce(), Some(proxy))
             .await
             .expect_err("no TLS");
         assert_eq!(error.kind(), ErrorKind::Network);
@@ -839,7 +843,7 @@ mod tests {
     #[tokio::test]
     async fn the_document_of_another_host_is_fetched_through_the_proxy() {
         let (proxy, listener) = proxy().await;
-        let error = document_through("enclave.example.com", &NONCE, Some(proxy))
+        let error = document_through("enclave.example.com", &nonce(), Some(proxy))
             .await
             .expect_err("the proxy refuses the tunnel");
         assert_eq!(error.kind(), ErrorKind::Network);
