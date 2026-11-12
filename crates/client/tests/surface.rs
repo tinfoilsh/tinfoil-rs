@@ -15,10 +15,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use tinfoil_next::reqwest::header::{HeaderMap, HeaderValue};
-use tinfoil_next::reqwest::{Method, Request, Response, Url};
-use tinfoil_next::verifier::{BoxError, Verification, Verifier};
-use tinfoil_next::{
+use tinfoil::reqwest::header::{HeaderMap, HeaderValue};
+use tinfoil::reqwest::{Method, Request, Response, Url};
+use tinfoil::verifier::{BoxError, Verification, Verifier};
+use tinfoil::{
     EnclaveHttpClient, EnclaveHttpClientBuilder, Error, ErrorKind, RequestBuilder,
     RouterHttpClient, RouterHttpClientBuilder, TransportMode, VERSION,
 };
@@ -61,7 +61,7 @@ fn the_error_has_a_kind_a_timeout_flag_and_a_source() {
     let _: fn(&Error) -> ErrorKind = Error::kind;
     let _: fn(&Error) -> bool = Error::is_timeout;
     let _: for<'a> fn(&'a Error) -> Option<&'a Error> = Error::earlier_attempt;
-    let _: for<'a> fn(&'a tinfoil_next::reqwest::Error) -> Option<&'a Error> = Error::from_reqwest;
+    let _: for<'a> fn(&'a tinfoil::reqwest::Error) -> Option<&'a Error> = Error::from_reqwest;
     let _: for<'a> fn(&'a Error) -> Option<&'a (dyn StdError + 'static)> = StdError::source;
     fn shared<T: StdError + Clone + Send + Sync + 'static>() {}
     shared::<Error>();
@@ -444,20 +444,20 @@ mod openai {
 
     use futures_core::Stream;
     use serde_json::{Value, json};
-    use tinfoil_next::async_openai::config::OpenAIConfig;
-    use tinfoil_next::async_openai::error::OpenAIError;
-    use tinfoil_next::audio::{CreateTranscriptionRequest, CreateTranscriptionResponseJson};
-    use tinfoil_next::chat::{ImageUrl, InputAudio, InputAudioFormat};
-    use tinfoil_next::embeddings::CreateEmbeddingRequestArgs;
-    use tinfoil_next::multimodal::{ImageUrlExt, InputAudioExt};
-    use tinfoil_next::sse::{EventStream, parse_event_stream};
-    use tinfoil_next::{
+    use tinfoil::async_openai::config::OpenAIConfig;
+    use tinfoil::async_openai::error::OpenAIError;
+    use tinfoil::audio::{CreateTranscriptionRequest, CreateTranscriptionResponseJson};
+    use tinfoil::chat::{ImageUrl, InputAudio, InputAudioFormat};
+    use tinfoil::embeddings::CreateEmbeddingRequestArgs;
+    use tinfoil::multimodal::{ImageUrlExt, InputAudioExt};
+    use tinfoil::sse::{EventStream, parse_event_stream};
+    use tinfoil::{
         Client, EnclaveOpenAIClient, EnclaveOpenAIClientBuilder, RelaxedChat,
         RelaxedChatRequestBuilder, RelaxedResponse, RelaxedStream, RelaxedStreamChunk,
         RelaxedToolCall, RouterOpenAIClient, RouterOpenAIClientBuilder,
     };
 
-    type OpenAI = tinfoil_next::async_openai::Client<OpenAIConfig>;
+    type OpenAI = tinfoil::async_openai::Client<OpenAIConfig>;
 
     fn derefs<T: std::ops::Deref<Target = OpenAI>>() {}
 
@@ -693,7 +693,7 @@ mod openai {
 mod gateway {
     use super::*;
 
-    use tinfoil_next::{
+    use tinfoil::{
         Catalog, CatalogEntry, GatewayHttpClient, GatewayHttpClientBuilder, ModelPin,
         ReplicaVerification, fetch_catalog,
     };
@@ -775,8 +775,8 @@ mod gateway {
     mod openai {
         use super::*;
 
-        use tinfoil_next::async_openai::config::OpenAIConfig;
-        use tinfoil_next::{GatewayOpenAIClient, GatewayOpenAIClientBuilder};
+        use tinfoil::async_openai::config::OpenAIConfig;
+        use tinfoil::{GatewayOpenAIClient, GatewayOpenAIClientBuilder};
 
         /// The gateway OpenAI client, as a caller writes it.
         async fn gateway_openai_client(config: OpenAIConfig) -> Result<(), Error> {

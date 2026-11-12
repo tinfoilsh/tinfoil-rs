@@ -2,12 +2,12 @@
 //! configured to send sealed bodies through a proxy.
 //!
 //! ```sh
-//! TINFOIL_API_KEY=... cargo run -p tinfoil-next --example enclave_http
+//! TINFOIL_API_KEY=... cargo run -p tinfoil --example enclave_http
 //! ```
 
 use std::time::Duration;
 
-use tinfoil_next::{EnclaveHttpClient, ErrorKind, TransportMode};
+use tinfoil::{EnclaveHttpClient, ErrorKind, TransportMode};
 
 const ENCLAVE: &str = "inference.tinfoil.sh";
 const REPO: &str = "tinfoilsh/confidential-model-router";

@@ -2,11 +2,19 @@
 members = ["conformance", "crates/client", "crates/verifier"]
 resolver = "2"
 
+# The client and the verifier are released together, under one version and
+# one git tag.
 [workspace.package]
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/tinfoilsh/tinfoil-rs"
+
+[workspace.dependencies]
+# The client is built and tested against exactly this verifier, so the
+# requirement is exact. Keep it equal to the workspace version above.
+tinfoil-verifier = { path = "crates/verifier", version = "=0.3.0" }
 
 # Lints for the workspace members that opt in with `lints.workspace = true`.
 # The verifier parses untrusted input, so anything that can panic on a

@@ -50,14 +50,19 @@ jobs:
       - name: Build
         run: cargo build --locked --workspace --verbose
 
-      - name: Test the verifier crate
-        run: cargo test --locked -p tinfoil-verifier --verbose
+      # Unit, integration and documentation tests of every member, the
+      # README's examples among them.
+      - name: Test the workspace
+        run: cargo test --locked --workspace --verbose
 
-      - name: Test the client crate
-        run: cargo test --locked -p tinfoil-next --verbose
+      - name: Test the client crate without its default features
+        run: cargo test --locked -p tinfoil --no-default-features --verbose
 
       - name: Test the client crate with every feature
-        run: cargo test --locked -p tinfoil-next --all-features --verbose
+        run: cargo test --locked -p tinfoil --all-features --verbose
+
+      - name: Test the verifier crate with serde
+        run: cargo test --locked -p tinfoil-verifier --features serde --verbose
 
   msrv:
     name: MSRV (1.88)
@@ -86,17 +91,20 @@ jobs:
       - name: Build on MSRV
         run: cargo build --locked --workspace --verbose
 
-      - name: Test the verifier crate on MSRV
-        run: cargo test --locked -p tinfoil-verifier --verbose
+      - name: Test the workspace on MSRV
+        run: cargo test --locked --workspace --verbose
 
-      - name: Test the client crate on MSRV
-        run: cargo test --locked -p tinfoil-next --verbose
+      - name: Test the client crate without its default features on MSRV
+        run: cargo test --locked -p tinfoil --no-default-features --verbose
 
       - name: Test the client crate with every feature on MSRV
-        run: cargo test --locked -p tinfoil-next --all-features --verbose
+        run: cargo test --locked -p tinfoil --all-features --verbose
+
+      - name: Test the verifier crate with serde on MSRV
+        run: cargo test --locked -p tinfoil-verifier --features serde --verbose
 
   lint:
-    name: Format and clippy (v3 crates)
+    name: Format, clippy and documentation
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -109,29 +117,17 @@ jobs:
         run: rustup update stable && rustup default stable && rustup component add rustfmt clippy
 
       - name: Check formatting
-        run: cargo fmt --check -p tinfoil-verifier -p tinfoil-conformance -p tinfoil-next
+        run: cargo fmt --check --all
 
       - name: Run clippy
-        run: cargo clippy --locked -p tinfoil-verifier -p tinfoil-conformance -p tinfoil-next --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       # The client's OpenAI and gateway code is behind cargo features.
       - name: Run clippy on the client without its default features
-        run: cargo clippy --locked -p tinfoil-next --all-targets --no-default-features -- -D warnings
+        run: cargo clippy --locked -p tinfoil --all-targets --no-default-features -- -D warnings
 
-      - name: Run clippy on the client with every feature
-        run: cargo clippy --locked -p tinfoil-next --all-targets --all-features -- -D warnings
-
-      - name: Build the client's documentation
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --locked --no-deps -p tinfoil-next --all-features
-
-      # Without the OpenAI feature, links to its items must not be left
-      # dangling.
-      - name: Build the client's documentation without its default features
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --locked --no-deps -p tinfoil-next --no-default-features
+      - name: Run clippy with every feature
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       # The conformance adapter's stages, and the verifier modules that they
       # reach, are compiled only with this flag.
@@ -139,6 +135,23 @@ jobs:
         env:
           RUSTFLAGS: --cfg tinfoil_conformance
         run: cargo clippy --locked -p tinfoil-verifier -p tinfoil-conformance --all-targets -- -D warnings
+
+      - name: Build the documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps --workspace
+
+      - name: Build the documentation with every feature
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps --workspace --all-features
+
+      # Without the OpenAI feature, links to its items must not be left
+      # dangling.
+      - name: Build the client's documentation without its default features
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps -p tinfoil --no-default-features
 
   conformance:
     name: Conformance vectors

@@ -31,11 +31,11 @@
 //!
 #![cfg_attr(feature = "openai", doc = "```no_run")]
 #![cfg_attr(not(feature = "openai"), doc = "```ignore")]
-//! use tinfoil_next::async_openai::config::OpenAIConfig;
-//! use tinfoil_next::chat::{ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs};
+//! use tinfoil::async_openai::config::OpenAIConfig;
+//! use tinfoil::chat::{ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let client = tinfoil_next::Client::connect(OpenAIConfig::new().with_api_key("...")).await?;
+//! let client = tinfoil::Client::connect(OpenAIConfig::new().with_api_key("...")).await?;
 //! let request = CreateChatCompletionRequestArgs::default()
 //!     .model("gpt-oss-120b")
 //!     .messages([ChatCompletionRequestUserMessageArgs::default()

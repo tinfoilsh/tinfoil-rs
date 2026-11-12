@@ -1,8 +1,11 @@
 [package]
 name = "tinfoil-verifier"
-version = "0.1.0"
 description = "Offline verification of Tinfoil enclave attestation documents"
+keywords = ["tinfoil", "attestation", "enclave", "sev-snp", "tdx"]
+categories = ["cryptography", "authentication"]
+# Releases are git tags of the repository; nothing is uploaded to a registry.
 publish = false
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

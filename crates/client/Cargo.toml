@@ -1,8 +1,12 @@
 [package]
-name = "tinfoil-next"
-version = "0.0.0"
+name = "tinfoil"
 description = "Attested HTTP and OpenAI clients for Tinfoil enclaves"
+readme = "../../README.md"
+keywords = ["tinfoil", "attestation", "enclave", "openai", "confidential-computing"]
+categories = ["api-bindings", "cryptography", "web-programming::http-client"]
+# Releases are git tags of the repository; nothing is uploaded to a registry.
 publish = false
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -52,7 +56,7 @@ openai-vector-stores = ["openai", "async-openai/vectorstore"]
 unstable-gateway = ["dep:base64", "dep:hkdf", "dep:hmac"]
 
 [dependencies]
-tinfoil-verifier = { path = "../verifier", version = "=0.1.0" }
+tinfoil-verifier = { workspace = true }
 
 # HTTP. `rustls-no-provider` keeps reqwest from selecting a rustls crypto
 # provider: the clients hand it a TLS configuration built on `ring`, and

@@ -3,14 +3,14 @@
 //! verification that the client relies on.
 //!
 //! ```sh
-//! TINFOIL_API_KEY=... cargo run -p tinfoil-next --example router_custom_verifier
+//! TINFOIL_API_KEY=... cargo run -p tinfoil --example router_custom_verifier
 //! ```
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use tinfoil_next::RouterHttpClient;
-use tinfoil_next::verifier::Verifier;
+use tinfoil::RouterHttpClient;
+use tinfoil::verifier::Verifier;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

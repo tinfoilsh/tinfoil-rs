@@ -2,12 +2,12 @@
 //! to Tinfoil's router, verified before the first request.
 //!
 //! ```sh
-//! TINFOIL_API_KEY=... cargo run -p tinfoil-next --example openai_drop_in
+//! TINFOIL_API_KEY=... cargo run -p tinfoil --example openai_drop_in
 //! ```
 
-use tinfoil_next::async_openai::config::OpenAIConfig;
-use tinfoil_next::chat::{ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs};
-use tinfoil_next::{Client, Error, ErrorKind};
+use tinfoil::async_openai::config::OpenAIConfig;
+use tinfoil::chat::{ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs};
+use tinfoil::{Client, Error, ErrorKind};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -1,8 +1,8 @@
 //! Helpers that build chat content parts from images and audio.
 //!
 //! ```no_run
-//! use tinfoil_next::chat::{ImageUrl, InputAudio};
-//! use tinfoil_next::multimodal::{ImageUrlExt, InputAudioExt};
+//! use tinfoil::chat::{ImageUrl, InputAudio};
+//! use tinfoil::multimodal::{ImageUrlExt, InputAudioExt};
 //!
 //! # fn main() -> std::io::Result<()> {
 //! let image = ImageUrl::from_path("photo.jpg")?;

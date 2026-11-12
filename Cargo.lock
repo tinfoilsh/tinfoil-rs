@@ -2002,42 +2002,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "tinfoil-conformance"
-version = "0.0.0"
-dependencies = [
- "base64 0.22.1",
- "serde",
- "serde_json",
- "tinfoil-verifier",
-]
-
-[[package]]
-name = "tinfoil-ehbp"
-version = "0.4.1"
-source = "git+https://github.com/tinfoilsh/encrypted-http-body-protocol?tag=v0.4.1#6de58891fd9166508047ec3f88e5cc4796d9932b"
-dependencies = [
- "aes-gcm",
- "async-stream",
- "bytes",
- "futures-core",
- "hex",
- "hkdf",
- "hpke",
- "http",
- "http-body-util",
- "rand 0.9.5",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 1.0.69",
- "url",
- "zeroize",
-]
-
-[[package]]
-name = "tinfoil-next"
-version = "0.0.0"
+name = "tinfoil"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "async-openai",
@@ -2076,8 +2042,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinfoil-conformance"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "tinfoil-verifier",
+]
+
+[[package]]
+name = "tinfoil-ehbp"
+version = "0.4.1"
+source = "git+https://github.com/tinfoilsh/encrypted-http-body-protocol?tag=v0.4.1#6de58891fd9166508047ec3f88e5cc4796d9932b"
+dependencies = [
+ "aes-gcm",
+ "async-stream",
+ "bytes",
+ "futures-core",
+ "hex",
+ "hkdf",
+ "hpke",
+ "http",
+ "http-body-util",
+ "rand 0.9.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "tinfoil-verifier"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "cms",

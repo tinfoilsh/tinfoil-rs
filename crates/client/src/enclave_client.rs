@@ -54,8 +54,8 @@ impl EnclaveHttpClient {
     /// configuration error.
     ///
     /// ```no_run
-    /// # async fn run() -> Result<(), tinfoil_next::Error> {
-    /// use tinfoil_next::EnclaveHttpClient;
+    /// # async fn run() -> Result<(), tinfoil::Error> {
+    /// use tinfoil::EnclaveHttpClient;
     ///
     /// let pinned = EnclaveHttpClient::connect("enclave.example.com", Some("owner/name")).await?;
     /// let unpinned = EnclaveHttpClient::connect("enclave.example.com", None).await?;
