@@ -37,10 +37,15 @@
 //!
 //! # Trust anchors
 //!
-//! The trust anchors are embedded in the crate and cannot be replaced
-//! through its API: the methods that take a replacement anchor exist only
-//! in a build for the conformance adapter, which passes
-//! `--cfg tinfoil_conformance` to the compiler.
+//! The Sigstore trusted root and the AMD and Intel roots are embedded in
+//! the crate and cannot be replaced through its API: the methods that take
+//! a replacement root exist only in a build for the conformance adapter,
+//! which passes `--cfg tinfoil_conformance` to the compiler.
+//!
+//! Tinfoil's public signing keys are a default, not an anchor of that
+//! kind: [`VerifierBuilder::config_signing_keys`] and
+//! [`VerifierBuilder::freshness_signing_keys`] replace the keys that
+//! config endorsements and artifact approvals are verified under.
 //!
 #![cfg_attr(not(tinfoil_conformance), doc = "```compile_fail")]
 #![cfg_attr(tinfoil_conformance, doc = "```no_run")]

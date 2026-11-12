@@ -169,7 +169,9 @@ jobs:
           # Documentation tests are built by rustdoc, which takes its own flags.
           RUSTDOCFLAGS: --cfg tinfoil_conformance
           TINFOIL_CONFORMANCE_VECTORS: ${{ github.workspace }}/tinfoil-conformance/vectors/v3
-        run: cargo test --locked -p tinfoil-conformance -- --nocapture
+        run: |
+          cargo test --locked -p tinfoil-conformance -- --nocapture
+          cargo test --locked -p tinfoil-verifier --doc
 
   deny:
     name: Banned dependencies

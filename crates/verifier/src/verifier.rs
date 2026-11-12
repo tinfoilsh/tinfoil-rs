@@ -32,7 +32,6 @@ use crate::quote::{
 use crate::runtime::{
     MAX_CONFIG_SIZE, Measurements, RuntimeReference, parse_manifest, runtime_from_config,
 };
-use crate::semver;
 use crate::verification::{
     ArtifactVerification, ConfigVerification, ReferenceSource, SoftwareIdentity, Verification,
     VerificationMetadata,
@@ -278,19 +277,6 @@ pub(crate) fn freshness_expiration(
         .checked_add(max_age)
         .map(Some)
         .ok_or_else(|| EndorsementError::new("freshness deadline is out of range"))
-}
-
-/// The tag that a runtime version is released at: the version without its
-/// build metadata.
-pub(crate) fn release_tag(version: &str) -> String {
-    semver::parse(version)
-        .map(|version| {
-            format!(
-                "v{}.{}.{}{}",
-                version.major, version.minor, version.patch, version.prerelease
-            )
-        })
-        .unwrap_or_default()
 }
 
 /// Validates `owner/name[@tag][@sha256:digest]` and returns its parts.
@@ -815,7 +801,7 @@ impl Verifier {
             let record = ArtifactVerification {
                 source: ReferenceSource::Embedded,
                 repo: Some(expected.repo.clone()),
-                tag: Some(release_tag(&expected.tag)),
+                tag: Some(crate::endorsement::runtime::release_tag(&expected.tag)),
                 digest: expected.digest.clone(),
                 name: None,
                 commit: None,

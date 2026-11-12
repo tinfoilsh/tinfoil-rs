@@ -9,7 +9,12 @@ use crate::x509::Certificate;
 /// The SHA-256 of the SubjectPublicKeyInfo of a DER certificate, as
 /// lowercase hex: the form in which
 /// [`Verification::tls_public_key_fp`](crate::Verification::tls_public_key_fp)
-/// reports the endorsed TLS key. The key may be of any type.
+/// reports the endorsed TLS key.
+///
+/// The certificate is read strictly, and its key must be one that this
+/// crate can use: ECDSA on P-256 or P-384, Ed25519, or RSA of 1,024 to
+/// 4,096 bits. A certificate that carries any other key has no
+/// fingerprint here.
 ///
 /// The certificate's signature is not verified: a fingerprint only says
 /// which key a certificate carries.
@@ -17,7 +22,7 @@ use crate::x509::Certificate;
 /// # Errors
 ///
 /// [`Error::Usage`] when `cert_der` is not one well-formed X.509
-/// certificate.
+/// certificate, or carries a key of another kind.
 pub fn cert_pubkey_fp(cert_der: &[u8]) -> Result<String, Error> {
     let spki = Certificate::from_der(cert_der)
         .and_then(|certificate| certificate.spki_der())

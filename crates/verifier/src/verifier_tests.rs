@@ -1179,7 +1179,7 @@ fn the_accepted_registries_are_never_left_open_by_default() {
 
 #[test]
 fn an_embedded_runtime_is_recorded_at_its_release_tag() {
-    use crate::verifier::release_tag;
+    use crate::endorsement::runtime::release_tag;
     for (version, tag) in [
         ("v0.15.0", "v0.15.0"),
         ("v0.15.0+gpu", "v0.15.0"),
