@@ -301,6 +301,10 @@ async fn a_valid_certificate_for_the_right_name_with_another_key_is_refused_as_a
     // The handshake failed, so no request was sent.
     assert!(server.requests().is_empty());
 
+    // The refused connection is over, and the server knows it.
+    eventually(|| server.closed() == 1, "the refused connection ends").await;
+    assert_eq!(server.accepted(), 1);
+
     // The same server is reached by a binding to its own key.
     assert!(bound_to(&LEAF_B).send(get(&server, "/")).await.is_ok());
 }

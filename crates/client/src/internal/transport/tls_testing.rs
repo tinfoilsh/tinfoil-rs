@@ -259,7 +259,8 @@ pub(crate) struct Server {
     /// settled on.
     handshakes: Mutex<Vec<(Option<HandshakeKind>, Option<String>)>>,
     seen: Mutex<Vec<Seen>>,
-    /// Connections that have ended.
+    /// Connections that have ended, whether they were served or their
+    /// handshake failed.
     closed: AtomicUsize,
 }
 
@@ -329,71 +330,77 @@ pub(crate) async fn serve(
                 Arc::clone(&handler),
             );
             tokio::spawn(async move {
-                let acceptor = LazyConfigAcceptor::new(Default::default(), socket);
-                let Ok(start) = acceptor.await else {
-                    return;
-                };
-                let offered = start
-                    .client_hello()
-                    .alpn()
-                    .map(|names| {
-                        names
-                            .map(|name| String::from_utf8_lossy(name).into_owned())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                state.offered.lock().unwrap().push(offered);
-                let Ok(stream) = start.into_stream(config).await else {
-                    return;
-                };
-                let session = stream.get_ref().1;
-                state.handshakes.lock().unwrap().push((
-                    session.handshake_kind(),
-                    session
-                        .alpn_protocol()
-                        .map(|name| String::from_utf8_lossy(name).into_owned()),
-                ));
-                let service = {
-                    let state = Arc::clone(&state);
-                    service_fn(move |request: hyper::Request<Incoming>| {
-                        let (state, handler) = (Arc::clone(&state), Arc::clone(&handler));
-                        async move {
-                            let (parts, body) = request.into_parts();
-                            let body = body
+                // Every way out of serving the connection, a failed
+                // handshake included, counts it as ended.
+                let ended = Arc::clone(&state);
+                let serving = async move {
+                    let acceptor = LazyConfigAcceptor::new(Default::default(), socket);
+                    let Ok(start) = acceptor.await else {
+                        return;
+                    };
+                    let offered = start
+                        .client_hello()
+                        .alpn()
+                        .map(|names| {
+                            names
+                                .map(|name| String::from_utf8_lossy(name).into_owned())
                                 .collect()
-                                .await
-                                .map(|collected| collected.to_bytes())
-                                .unwrap_or_default();
-                            let authority = parts
-                                .uri
-                                .authority()
-                                .map(|authority| authority.to_string())
-                                .or_else(|| {
-                                    let host = parts.headers.get(http::header::HOST)?;
-                                    Some(host.to_str().ok()?.to_owned())
-                                });
-                            let seen = Seen {
-                                connection,
-                                method: parts.method.to_string(),
-                                target: parts
+                        })
+                        .unwrap_or_default();
+                    state.offered.lock().unwrap().push(offered);
+                    let Ok(stream) = start.into_stream(config).await else {
+                        return;
+                    };
+                    let session = stream.get_ref().1;
+                    state.handshakes.lock().unwrap().push((
+                        session.handshake_kind(),
+                        session
+                            .alpn_protocol()
+                            .map(|name| String::from_utf8_lossy(name).into_owned()),
+                    ));
+                    let service = {
+                        let state = Arc::clone(&state);
+                        service_fn(move |request: hyper::Request<Incoming>| {
+                            let (state, handler) = (Arc::clone(&state), Arc::clone(&handler));
+                            async move {
+                                let (parts, body) = request.into_parts();
+                                let body = body
+                                    .collect()
+                                    .await
+                                    .map(|collected| collected.to_bytes())
+                                    .unwrap_or_default();
+                                let authority = parts
                                     .uri
-                                    .path_and_query()
-                                    .map(|target| target.to_string())
-                                    .unwrap_or_default(),
-                                version: parts.version,
-                                authority,
-                                headers: parts.headers,
-                                body,
-                            };
-                            state.seen.lock().unwrap().push(seen.clone());
-                            Ok::<_, Infallible>(handler(seen).await)
-                        }
-                    })
+                                    .authority()
+                                    .map(|authority| authority.to_string())
+                                    .or_else(|| {
+                                        let host = parts.headers.get(http::header::HOST)?;
+                                        Some(host.to_str().ok()?.to_owned())
+                                    });
+                                let seen = Seen {
+                                    connection,
+                                    method: parts.method.to_string(),
+                                    target: parts
+                                        .uri
+                                        .path_and_query()
+                                        .map(|target| target.to_string())
+                                        .unwrap_or_default(),
+                                    version: parts.version,
+                                    authority,
+                                    headers: parts.headers,
+                                    body,
+                                };
+                                state.seen.lock().unwrap().push(seen.clone());
+                                Ok::<_, Infallible>(handler(seen).await)
+                            }
+                        })
+                    };
+                    let _ = auto::Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
                 };
-                let _ = auto::Builder::new(TokioExecutor::new())
-                    .serve_connection(TokioIo::new(stream), service)
-                    .await;
-                state.closed.fetch_add(1, Ordering::SeqCst);
+                serving.await;
+                ended.closed.fetch_add(1, Ordering::SeqCst);
             });
         }
     });
