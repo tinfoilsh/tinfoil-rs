@@ -1578,7 +1578,10 @@ async fn a_loopback_request_connects_directly_whatever_the_proxy_settings() {
     let key = key(1);
     let (proxy, listener) = proxy().await;
     let server = serve(&key, |_| Reply::ok("direct")).await;
-    let mode = EhbpMode { proxy: Some(proxy) };
+    let mode = EhbpMode {
+        proxy: Some(proxy),
+        roots: None,
+    };
     let bound = bind(&mode, Some(&key.public_hex)).expect("bound");
 
     for request in [
@@ -1600,7 +1603,10 @@ async fn a_loopback_request_connects_directly_whatever_the_proxy_settings() {
 async fn a_request_to_another_host_goes_through_the_proxy() {
     let key = key(1);
     let (proxy, listener) = proxy().await;
-    let mode = EhbpMode { proxy: Some(proxy) };
+    let mode = EhbpMode {
+        proxy: Some(proxy),
+        roots: None,
+    };
     let bound = bind(&mode, Some(&key.public_hex)).expect("bound");
 
     // The proxy refuses the tunnel, so nothing leaves the machine.

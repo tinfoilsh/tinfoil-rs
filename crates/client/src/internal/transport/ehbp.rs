@@ -14,7 +14,7 @@ use tinfoil_ehbp::{Code, ServerIdentity};
 use crate::error::{Error, ErrorKind};
 use crate::internal::BoxFuture;
 use crate::internal::enclave::Evidence;
-use crate::internal::fetch::{never_proxied, route, tls_builder};
+use crate::internal::fetch::{never_proxied, route, tls_builder, tls_builder_with};
 use crate::internal::transport::base_url::is_loopback;
 use crate::internal::transport::{Failure, Mode, RoundTrip};
 
@@ -89,18 +89,28 @@ pub(crate) struct EhbpMode {
     /// A proxy in place of the environment's proxy settings. Only tests
     /// set one.
     proxy: Option<reqwest::Proxy>,
+    /// Root certificates in place of the compiled-in ones. Only tests set
+    /// them.
+    roots: Option<rustls::RootCertStore>,
 }
 
 impl EhbpMode {
     /// The mode.
     pub(crate) fn new() -> Result<Self, Error> {
-        Ok(Self { proxy: None })
+        Ok(Self {
+            proxy: None,
+            roots: None,
+        })
     }
 
     /// A carrier client of one binding: `direct` for the hosts that are
     /// never proxied, and otherwise for all others.
     fn carrier(&self, direct: bool) -> Result<reqwest::Client, Error> {
-        let builder = tls_builder()?.redirect(reqwest::redirect::Policy::none());
+        let builder = match &self.roots {
+            Some(roots) => tls_builder_with(roots.clone())?,
+            None => tls_builder()?,
+        }
+        .redirect(reqwest::redirect::Policy::none());
         route(builder, direct, self.proxy.clone())
             .build()
             .map_err(|error| Error::wrap(ErrorKind::Configuration, error))

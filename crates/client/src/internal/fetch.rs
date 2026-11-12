@@ -223,15 +223,30 @@ fn client_builder(https_only: bool) -> Result<ClientBuilder, Error> {
 
 /// A client builder with the certificate checks that every client of this
 /// crate starts from: the standard checks against the root certificates
-/// that are compiled in, on the `ring` provider.
+/// that are compiled in, on the `ring` provider. Its connections offer the
+/// protocols of [`alpn_protocols`].
 pub(crate) fn tls_builder() -> Result<ClientBuilder, Error> {
+    tls_builder_with(compiled_in_roots())
+}
+
+/// [`tls_builder`] with `roots` as the root certificates. Only tests pass
+/// other roots than the compiled-in ones.
+pub(crate) fn tls_builder_with(roots: rustls::RootCertStore) -> Result<ClientBuilder, Error> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let tls = rustls::ClientConfig::builder_with_provider(provider)
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|error| Error::wrap(ErrorKind::Configuration, error))?
-        .with_root_certificates(compiled_in_roots())
+        .with_root_certificates(roots)
         .with_no_client_auth();
+    tls.alpn_protocols = alpn_protocols();
     Ok(Client::builder().tls_backend_preconfigured(tls))
+}
+
+/// The protocols that every TLS connection of this crate offers, in order
+/// of preference: HTTP/2, then HTTP/1.1. A TLS configuration that is handed
+/// to `reqwest` ready-made is used as it is, so each one sets these itself.
+pub(crate) fn alpn_protocols() -> Vec<Vec<u8>> {
+    vec![b"h2".to_vec(), b"http/1.1".to_vec()]
 }
 
 /// The root certificates that are compiled into the crate: the only ones
