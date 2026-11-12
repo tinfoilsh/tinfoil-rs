@@ -42,6 +42,17 @@ jobs:
       - name: Run tests
         run: cargo test --locked --workspace --release --verbose
 
+      # A tag can name a commit that the test workflow never ran on, so the
+      # feature sets that it covers are tested here too.
+      - name: Test the client crate without its default features
+        run: cargo test --locked -p tinfoil --no-default-features --release --verbose
+
+      - name: Test the client crate with every feature
+        run: cargo test --locked -p tinfoil --all-features --release --verbose
+
+      - name: Test the verifier crate with serde
+        run: cargo test --locked -p tinfoil-verifier --features serde --release --verbose
+
   release:
     name: Create Release
     needs: build
