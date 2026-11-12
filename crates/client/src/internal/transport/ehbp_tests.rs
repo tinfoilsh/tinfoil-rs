@@ -892,12 +892,7 @@ async fn a_request_without_a_body_is_sent_and_answered_in_plaintext() {
     let requests = [
         get(server.url("/v1/models")),
         post(server.url("/v1/models"), ""),
-        post(
-            server.url("/v1/models"),
-            reqwest::Body::wrap_stream(
-                futures_util::stream::empty::<Result<&str, std::io::Error>>(),
-            ),
-        ),
+        post(server.url("/v1/models"), Vec::new()),
     ];
     for request in requests {
         let response = bound.round_trip(request).await.expect("a response");
@@ -963,6 +958,137 @@ async fn a_sealed_error_response_is_opened_whatever_its_status() {
         .expect("a response");
     assert_eq!(response.status(), 404);
     assert_eq!(text(response).await, "model not found");
+}
+
+// Streams that produce no data.
+
+fn empty_stream() -> reqwest::Body {
+    let nothing = [Ok::<_, std::io::Error>(""), Ok("")];
+    reqwest::Body::wrap_stream(futures_util::stream::iter(nothing))
+}
+
+#[tokio::test]
+async fn a_success_to_an_empty_streamed_body_is_refused() {
+    let key = key(1);
+    for status in [200, 204, 299] {
+        let server = serve(&key, move |_| Reply::ok("forged answer").status(status)).await;
+        let result = bound(&key)
+            .round_trip(post(server.url("/v1/chat"), empty_stream()))
+            .await;
+        let error = ordinary(result, ErrorKind::Attestation);
+        assert!(error.to_string().contains("produced no data"), "{error}");
+        assert!(!error.to_string().contains("forged"), "{error}");
+
+        // Nothing was sealed: the request went out without a body.
+        let seen = &server.seen()[0];
+        assert!(!seen.sealed);
+        assert_eq!(seen.header("ehbp-encapsulated-key"), None);
+        assert!(seen.wire.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_response_nonce_to_an_empty_streamed_body_is_refused() {
+    let key = key(1);
+    let server = serve(&key, |_| {
+        Reply::ok("unopened")
+            .status(500)
+            .header("Ehbp-Response-Nonce", &"00".repeat(32))
+    })
+    .await;
+    let result = bound(&key)
+        .round_trip(post(server.url("/v1/chat"), empty_stream()))
+        .await;
+    ordinary(result, ErrorKind::Attestation);
+}
+
+#[tokio::test]
+async fn an_error_to_an_empty_streamed_body_passes_through() {
+    let key = key(1);
+    let long = format!(
+        r#"{{"type":"about:blank","detail":"{}"}}"#,
+        "x".repeat(100_000)
+    );
+    let mismatch = format!(r#"{{"type":"{}"}}"#, tinfoil_ehbp::KEY_CONFIG_PROBLEM_TYPE);
+    let answers = [
+        (404, "text/plain", "not found".to_owned()),
+        (302, "text/plain", String::new()),
+        (
+            422,
+            "application/json",
+            r#"{"detail":"invalid"}"#.to_owned(),
+        ),
+        (
+            422,
+            "application/problem+json",
+            r#"{"type":"about:blank"}"#.to_owned(),
+        ),
+        (422, "application/problem+json", "not json".to_owned()),
+        // The key-configuration problem under another status or media
+        // type.
+        (400, "application/problem+json", mismatch.clone()),
+        (422, "application/json", mismatch),
+        // Longer than a problem that is read.
+        (422, "application/problem+json", long),
+    ];
+    for (status, media_type, body) in answers {
+        let answer = body.clone();
+        let server = serve(&key, move |_| {
+            Reply::ok(&answer)
+                .status(status)
+                .header("content-type", media_type)
+                .header("x-served-by", "proxy")
+        })
+        .await;
+        let response = bound(&key)
+            .round_trip(post(server.url("/v1/chat?n=1"), empty_stream()))
+            .await
+            .expect("an ordinary response");
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers()["x-served-by"], "proxy");
+        assert_eq!(response.url().as_str(), server.url("/v1/chat?n=1").as_str());
+        assert_eq!(text(response).await, body, "{status} {media_type}");
+    }
+}
+
+#[tokio::test]
+async fn the_key_configuration_problem_to_an_empty_streamed_body_is_a_key_failure() {
+    let key = key(1);
+    let server = serve(&key, |_| Reply::key_mismatch()).await;
+    let failure = bound(&key)
+        .round_trip(post(server.url("/v1/chat"), empty_stream()))
+        .await
+        .expect_err("rejected");
+    assert_eq!(failure.key, KeyFailure::PeerLacksKey);
+    assert_eq!(failure.error.kind(), ErrorKind::Attestation);
+}
+
+#[tokio::test]
+async fn a_problem_that_is_no_key_failure_keeps_its_body_after_a_streamed_request() {
+    let key = key(1);
+    let server = serve(&key, |_| {
+        Reply::parts(vec![
+            data(r#"{"type":"about:blank","#),
+            data(r#""title":"invalid"}"#),
+        ])
+        .status(422)
+        .header("content-type", "application/problem+json")
+        .plaintext()
+    })
+    .await;
+    let body = reqwest::Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
+        "data",
+    )]));
+    let response = bound(&key)
+        .round_trip(post(server.url("/v1/chat"), body))
+        .await
+        .expect("an ordinary response");
+    assert!(server.seen()[0].sealed);
+    assert_eq!(response.status(), 422);
+    assert_eq!(
+        text(response).await,
+        r#"{"type":"about:blank","title":"invalid"}"#
+    );
 }
 
 // Responses that are not sealed.

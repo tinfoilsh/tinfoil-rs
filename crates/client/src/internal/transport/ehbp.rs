@@ -4,8 +4,9 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::sync::Arc;
 
-use reqwest::header::{CONTENT_LENGTH, HOST, HeaderName, TRANSFER_ENCODING, UPGRADE};
-use reqwest::{Method, Request, Response};
+use futures_util::StreamExt;
+use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderName, TRANSFER_ENCODING, UPGRADE};
+use reqwest::{Method, Request, Response, ResponseBuilderExt, StatusCode};
 use tinfoil_ehbp::{Code, ServerIdentity};
 
 use crate::error::{Error, ErrorKind};
@@ -21,6 +22,9 @@ mod tests;
 /// The prefix of the header names that belong to the protocol.
 const PROTOCOL_HEADER_PREFIX: &str = "ehbp-";
 
+/// The longest key-configuration problem that is read.
+const MAX_PROBLEM_BYTES: usize = 64 * 1024;
+
 /// Seals request bodies to the HPKE key of the current verification and
 /// opens the response bodies, over an ordinary HTTPS connection to the
 /// enclave or to a proxy.
@@ -34,9 +38,17 @@ const PROTOCOL_HEADER_PREFIX: &str = "ehbp-";
 ///   each attempt, frame by frame as it is produced, and the response is
 ///   opened frame by frame as it is read: a frame's plaintext is released
 ///   once that frame has authenticated, without waiting for the end of the
-///   body. A request without a body, or with an empty one, is sent as it
-///   is, and its response is returned as it is: neither is sealed nor
-///   authenticated. The method, URL and headers are never sealed.
+///   body. A request without a body, or with a body in memory that is
+///   empty, is sent as it is, and its response is returned as it is:
+///   neither is sealed nor authenticated. The method, URL and headers are
+///   never sealed.
+/// - **Empty streams.** A streamed body counts as a body even if it turns
+///   out to produce no data. Such a request has nothing to seal and goes
+///   out without a body and without the protocol's header, so no response
+///   to it can be opened; the rules for a sealed request are applied to
+///   the response all the same. A `2xx` response, or one that carries a
+///   response nonce, is an attestation error; the key-configuration
+///   problem is a rejection; any other response passes through.
 /// - **Responses.** A response to a sealed request carries the protocol's
 ///   response nonce, and is opened whatever its status. Without the nonce,
 ///   a response with a status outside `2xx` passes through as an ordinary
@@ -202,11 +214,113 @@ impl RoundTrip for Sealing {
             self.identity.clone(),
             self.carrier.clone(),
         );
+        // A body in memory is known to be empty or not, and the protocol's
+        // client treats it accordingly. A stream is a body whatever it
+        // produces.
+        let streamed = request.body().is_some_and(|body| body.as_bytes().is_none());
         Box::pin(async move {
             let sealing = sealing.map_err(failure)?;
-            sealing.execute(request).await.map_err(failure)
+            let response = sealing.execute(request).await.map_err(failure)?;
+            // The client holds the keys of the response for as long as the
+            // response is being opened, and this client has sent no other
+            // request. Without them, the response is as the server sent it:
+            // the request was sealed and the client let an error without a
+            // nonce through, or the stream was empty and nothing was
+            // sealed. The checks below change nothing in the first case.
+            if streamed && sealing.get_session_recovery_token().is_none() {
+                return unopened(response).await;
+            }
+            Ok(response)
         })
     }
+}
+
+/// Applies the rules for the response to a sealed request to `response`,
+/// which was not opened.
+async fn unopened(response: Response) -> Result<Response, Failure> {
+    if response.status().is_success()
+        || response
+            .headers()
+            .contains_key(tinfoil_ehbp::RESPONSE_NONCE_HEADER)
+    {
+        return Err(Error::attestation(
+            "the request body was a stream that produced no data, so nothing was sealed and \
+             the response cannot be authenticated; send such a request without a body",
+        )
+        .into());
+    }
+    if response.status() == StatusCode::UNPROCESSABLE_ENTITY && is_problem(&response) {
+        return key_configuration_problem(response).await;
+    }
+    Ok(response)
+}
+
+/// Whether the media type of `response` is that of a problem document.
+fn is_problem(response: &Response) -> bool {
+    response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|media_type| {
+            media_type
+                .trim()
+                .eq_ignore_ascii_case(tinfoil_ehbp::PROBLEM_JSON_MEDIA_TYPE)
+        })
+}
+
+/// Reads the body of a `422` problem response, up to
+/// [`MAX_PROBLEM_BYTES`]. The key-configuration problem is a rejection;
+/// anything else is returned as a response with the same body.
+async fn key_configuration_problem(mut response: Response) -> Result<Response, Failure> {
+    let mut read = Vec::new();
+    let mut size = 0usize;
+    let mut ended = false;
+    while size <= MAX_PROBLEM_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                size = size.saturating_add(chunk.len());
+                read.push(chunk);
+            }
+            Ok(None) => {
+                ended = true;
+                break;
+            }
+            Err(error) => return Err(failure(tinfoil_ehbp::Error::Http(error))),
+        }
+    }
+    if ended && size <= MAX_PROBLEM_BYTES {
+        let problem = serde_json::from_slice::<serde_json::Value>(&read.concat()).ok();
+        let problem_type = problem
+            .as_ref()
+            .and_then(|problem| problem.get("type"))
+            .and_then(serde_json::Value::as_str);
+        if problem_type == Some(tinfoil_ehbp::KEY_CONFIG_PROBLEM_TYPE) {
+            return Err(Failure::peer_lacks_key(Error::attestation(
+                "the enclave reported a key configuration mismatch",
+            )));
+        }
+    }
+
+    // The same response, with what was read in front of the rest.
+    let url = response.url().clone();
+    let mut builder = http::Response::builder()
+        .status(response.status())
+        .version(response.version());
+    if let Some(headers) = builder.headers_mut() {
+        *headers = response.headers().clone();
+    }
+    if let Some(extensions) = builder.extensions_mut() {
+        *extensions = std::mem::take(response.extensions_mut());
+    }
+    // After the extensions, which the URL is kept among.
+    let builder = builder.url(url);
+    let read = futures_util::stream::iter(read.into_iter().map(Ok::<_, reqwest::Error>));
+    let body = reqwest::Body::wrap_stream(read.chain(response.bytes_stream()));
+    builder
+        .body(body)
+        .map(Response::from)
+        .map_err(|error| Error::wrap(ErrorKind::Attestation, error).into())
 }
 
 /// The failure for an error of the protocol's client.
