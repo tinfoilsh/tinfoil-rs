@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use crate::error::{Error, ErrorKind};
 use crate::internal::BoxFuture;
 use crate::internal::enclave::Evidence;
-use crate::internal::fetch::lower_hex;
+use crate::internal::fetch::{compiled_in_roots, lower_hex, never_proxied, route};
 use crate::internal::transport::{Failure, Mode, RoundTrip};
 
 /// Pins connections to the TLS key of the current verification.
@@ -33,10 +33,14 @@ use crate::internal::transport::{Failure, Mode, RoundTrip};
 ///   TLS stack so that connections are pooled as usual. Evidence without a
 ///   TLS key is an attestation error, and an empty fingerprint is a
 ///   configuration error. The client follows no redirect: a `3xx` is
-///   returned to the caller. A forward proxy named by `HTTPS_PROXY`,
-///   `ALL_PROXY` and `NO_PROXY` is used as `reqwest` uses it by default:
-///   the client asks it for a tunnel, and the handshake inside the tunnel
-///   is with the enclave and is pinned like any other.
+///   returned to the caller.
+/// - **Proxies.** A forward proxy named by `HTTPS_PROXY`, `ALL_PROXY` and
+///   `NO_PROXY` is used as `reqwest` uses it by default: the client asks it
+///   for a tunnel, and the handshake inside the tunnel is with the enclave
+///   and is pinned like any other, so the proxy learns the enclave's host
+///   and nothing else. A request to `localhost` or a loopback address
+///   ([`never_proxied`]) always connects directly. A binding therefore has
+///   two clients, and each request takes the one for its host.
 /// - **The check.** The configuration's certificate verifier is
 ///   [`PinnedServerVerifier`]. Every connection makes a full handshake,
 ///   which the verifier checks: session resumption is off, because a
@@ -53,30 +57,41 @@ use crate::internal::transport::{Failure, Mode, RoundTrip};
 ///   bindings.
 pub(crate) struct TlsMode {
     roots: Arc<RootCertStore>,
-    /// Whether a proxy named in the environment is used. Always, outside
-    /// the tests, which must reach their local server directly.
-    environment_proxy: bool,
+    /// A proxy in place of the environment's proxy settings. Only tests
+    /// set one.
+    proxy: Option<reqwest::Proxy>,
 }
 
 impl TlsMode {
     /// The mode, with the root certificates that are compiled in.
     pub(crate) fn new() -> Self {
-        let mut roots = RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         Self {
-            roots: Arc::new(roots),
-            environment_proxy: true,
+            roots: Arc::new(compiled_in_roots()),
+            proxy: None,
         }
     }
 
     /// The mode with `roots` in place of the compiled-in root
-    /// certificates and without a proxy, for tests against a local server.
+    /// certificates, and with `proxy`, if there is one, in place of the
+    /// environment's proxy settings: for tests against a local server.
     #[cfg(test)]
-    pub(crate) fn with_roots(roots: RootCertStore) -> Self {
+    pub(crate) fn for_test(roots: RootCertStore, proxy: Option<reqwest::Proxy>) -> Self {
         Self {
             roots: Arc::new(roots),
-            environment_proxy: false,
+            proxy,
         }
+    }
+
+    /// A client of one binding, pinned by `tls`: `direct` for the hosts
+    /// that are never proxied, and otherwise for all others.
+    fn client(&self, tls: ClientConfig, direct: bool) -> Result<Client, Error> {
+        let builder = Client::builder()
+            .tls_backend_preconfigured(tls)
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none());
+        route(builder, direct, self.proxy.clone())
+            .build()
+            .map_err(|error| Error::wrap(ErrorKind::Configuration, error))
     }
 }
 
@@ -109,17 +124,10 @@ impl<V: Evidence> Mode<V> for TlsMode {
         // A resumed session skips the certificate, and with it the
         // verifier. Without resumption every connection is checked.
         tls.resumption = rustls::client::Resumption::disabled();
-        let mut builder = Client::builder()
-            .tls_backend_preconfigured(tls)
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none());
-        if !self.environment_proxy {
-            builder = builder.no_proxy();
-        }
-        let client = builder
-            .build()
-            .map_err(|error| Error::wrap(ErrorKind::Configuration, error))?;
-        Ok(Arc::new(TlsBound { client }))
+        Ok(Arc::new(TlsBound {
+            proxied: self.client(tls.clone(), false)?,
+            direct: self.client(tls, true)?,
+        }))
     }
 }
 
@@ -128,18 +136,27 @@ fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-/// A client whose every connection is pinned to one attested key.
+/// The clients of one binding. Every connection of either is pinned to the
+/// binding's attested key.
 struct TlsBound {
-    client: Client,
+    /// The client for the hosts that the environment's proxy applies to.
+    proxied: Client,
+    /// The client for the hosts that are never proxied.
+    direct: Client,
 }
 
 impl RoundTrip for TlsBound {
     /// Sends `request` over a pinned connection. The request's own timeout,
     /// if it has one, is applied by the client.
     fn round_trip(&self, request: Request) -> BoxFuture<Result<Response, Failure>> {
+        let client = if never_proxied(request.url()) {
+            &self.direct
+        } else {
+            &self.proxied
+        };
         // A plaintext request is refused by the mode before it gets here,
         // and by the client itself, which is HTTPS-only.
-        let sent = self.client.execute(request);
+        let sent = client.execute(request);
         Box::pin(async move { sent.await.map_err(failure) })
     }
 }

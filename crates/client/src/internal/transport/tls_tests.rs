@@ -44,10 +44,14 @@ fn fingerprint(pem: &[u8]) -> String {
     leaf_fingerprint(&certificate(pem)).unwrap()
 }
 
-fn mode() -> TlsMode {
+fn roots() -> RootCertStore {
     let mut roots = RootCertStore::empty();
     roots.add(certificate(CA)).unwrap();
-    TlsMode::with_roots(roots)
+    roots
+}
+
+fn mode() -> TlsMode {
+    TlsMode::for_test(roots(), None)
 }
 
 /// What the local server answers to one request.
@@ -552,6 +556,52 @@ async fn a_new_binding_opens_its_own_connection_and_the_old_one_is_closed_with_i
         .await
         .unwrap();
     assert_eq!(server.accepted(), 2);
+}
+
+// Proxies.
+
+/// A listener that stands in for a forward proxy: it counts the
+/// connections that reach it and answers none.
+async fn silent_proxy() -> (reqwest::Proxy, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&connections);
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            count.fetch_add(1, Ordering::SeqCst);
+            held.push(socket);
+        }
+    });
+    let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).unwrap();
+    (proxy, connections)
+}
+
+#[tokio::test]
+async fn a_request_to_a_loopback_host_never_goes_through_a_configured_proxy() {
+    let server = serve(LEAF_A, KEY_A, OK).await;
+    let (proxy, connections) = silent_proxy().await;
+    let bound = TlsMode::for_test(roots(), Some(proxy))
+        .bind(&evidence("pinned", LEAF_A))
+        .unwrap();
+
+    // Loopback by address and by name: both reach the server directly.
+    let by_address = bound.send(server.get("/direct")).await.unwrap();
+    assert_eq!(by_address.body().await.unwrap(), "/direct");
+    let by_name = Url::parse(&format!("https://localhost:{}/named", server.port)).unwrap();
+    // The name resolves to this machine; whether the server is reached
+    // over the address family that it resolves to first does not matter
+    // here, only that the proxy is not asked.
+    let _ = bound.send(Request::new(Method::GET, by_name)).await;
+    assert_eq!(connections.load(Ordering::SeqCst), 0);
+
+    // The proxy is in use for every other host: a request elsewhere asks
+    // it for a tunnel.
+    let mut elsewhere = Request::new(Method::GET, Url::parse("https://enclave.invalid/").unwrap());
+    *elsewhere.timeout_mut() = Some(Duration::from_millis(500));
+    assert!(bound.send(elsewhere).await.is_err());
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
 }
 
 // With the state machine.
