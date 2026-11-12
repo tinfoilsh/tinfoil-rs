@@ -1744,7 +1744,18 @@ mod over_tls {
         let seen = &server.seen()[0];
         assert_eq!(seen.version, reqwest::Version::HTTP_2);
         assert_eq!(*opened.lock().unwrap(), b"part one, part two");
-        assert_eq!(seen.body.len(), "part one, part two".len() + 2 * (4 + 16));
         assert!(!seen.body.windows(4).any(|window| window == b"part"));
+        // However the transport cut the body up on the way, the sealed
+        // frames in it are one for each part of the stream: a length, then
+        // that many bytes of ciphertext and tag.
+        let mut plaintext_lengths = Vec::new();
+        let mut rest = &seen.body[..];
+        while !rest.is_empty() {
+            let (length, after) = rest.split_at(4);
+            let length = u32::from_be_bytes(length.try_into().expect("four bytes")) as usize;
+            plaintext_lengths.push(length - 16);
+            rest = &after[length..];
+        }
+        assert_eq!(plaintext_lengths, ["part one, ".len(), "part two".len()]);
     }
 }
