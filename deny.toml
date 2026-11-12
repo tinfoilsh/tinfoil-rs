@@ -23,7 +23,7 @@ ignore = [
     # constant-time (subtraction, zero counting, division, Montgomery
     # multiplication, equality, inversion). Patched only in 0.7.6, which the
     # elliptic-curve 0.13 line cannot use. Added 2026-11-12.
-    { id = "RUSTSEC-2026-0387", reason = "no secret integer reaches `crypto-bigint`: it is used through `p256` and `p384` only, and the workspace only verifies ECDSA signatures with them, over public keys, messages and signatures. Sealed request bodies use HPKE with X25519, which does not use `crypto-bigint`; the P-256 KEM that `hpke` also compiles is never instantiated. Revisit if any crate ever signs or performs key agreement with a NIST curve, or selects an HPKE KEM other than X25519, and remove once `crypto-bigint` >= 0.7.6 is in use." },
+    { id = "RUSTSEC-2026-0387", reason = "no secret integer reaches `crypto-bigint` outside tests: it is used through `p256` and `p384` only, and the library code only verifies ECDSA signatures with them, over public keys, messages and signatures. Sealed request bodies use HPKE with X25519, which does not use `crypto-bigint`; the P-256 KEM that `hpke` also compiles is never instantiated. The only signing is in test code, which signs the certificates of a local test server with fixed keys that protect nothing. Revisit if any non-test code ever signs or performs key agreement with a NIST curve, or selects an HPKE KEM other than X25519, and remove once `crypto-bigint` >= 0.7.6 is in use." },
 ]
 
 # TLS is pinned to the `ring` rustls provider so the workspace links on
