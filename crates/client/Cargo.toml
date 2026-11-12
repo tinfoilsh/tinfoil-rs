@@ -58,7 +58,9 @@ tinfoil-verifier = { path = "../verifier", version = "=0.1.0" }
 # provider: the clients hand it a TLS configuration built on `ring`, and
 # reqwest's `rustls` feature would add aws-lc-rs, which does not link on
 # Windows MSVC and is banned in deny.toml.
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls-no-provider", "stream"] }
+# `http2` makes every client offer HTTP/2 next to HTTP/1.1 when it connects
+# over TLS.
+reqwest = { version = "0.13.5", default-features = false, features = ["http2", "json", "query", "rustls-no-provider", "stream"] }
 http = "1"
 # The host type of the URLs that reqwest takes.
 url = "2"
@@ -124,6 +126,9 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-threa
 der = { version = "0.7", default-features = false, features = ["std", "oid", "derive"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "std"] }
 x509-cert = { version = "0.2", default-features = false, features = ["std"] }
+# The local server of the tests that need HTTP/2.
+hyper = { version = "1", default-features = false, features = ["http1", "http2", "server"] }
+hyper-util = { version = "0.1", default-features = false, features = ["server-auto", "tokio"] }
 # The local TLS server of the TLS transport mode's tests.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 

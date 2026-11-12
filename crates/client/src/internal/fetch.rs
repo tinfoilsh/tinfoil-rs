@@ -223,15 +223,30 @@ fn client_builder(https_only: bool) -> Result<ClientBuilder, Error> {
 
 /// A client builder with the certificate checks that every client of this
 /// crate starts from: the standard checks against the root certificates
-/// that are compiled in, on the `ring` provider.
+/// that are compiled in, on the `ring` provider. Its connections offer the
+/// protocols of [`alpn_protocols`].
 pub(crate) fn tls_builder() -> Result<ClientBuilder, Error> {
+    tls_builder_with(compiled_in_roots())
+}
+
+/// [`tls_builder`] with `roots` as the root certificates. Only tests pass
+/// other roots than the compiled-in ones.
+pub(crate) fn tls_builder_with(roots: rustls::RootCertStore) -> Result<ClientBuilder, Error> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let tls = rustls::ClientConfig::builder_with_provider(provider)
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|error| Error::wrap(ErrorKind::Configuration, error))?
-        .with_root_certificates(compiled_in_roots())
+        .with_root_certificates(roots)
         .with_no_client_auth();
+    tls.alpn_protocols = alpn_protocols();
     Ok(Client::builder().tls_backend_preconfigured(tls))
+}
+
+/// The protocols that every TLS connection of this crate offers, in order
+/// of preference: HTTP/2, then HTTP/1.1. A TLS configuration that is handed
+/// to `reqwest` ready-made is used as it is, so each one sets these itself.
+pub(crate) fn alpn_protocols() -> Vec<Vec<u8>> {
+    vec![b"h2".to_vec(), b"http/1.1".to_vec()]
 }
 
 /// The root certificates that are compiled into the crate: the only ones
@@ -489,6 +504,25 @@ mod tests {
             "document",
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn a_fetch_offers_http2_then_http1() {
+        use crate::internal::transport::tls::testing::made::{KEY_A, LEAF_A};
+        use crate::internal::transport::tls::testing::{Handler, Protocols, full, serve};
+
+        let handler: Handler = Arc::new(|_| Box::pin(async { hyper::Response::new(full("{}")) }));
+        let server = serve(&LEAF_A, &KEY_A, Protocols::Both, handler).await;
+        let url = Url::parse(&format!("https://127.0.0.1:{}/", server.port)).expect("url");
+        // The client trusts only the compiled-in roots, so the handshake
+        // with the local server fails; what it offered is on record by
+        // then.
+        let client = plain_client_for(&url).expect("client");
+        let error = get_bounded(&client, url, 1024, Duration::from_secs(10), "document")
+            .await
+            .expect_err("an untrusted server");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert_eq!(server.offered(), [["h2", "http/1.1"]]);
     }
 
     #[test]

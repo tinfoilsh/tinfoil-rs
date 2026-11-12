@@ -8,358 +8,100 @@ use std::time::Duration;
 
 use reqwest::header::HeaderValue;
 use reqwest::{Method, Request, Response, StatusCode, Url};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::{HandshakeKind, RootCertStore, ServerConfig};
+use rustls::HandshakeKind;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
+use tokio::sync::Notify;
 
-use super::{TlsMode, leaf_fingerprint, provider};
+use super::{TlsMode, leaf_fingerprint};
 use crate::error::ErrorKind;
 use crate::internal::enclave::Enclave;
 use crate::internal::testing::{Record, Script, Step, tokio_clock};
 use crate::internal::transport::{Failure, KeyFailure, Mode, RoundTrip, Transport};
 
-/// The certificates of these tests, made when the tests run: a
-/// certificate authority that only these tests trust, two server keys, and
-/// server certificates for them. The keys are fixed numbers, good for
-/// nothing but telling two keys apart.
-pub(crate) mod made {
-    use std::str::FromStr;
-    use std::sync::LazyLock;
-
-    use der::asn1::{BitString, GeneralizedTime, Ia5String, OctetString, UtcTime};
-    use der::oid::{AssociatedOid, ObjectIdentifier};
-    use der::{Decode, Encode};
-    use p256::ecdsa::signature::Signer;
-    use p256::ecdsa::{DerSignature, SigningKey};
-    use p256::pkcs8::{EncodePrivateKey, EncodePublicKey};
-    use x509_cert::ext::Extension;
-    use x509_cert::ext::pkix::name::GeneralName;
-    use x509_cert::ext::pkix::{BasicConstraints, SubjectAltName};
-    use x509_cert::name::Name;
-    use x509_cert::serial_number::SerialNumber;
-    use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
-    use x509_cert::time::{Time, Validity};
-    use x509_cert::{Certificate, TbsCertificate, Version};
-
-    const ECDSA_WITH_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
-
-    /// Seconds since the Unix epoch.
-    const YEAR_2020: u64 = 1_577_836_800;
-    const YEAR_2100: u64 = 4_102_444_800;
-    const DAY: u64 = 86_400;
-
-    fn key(seed: u8) -> SigningKey {
-        SigningKey::from_slice(&[seed; 32]).unwrap()
-    }
-
-    fn time(unix: u64) -> Time {
-        let since_epoch = std::time::Duration::from_secs(unix);
-        // Dates from 2050 on must use the long form.
-        match UtcTime::from_unix_duration(since_epoch) {
-            Ok(utc) => Time::UtcTime(utc),
-            Err(_) => Time::GeneralTime(GeneralizedTime::from_unix_duration(since_epoch).unwrap()),
-        }
-    }
-
-    fn extension<T: AssociatedOid + Encode>(critical: bool, value: &T) -> Extension {
-        Extension {
-            extn_id: T::OID,
-            critical,
-            extn_value: OctetString::new(value.to_der().unwrap()).unwrap(),
-        }
-    }
-
-    /// A certificate for `subject_key`, signed by `issuer_key`.
-    fn certificate(
-        subject: &str,
-        subject_key: &SigningKey,
-        issuer: &str,
-        issuer_key: &SigningKey,
-        (not_before, not_after): (u64, u64),
-        extensions: Vec<Extension>,
-    ) -> Vec<u8> {
-        let algorithm = AlgorithmIdentifierOwned {
-            oid: ECDSA_WITH_SHA256,
-            parameters: None,
-        };
-        let public_key = subject_key.verifying_key().to_public_key_der().unwrap();
-        let tbs_certificate = TbsCertificate {
-            version: Version::V3,
-            serial_number: SerialNumber::from(7u32),
-            signature: algorithm.clone(),
-            issuer: Name::from_str(issuer).unwrap(),
-            validity: Validity {
-                not_before: time(not_before),
-                not_after: time(not_after),
-            },
-            subject: Name::from_str(subject).unwrap(),
-            subject_public_key_info: SubjectPublicKeyInfoOwned::from_der(public_key.as_bytes())
-                .unwrap(),
-            issuer_unique_id: None,
-            subject_unique_id: None,
-            extensions: Some(extensions),
-        };
-        let signature: DerSignature = issuer_key.sign(&tbs_certificate.to_der().unwrap());
-        Certificate {
-            tbs_certificate,
-            signature_algorithm: algorithm,
-            signature: BitString::from_bytes(signature.as_bytes()).unwrap(),
-        }
-        .to_der()
-        .unwrap()
-    }
-
-    fn authority(name: &str, key: &SigningKey) -> Vec<u8> {
-        let constraints = BasicConstraints {
-            ca: true,
-            path_len_constraint: None,
-        };
-        certificate(
-            name,
-            key,
-            name,
-            key,
-            (YEAR_2020, YEAR_2100),
-            vec![extension(true, &constraints)],
-        )
-    }
-
-    fn leaf(
-        key: &SigningKey,
-        issuer: &str,
-        issuer_key: &SigningKey,
-        names: Vec<GeneralName>,
-        validity: (u64, u64),
-    ) -> Vec<u8> {
-        let constraints = BasicConstraints {
-            ca: false,
-            path_len_constraint: None,
-        };
-        certificate(
-            "CN=test server",
-            key,
-            issuer,
-            issuer_key,
-            validity,
-            vec![
-                extension(true, &constraints),
-                extension(false, &SubjectAltName(names)),
-            ],
-        )
-    }
-
-    /// The names of the local server: its address, `localhost`, and the
-    /// name that the tests reach it by through a proxy.
-    fn local() -> Vec<GeneralName> {
-        vec![
-            GeneralName::IpAddress(OctetString::new([127, 0, 0, 1]).unwrap()),
-            GeneralName::DnsName(Ia5String::new("localhost").unwrap()),
-            GeneralName::DnsName(Ia5String::new("enclave.test").unwrap()),
-        ]
-    }
-
-    const TRUSTED: &str = "CN=Test CA";
-    const UNTRUSTED: &str = "CN=Another Test CA";
-    static TRUSTED_KEY: LazyLock<SigningKey> = LazyLock::new(|| key(1));
-    static UNTRUSTED_KEY: LazyLock<SigningKey> = LazyLock::new(|| key(2));
-    static SERVER_KEY_A: LazyLock<SigningKey> = LazyLock::new(|| key(3));
-    static SERVER_KEY_B: LazyLock<SigningKey> = LazyLock::new(|| key(4));
-    const LONG: (u64, u64) = (YEAR_2020, YEAR_2100);
-
-    /// The authority that the tests trust.
-    pub(crate) static CA: LazyLock<Vec<u8>> = LazyLock::new(|| authority(TRUSTED, &TRUSTED_KEY));
-    /// Key A, in the form that a TLS server loads.
-    pub(crate) static KEY_A: LazyLock<Vec<u8>> =
-        LazyLock::new(|| SERVER_KEY_A.to_pkcs8_der().unwrap().as_bytes().to_vec());
-    /// Key B, in the form that a TLS server loads.
-    pub(crate) static KEY_B: LazyLock<Vec<u8>> =
-        LazyLock::new(|| SERVER_KEY_B.to_pkcs8_der().unwrap().as_bytes().to_vec());
-    /// Key A, for 127.0.0.1, under the trusted authority.
-    pub(crate) static LEAF_A: LazyLock<Vec<u8>> =
-        LazyLock::new(|| leaf(&SERVER_KEY_A, TRUSTED, &TRUSTED_KEY, local(), LONG));
-    /// Key B, for 127.0.0.1, under the trusted authority.
-    pub(crate) static LEAF_B: LazyLock<Vec<u8>> =
-        LazyLock::new(|| leaf(&SERVER_KEY_B, TRUSTED, &TRUSTED_KEY, local(), LONG));
-    /// Key A, for 127.0.0.1, under an authority that nothing trusts.
-    pub(crate) static LEAF_A_OTHER_CA: LazyLock<Vec<u8>> =
-        LazyLock::new(|| leaf(&SERVER_KEY_A, UNTRUSTED, &UNTRUSTED_KEY, local(), LONG));
-    /// Key A, under the trusted authority, for another name.
-    pub(crate) static LEAF_A_WRONG_NAME: LazyLock<Vec<u8>> = LazyLock::new(|| {
-        let other = GeneralName::DnsName(Ia5String::new("other.example").unwrap());
-        leaf(&SERVER_KEY_A, TRUSTED, &TRUSTED_KEY, vec![other], LONG)
-    });
-    /// Key A, for 127.0.0.1, under the trusted authority, expired in 2020.
-    pub(crate) static LEAF_A_EXPIRED: LazyLock<Vec<u8>> = LazyLock::new(|| {
-        let one_day = (YEAR_2020, YEAR_2020 + DAY);
-        leaf(&SERVER_KEY_A, TRUSTED, &TRUSTED_KEY, local(), one_day)
-    });
-}
-
-use made::{CA, KEY_A, KEY_B, LEAF_A, LEAF_A_EXPIRED, LEAF_A_OTHER_CA, LEAF_A_WRONG_NAME, LEAF_B};
+use crate::internal::transport::tls::testing::made::{
+    CA, KEY_A, KEY_B, LEAF_A, LEAF_A_EXPIRED, LEAF_A_OTHER_CA, LEAF_A_WRONG_NAME, LEAF_B,
+};
+use crate::internal::transport::tls::testing::{
+    Handler, Protocols, Seen, Server, certificate, full, roots,
+};
 
 const HOUR: Duration = Duration::from_secs(3600);
 
-fn certificate(der: &[u8]) -> CertificateDer<'static> {
-    CertificateDer::from(der.to_vec())
-}
-
-pub(crate) fn fingerprint(der: &[u8]) -> String {
+fn fingerprint(der: &[u8]) -> String {
     leaf_fingerprint(&certificate(der)).unwrap()
 }
 
-pub(crate) fn roots() -> RootCertStore {
-    let mut roots = RootCertStore::empty();
-    roots.add(certificate(&CA)).unwrap();
-    roots
-}
-
-pub(crate) fn mode() -> TlsMode {
+fn mode() -> TlsMode {
     TlsMode::for_test(roots(), None)
 }
 
-/// What the local server answers to one request.
-#[derive(Clone)]
-pub(crate) struct Reply {
-    pub(crate) status: &'static str,
-    pub(crate) headers: &'static str,
-    pub(crate) close: bool,
+/// What the local server answers to a request. The body of the response is
+/// the request's path.
+#[derive(Clone, Default)]
+struct Reply {
+    /// The status; 200 when zero.
+    status: u16,
+    headers: Vec<(&'static str, &'static str)>,
+    /// Close the connection after the response.
+    close: bool,
+    /// Answer only once this is signalled.
+    gate: Option<Arc<Notify>>,
 }
 
-pub(crate) const OK: Reply = Reply {
-    status: "200 OK",
-    headers: "",
-    close: false,
-};
-
-/// A local TLS server that records what it saw.
-pub(crate) struct Server {
-    pub(crate) port: u16,
-    /// TCP connections accepted.
-    accepted: Arc<AtomicUsize>,
-    /// The kind of each completed TLS handshake.
-    handshakes: Arc<Mutex<Vec<Option<HandshakeKind>>>>,
-    /// The request line of each request received.
-    requests: Arc<Mutex<Vec<String>>>,
-    /// Connections that the client closed.
-    closed: Arc<AtomicUsize>,
+fn ok() -> Reply {
+    Reply::default()
 }
 
-impl Server {
-    pub(crate) fn url(&self, path: &str) -> Url {
-        Url::parse(&format!("https://127.0.0.1:{}{path}", self.port)).unwrap()
-    }
-    /// A request for the server by a name that is not a loopback name, so
-    /// that a configured proxy applies to it. Only a proxy that connects to
-    /// the server on its own can deliver it.
-    fn get_by_name(&self, path: &str) -> Request {
-        let url = format!("https://enclave.test:{}{path}", self.port);
-        Request::new(Method::GET, Url::parse(&url).unwrap())
-    }
-    pub(crate) fn get(&self, path: &str) -> Request {
-        Request::new(Method::GET, self.url(path))
-    }
-    pub(crate) fn accepted(&self) -> usize {
-        self.accepted.load(Ordering::SeqCst)
-    }
-    pub(crate) fn requests(&self) -> Vec<String> {
-        self.requests.lock().unwrap().clone()
-    }
-    fn handshakes(&self) -> Vec<Option<HandshakeKind>> {
-        self.handshakes.lock().unwrap().clone()
-    }
-}
-
-/// A server that presents `leaf` with `key` and answers every request with
-/// `reply`. The response body is the request's path.
-pub(crate) async fn serve(leaf: &[u8], key: &[u8], reply: Reply) -> Server {
-    let config = ServerConfig::builder_with_provider(provider())
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![certificate(leaf)],
-            PrivateKeyDer::Pkcs8(key.to_vec().into()),
-        )
-        .unwrap();
-    let acceptor = TlsAcceptor::from(Arc::new(config));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let server = Server {
-        port: listener.local_addr().unwrap().port(),
-        accepted: Arc::default(),
-        handshakes: Arc::default(),
-        requests: Arc::default(),
-        closed: Arc::default(),
-    };
-    let (accepted, handshakes, requests, closed) = (
-        Arc::clone(&server.accepted),
-        Arc::clone(&server.handshakes),
-        Arc::clone(&server.requests),
-        Arc::clone(&server.closed),
-    );
-    tokio::spawn(async move {
-        loop {
-            let Ok((socket, _)) = listener.accept().await else {
-                return;
-            };
-            accepted.fetch_add(1, Ordering::SeqCst);
-            let (acceptor, reply) = (acceptor.clone(), reply.clone());
-            let (handshakes, requests, closed) = (
-                Arc::clone(&handshakes),
-                Arc::clone(&requests),
-                Arc::clone(&closed),
-            );
-            tokio::spawn(async move {
-                let Ok(mut stream) = acceptor.accept(socket).await else {
-                    return;
-                };
-                handshakes
-                    .lock()
-                    .unwrap()
-                    .push(stream.get_ref().1.handshake_kind());
-                loop {
-                    let mut head = Vec::new();
-                    let mut buffer = [0u8; 4096];
-                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
-                        match stream.read(&mut buffer).await {
-                            Ok(0) | Err(_) => {
-                                closed.fetch_add(1, Ordering::SeqCst);
-                                return;
-                            }
-                            Ok(n) => head.extend_from_slice(&buffer[..n]),
-                        }
-                    }
-                    let head = String::from_utf8_lossy(&head).into_owned();
-                    let line = head.lines().next().unwrap_or_default().to_owned();
-                    let path = line.split(' ').nth(1).unwrap_or_default().to_owned();
-                    requests.lock().unwrap().push(line);
-                    let connection = if reply.close {
-                        "connection: close\r\n"
-                    } else {
-                        ""
-                    };
-                    let response = format!(
-                        "HTTP/1.1 {}\r\n{}{connection}content-length: {}\r\n\r\n{path}",
-                        reply.status,
-                        reply.headers,
-                        path.len()
-                    );
-                    if stream.write_all(response.as_bytes()).await.is_err() {
-                        return;
-                    }
-                    if reply.close {
-                        let _ = stream.shutdown().await;
-                        return;
-                    }
-                }
+fn respond(reply: Reply) -> Handler {
+    Arc::new(move |seen: Seen| {
+        let reply = reply.clone();
+        Box::pin(async move {
+            if let Some(gate) = &reply.gate {
+                gate.notified().await;
+            }
+            let mut response = hyper::Response::builder().status(if reply.status == 0 {
+                200
+            } else {
+                reply.status
             });
-        }
-    });
-    server
+            for (name, value) in &reply.headers {
+                response = response.header(*name, *value);
+            }
+            if reply.close {
+                response = response.header("connection", "close");
+            }
+            response.body(full(seen.target)).unwrap()
+        })
+    })
 }
 
-pub(crate) fn evidence(name: &'static str, pinned_leaf: &[u8]) -> Record {
+/// A server for both protocols that presents `leaf` with `key`.
+async fn serve(leaf: &[u8], key: &[u8], reply: Reply) -> Arc<Server> {
+    serve_on(Protocols::Both, leaf, key, reply).await
+}
+
+async fn serve_on(protocols: Protocols, leaf: &[u8], key: &[u8], reply: Reply) -> Arc<Server> {
+    super::testing::serve(leaf, key, protocols, respond(reply)).await
+}
+
+fn url(server: &Server, path: &str) -> Url {
+    Url::parse(&format!("https://127.0.0.1:{}{path}", server.port)).unwrap()
+}
+
+fn get(server: &Server, path: &str) -> Request {
+    Request::new(Method::GET, url(server, path))
+}
+
+/// A request for the server by a name that is not a loopback name, so that
+/// a configured proxy applies to it. Only a proxy that connects to the
+/// server on its own can deliver it.
+fn get_by_name(server: &Server, path: &str) -> Request {
+    let url = format!("https://enclave.test:{}{path}", server.port);
+    Request::new(Method::GET, Url::parse(&url).unwrap())
+}
+
+fn evidence(name: &'static str, pinned_leaf: &[u8]) -> Record {
     Record {
         name,
         tls: Some(fingerprint(pinned_leaf)),
@@ -375,7 +117,7 @@ fn bound_to(pinned_leaf: &[u8]) -> Arc<dyn RoundTrip> {
 
 /// The longest that a test waits for the local server, on real time. A
 /// request that hangs fails its test instead of stalling the run.
-pub(crate) const PATIENCE: Duration = Duration::from_secs(10);
+const PATIENCE: Duration = Duration::from_secs(10);
 
 /// Sending with a limit.
 trait Guarded {
@@ -404,7 +146,7 @@ impl GuardedBody for Response {
 }
 
 /// Waits until `condition` holds; fails the test if it never does.
-pub(crate) async fn eventually(condition: impl Fn() -> bool, what: &str) {
+async fn eventually(condition: impl Fn() -> bool, what: &str) {
     for _ in 0..500 {
         if condition() {
             return;
@@ -526,23 +268,23 @@ async fn a_binding_sends_no_plaintext_request_even_when_asked_directly() {
 
 #[tokio::test]
 async fn a_server_that_holds_the_attested_key_is_reached() {
-    let server = serve(&LEAF_A, &KEY_A, OK).await;
+    let server = serve(&LEAF_A, &KEY_A, ok()).await;
     let response = bound_to(&LEAF_A)
-        .send(server.get("/v1/models"))
+        .send(get(&server, "/v1/models"))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.body().await.unwrap(), "/v1/models");
-    assert_eq!(server.requests(), ["GET /v1/models HTTP/1.1"]);
+    assert_eq!(server.requests(), ["GET /v1/models"]);
 }
 
 #[tokio::test]
 async fn a_valid_certificate_for_the_right_name_with_another_key_is_refused_as_a_key_failure() {
     // The server's certificate passes every standard check; only the pin
     // tells it apart.
-    let server = serve(&LEAF_B, &KEY_B, OK).await;
+    let server = serve(&LEAF_B, &KEY_B, ok()).await;
     let failure = bound_to(&LEAF_A)
-        .send(server.get("/secret"))
+        .send(get(&server, "/secret"))
         .await
         .unwrap_err();
     assert_eq!(failure.key, KeyFailure::PeerLacksKey);
@@ -559,8 +301,12 @@ async fn a_valid_certificate_for_the_right_name_with_another_key_is_refused_as_a
     // The handshake failed, so no request was sent.
     assert!(server.requests().is_empty());
 
+    // The refused connection is over, and the server knows it.
+    eventually(|| server.closed() == 1, "the refused connection ends").await;
+    assert_eq!(server.accepted(), 1);
+
     // The same server is reached by a binding to its own key.
-    assert!(bound_to(&LEAF_B).send(server.get("/")).await.is_ok());
+    assert!(bound_to(&LEAF_B).send(get(&server, "/")).await.is_ok());
 }
 
 #[tokio::test]
@@ -570,10 +316,10 @@ async fn the_attested_key_does_not_excuse_a_certificate_that_fails_the_standard_
         (&LEAF_A_WRONG_NAME, "NotValidForName"),
         (&LEAF_A_EXPIRED, "Expired"),
     ] {
-        let server = serve(leaf, &KEY_A, OK).await;
+        let server = serve(leaf, &KEY_A, ok()).await;
         // The pin matches: the server does hold key A.
         let failure = bound_to(leaf)
-            .send(server.get("/secret"))
+            .send(get(&server, "/secret"))
             .await
             .unwrap_err();
         assert_eq!(failure.error.kind(), ErrorKind::Attestation, "{why}");
@@ -585,7 +331,7 @@ async fn the_attested_key_does_not_excuse_a_certificate_that_fails_the_standard_
 
 #[tokio::test]
 async fn a_fingerprint_that_is_not_a_digest_matches_no_server() {
-    let server = serve(&LEAF_A, &KEY_A, OK).await;
+    let server = serve(&LEAF_A, &KEY_A, ok()).await;
     for fingerprint in [
         "not-a-fingerprint".to_owned(),
         fingerprint(&LEAF_A).to_uppercase(),
@@ -593,7 +339,7 @@ async fn a_fingerprint_that_is_not_a_digest_matches_no_server() {
         let mut evidence = evidence("odd", &LEAF_A);
         evidence.tls = Some(fingerprint);
         let bound = mode().bind(&evidence).unwrap();
-        let failure = bound.send(server.get("/")).await.unwrap_err();
+        let failure = bound.send(get(&server, "/")).await.unwrap_err();
         assert_eq!(failure.key, KeyFailure::PeerLacksKey);
     }
     assert!(server.requests().is_empty());
@@ -630,73 +376,280 @@ async fn a_request_that_exceeds_its_own_timeout_is_a_network_timeout() {
     drop(listener);
 }
 
+// Protocols.
+
+fn h2() -> Option<String> {
+    Some("h2".to_owned())
+}
+
+fn http1() -> Option<String> {
+    Some("http/1.1".to_owned())
+}
+
+#[tokio::test]
+async fn a_connection_offers_http2_then_http1_and_uses_the_one_that_the_server_picks() {
+    let both = serve(&LEAF_A, &KEY_A, ok()).await;
+    let old = serve_on(Protocols::Http1Only, &LEAF_A, &KEY_A, ok()).await;
+    let bound = bound_to(&LEAF_A);
+
+    for (server, version, picked) in [
+        (&both, reqwest::Version::HTTP_2, h2()),
+        (&old, reqwest::Version::HTTP_11, http1()),
+    ] {
+        let response = bound.send(get(server, "/")).await.unwrap();
+        assert_eq!(response.version(), version);
+        response.body().await.unwrap();
+        assert_eq!(server.offered(), [["h2", "http/1.1"]]);
+        assert_eq!(server.handshakes(), [(Some(HandshakeKind::Full), picked)]);
+        assert_eq!(server.seen()[0].version, version);
+    }
+}
+
+#[tokio::test]
+async fn the_server_is_asked_for_the_host_of_the_url_under_either_protocol() {
+    for protocols in [Protocols::Both, Protocols::Http1Only] {
+        let server = serve_on(protocols, &LEAF_A, &KEY_A, ok()).await;
+        let response = bound_to(&LEAF_A).send(get(&server, "/")).await.unwrap();
+        response.body().await.unwrap();
+        let seen = server.seen();
+        assert_eq!(
+            seen[0].authority.as_deref(),
+            Some(format!("127.0.0.1:{}", server.port).as_str()),
+            "{protocols:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn headers_that_belong_to_one_connection_are_not_sent_over_http2() {
+    let server = serve(&LEAF_A, &KEY_A, ok()).await;
+    let mut request = get(&server, "/");
+    for (name, value) in [
+        ("connection", "x-hop, keep-alive"),
+        ("x-hop", "1"),
+        ("keep-alive", "timeout=5"),
+        ("proxy-connection", "keep-alive"),
+        ("te", "gzip"),
+        ("x-end-to-end", "kept"),
+    ] {
+        request
+            .headers_mut()
+            .insert(name, HeaderValue::from_static(value));
+    }
+    let response = bound_to(&LEAF_A).send(request).await.unwrap();
+    assert_eq!(response.version(), reqwest::Version::HTTP_2);
+    response.body().await.unwrap();
+
+    let seen = server.seen();
+    let headers = &seen[0].headers;
+    for name in [
+        "connection",
+        "x-hop",
+        "keep-alive",
+        "proxy-connection",
+        "te",
+        "host",
+    ] {
+        assert!(!headers.contains_key(name), "{name} was sent");
+    }
+    assert_eq!(headers["x-end-to-end"], "kept");
+}
+
 // Connections.
 
 #[tokio::test]
-async fn sequential_requests_on_one_binding_share_one_connection() {
-    let server = serve(&LEAF_A, &KEY_A, OK).await;
+async fn sequential_requests_over_http1_share_one_connection() {
+    let server = serve_on(Protocols::Http1Only, &LEAF_A, &KEY_A, ok()).await;
     let bound = bound_to(&LEAF_A);
     for i in 0..8 {
-        let response = bound.send(server.get(&format!("/{i}"))).await.unwrap();
+        let response = bound.send(get(&server, &format!("/{i}"))).await.unwrap();
         // The body is read to the end, which returns the connection to
         // the pool.
         assert_eq!(response.body().await.unwrap(), format!("/{i}"));
     }
     assert_eq!(server.requests().len(), 8);
     assert_eq!(server.accepted(), 1);
-    assert_eq!(server.handshakes(), [Some(HandshakeKind::Full)]);
+    assert_eq!(server.handshakes(), [(Some(HandshakeKind::Full), http1())]);
+}
+
+#[tokio::test]
+async fn concurrent_requests_over_http2_share_one_connection_that_was_checked_once() {
+    // After the first request, no request is answered until all eight have
+    // arrived, so they are in flight together.
+    let gate = Arc::new(Notify::new());
+    let server = serve(
+        &LEAF_A,
+        &KEY_A,
+        Reply {
+            gate: Some(Arc::clone(&gate)),
+            ..ok()
+        },
+    )
+    .await;
+    let bound = bound_to(&LEAF_A);
+
+    // The first request opens the connection, and learns that it speaks
+    // HTTP/2. (Requests that all start before any connection exists each
+    // open one, every one of them checked.)
+    gate.notify_one();
+    let first = bound.send(get(&server, "/first")).await.unwrap();
+    first.body().await.unwrap();
+    assert_eq!(server.accepted(), 1);
+
+    let mut requests = Vec::new();
+    for i in 0..8 {
+        let (bound, request) = (Arc::clone(&bound), get(&server, &format!("/{i}")));
+        requests.push(tokio::spawn(async move {
+            bound.send(request).await.unwrap().body().await.unwrap()
+        }));
+    }
+    eventually(|| server.seen().len() == 9, "all requests arrive").await;
+    assert_eq!(server.accepted(), 1);
+    gate.notify_waiters();
+    for (i, request) in requests.into_iter().enumerate() {
+        let body = tokio::time::timeout(PATIENCE, request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body, format!("/{i}"));
+    }
+
+    assert_eq!(server.accepted(), 1);
+    assert_eq!(server.handshakes(), [(Some(HandshakeKind::Full), h2())]);
+    assert!(server.seen().iter().all(|seen| seen.connection == 0));
 }
 
 #[tokio::test]
 async fn every_new_connection_makes_a_full_handshake_and_none_is_resumed() {
     // The server closes after each response, so each request needs a new
     // connection; it offers session resumption, as servers do.
-    let server = serve(&LEAF_A, &KEY_A, Reply { close: true, ..OK }).await;
+    let server = serve_on(
+        Protocols::Http1Only,
+        &LEAF_A,
+        &KEY_A,
+        Reply {
+            close: true,
+            ..ok()
+        },
+    )
+    .await;
     let bound = bound_to(&LEAF_A);
     for _ in 0..4 {
-        let response = bound.send(server.get("/")).await.unwrap();
+        let response = bound.send(get(&server, "/")).await.unwrap();
         response.body().await.unwrap();
     }
     assert_eq!(server.accepted(), 4);
-    assert_eq!(server.handshakes(), [Some(HandshakeKind::Full); 4]);
+    assert_eq!(
+        server.handshakes(),
+        vec![(Some(HandshakeKind::Full), http1()); 4]
+    );
 }
 
 #[tokio::test]
 async fn a_redirect_is_returned_to_the_caller_and_not_followed() {
+    for protocols in [Protocols::Both, Protocols::Http1Only] {
+        let server = serve_on(
+            protocols,
+            &LEAF_A,
+            &KEY_A,
+            Reply {
+                status: 302,
+                headers: vec![("location", "/elsewhere")],
+                ..ok()
+            },
+        )
+        .await;
+        let response = bound_to(&LEAF_A)
+            .send(get(&server, "/start"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok()),
+            Some("/elsewhere")
+        );
+        response.body().await.unwrap();
+        assert_eq!(server.requests(), ["GET /start"]);
+    }
+}
+
+#[tokio::test]
+async fn a_retired_binding_finishes_its_streams_and_carries_no_new_one() {
+    // Over HTTP/2 a retired connection could still take new streams; it
+    // must not.
+    let gate = Arc::new(Notify::new());
     let server = serve(
         &LEAF_A,
         &KEY_A,
         Reply {
-            status: "302 Found",
-            headers: "location: /elsewhere\r\n",
-            close: false,
+            gate: Some(Arc::clone(&gate)),
+            ..ok()
         },
     )
     .await;
-    let response = bound_to(&LEAF_A).send(server.get("/start")).await.unwrap();
-    assert_eq!(response.status(), StatusCode::FOUND);
-    assert_eq!(
-        response
-            .headers()
-            .get("location")
-            .and_then(|v| v.to_str().ok()),
-        Some("/elsewhere")
-    );
-    response.body().await.unwrap();
-    assert_eq!(server.requests(), ["GET /start HTTP/1.1"]);
+    let f = transport(vec![
+        evidence("first", &LEAF_A),
+        evidence("second", &LEAF_A),
+    ])
+    .await;
+    let start = |path: &'static str| {
+        let (transport, request) = (f.transport.clone(), get(&server, path));
+        tokio::spawn(async move { transport.send(request).await.unwrap().body().await.unwrap() })
+    };
+
+    // The first binding's connection, opened by a request that is let
+    // through, and then two streams in flight on it.
+    gate.notify_one();
+    assert_eq!(start("/open").await.unwrap(), "/open");
+    let mut in_flight = vec![start("/a"), start("/b")];
+    eventually(|| server.seen().len() == 3, "both requests arrive").await;
+    assert_eq!(server.accepted(), 1);
+
+    // A new verification replaces the binding while they wait. The later
+    // requests start one after the other, so that the second finds the
+    // connection that the first opened.
+    f.transport.reverify().await.unwrap();
+    for (path, arrived) in [("/c", 4), ("/d", 5)] {
+        in_flight.push(start(path));
+        eventually(|| server.seen().len() == arrived, "a later request arrives").await;
+    }
+
+    // The later requests opened one connection of their own, and nothing
+    // new went onto the retired one.
+    assert_eq!(server.accepted(), 2);
+    for seen in server.seen() {
+        let expected = usize::from(seen.target == "/c" || seen.target == "/d");
+        assert_eq!(seen.connection, expected, "{}", seen.target);
+        assert_eq!(seen.version, reqwest::Version::HTTP_2);
+    }
+
+    // The streams that were in flight finish on the old connection.
+    gate.notify_waiters();
+    for (request, path) in in_flight.into_iter().zip(["/a", "/b", "/c", "/d"]) {
+        let body = tokio::time::timeout(PATIENCE, request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body, path);
+    }
+    // And the old connection ends once they are done.
+    eventually(|| server.closed() == 1, "the retired connection closes").await;
 }
 
 #[tokio::test]
 async fn a_new_binding_opens_its_own_connection_and_the_old_one_is_closed_with_its_binding() {
-    let server = serve(&LEAF_A, &KEY_A, OK).await;
+    let server = serve(&LEAF_A, &KEY_A, ok()).await;
     let mode = mode();
 
     let first = mode.bind(&evidence("first", &LEAF_A)).unwrap();
     first
-        .send(server.get("/1"))
+        .send(get(&server, "/1"))
         .await
         .unwrap()
-        .text()
+        .body()
         .await
         .unwrap();
     assert_eq!(server.accepted(), 1);
@@ -704,29 +657,29 @@ async fn a_new_binding_opens_its_own_connection_and_the_old_one_is_closed_with_i
     // A second binding to the same key does not borrow the idle connection.
     let second = mode.bind(&evidence("second", &LEAF_A)).unwrap();
     second
-        .send(server.get("/2"))
+        .send(get(&server, "/2"))
         .await
         .unwrap()
-        .text()
+        .body()
         .await
         .unwrap();
     assert_eq!(server.accepted(), 2);
 
     // Retiring the first binding closes its idle connection.
-    assert_eq!(server.closed.load(Ordering::SeqCst), 0);
+    assert_eq!(server.closed(), 0);
     drop(first);
     eventually(
-        || server.closed.load(Ordering::SeqCst) == 1,
+        || server.closed() == 1,
         "the retired binding's connection closes",
     )
     .await;
 
     // The second binding keeps using its own.
     second
-        .send(server.get("/3"))
+        .send(get(&server, "/3"))
         .await
         .unwrap()
-        .text()
+        .body()
         .await
         .unwrap();
     assert_eq!(server.accepted(), 2);
@@ -798,22 +751,30 @@ async fn tunnel_proxy(port: u16) -> (reqwest::Proxy, Arc<Mutex<Vec<String>>>) {
 #[tokio::test]
 async fn a_connection_through_a_proxys_tunnel_is_pinned_like_a_direct_one() {
     // The server holds key A.
-    let server = serve(&LEAF_A, &KEY_A, OK).await;
+    let server = serve(&LEAF_A, &KEY_A, ok()).await;
     let (proxy, lines) = tunnel_proxy(server.port).await;
     let mode = TlsMode::for_test(roots(), Some(proxy));
     let connect = format!("CONNECT enclave.test:{} HTTP/1.1", server.port);
 
     // Pinned to key A: the request goes through the tunnel and arrives.
     let pinned = mode.bind(&evidence("pinned", &LEAF_A)).unwrap();
-    let response = pinned.send(server.get_by_name("/tunnelled")).await.unwrap();
+    let response = pinned
+        .send(get_by_name(&server, "/tunnelled"))
+        .await
+        .unwrap();
+    // Inside the tunnel the connection is HTTP/2, as a direct one is.
+    assert_eq!(response.version(), reqwest::Version::HTTP_2);
     assert_eq!(response.body().await.unwrap(), "/tunnelled");
     assert_eq!(*lines.lock().unwrap(), std::slice::from_ref(&connect));
-    assert_eq!(server.requests(), ["GET /tunnelled HTTP/1.1"]);
+    assert_eq!(server.requests(), ["GET /tunnelled"]);
 
     // Pinned to key B: the tunnel opens, the handshake inside it presents
     // a certificate that is valid for the name, and the pin refuses it.
     let other = mode.bind(&evidence("other", &LEAF_B)).unwrap();
-    let failure = other.send(server.get_by_name("/secret")).await.unwrap_err();
+    let failure = other
+        .send(get_by_name(&server, "/secret"))
+        .await
+        .unwrap_err();
     assert_eq!(failure.key, KeyFailure::PeerLacksKey);
     assert_eq!(failure.error.kind(), ErrorKind::Attestation);
     assert!(
@@ -826,19 +787,19 @@ async fn a_connection_through_a_proxys_tunnel_is_pinned_like_a_direct_one() {
     );
     assert_eq!(*lines.lock().unwrap(), [connect.clone(), connect]);
     // Nothing was sent to the server by the refused client.
-    assert_eq!(server.requests(), ["GET /tunnelled HTTP/1.1"]);
+    assert_eq!(server.requests(), ["GET /tunnelled"]);
 }
 
 #[tokio::test]
 async fn a_request_to_a_loopback_host_never_goes_through_a_configured_proxy() {
-    let server = serve(&LEAF_A, &KEY_A, OK).await;
+    let server = serve(&LEAF_A, &KEY_A, ok()).await;
     let (proxy, connections) = silent_proxy().await;
     let bound = TlsMode::for_test(roots(), Some(proxy))
         .bind(&evidence("pinned", &LEAF_A))
         .unwrap();
 
     // Loopback by address and by name: both reach the server directly.
-    let by_address = bound.send(server.get("/direct")).await.unwrap();
+    let by_address = bound.send(get(&server, "/direct")).await.unwrap();
     assert_eq!(by_address.body().await.unwrap(), "/direct");
     let by_name = Url::parse(&format!("https://localhost:{}/named", server.port)).unwrap();
     // The name resolves to this machine; whether the server is reached
@@ -876,14 +837,14 @@ async fn transport(evidence: Vec<Record>) -> Fixture {
 #[tokio::test]
 async fn a_key_failure_makes_the_transport_verify_again_and_the_request_then_succeeds() {
     // The enclave rotated to key B after the first verification.
-    let server = serve(&LEAF_B, &KEY_B, OK).await;
+    let server = serve(&LEAF_B, &KEY_B, ok()).await;
     let f = transport(vec![
         evidence("before", &LEAF_A),
         evidence("after", &LEAF_B),
     ])
     .await;
 
-    let failure = f.transport.send(server.get("/secret")).await.unwrap_err();
+    let failure = f.transport.send(get(&server, "/secret")).await.unwrap_err();
     assert_eq!(failure.key, KeyFailure::Rejected);
     assert_eq!(failure.error.kind(), ErrorKind::Attestation);
     assert!(server.requests().is_empty());
@@ -891,23 +852,23 @@ async fn a_key_failure_makes_the_transport_verify_again_and_the_request_then_suc
 
     // The same request again: the enclave is verified first, and the
     // request goes out under the new key.
-    let response = f.transport.send(server.get("/secret")).await.unwrap();
+    let response = f.transport.send(get(&server, "/secret")).await.unwrap();
     assert_eq!(response.body().await.unwrap(), "/secret");
     assert_eq!(f.script.calls(), 2);
     assert_eq!(f.transport.current().name, "after");
-    assert_eq!(server.requests(), ["GET /secret HTTP/1.1"]);
+    assert_eq!(server.requests(), ["GET /secret"]);
 }
 
 #[tokio::test]
 async fn a_key_failure_that_a_new_verification_does_not_cure_fails_again_without_sending() {
-    let server = serve(&LEAF_B, &KEY_B, OK).await;
+    let server = serve(&LEAF_B, &KEY_B, ok()).await;
     let f = transport(vec![
         evidence("first", &LEAF_A),
         evidence("second", &LEAF_A),
     ])
     .await;
     for _ in 0..2 {
-        let failure = f.transport.send(server.get("/secret")).await.unwrap_err();
+        let failure = f.transport.send(get(&server, "/secret")).await.unwrap_err();
         assert_eq!(failure.key, KeyFailure::Rejected);
     }
     assert_eq!(f.script.calls(), 2);
@@ -916,7 +877,7 @@ async fn a_key_failure_that_a_new_verification_does_not_cure_fails_again_without
 
 #[tokio::test]
 async fn a_new_verification_moves_requests_to_a_new_connection() {
-    let server = serve(&LEAF_A, &KEY_A, OK).await;
+    let server = serve(&LEAF_A, &KEY_A, ok()).await;
     let f = transport(vec![
         evidence("first", &LEAF_A),
         evidence("second", &LEAF_A),
@@ -925,10 +886,10 @@ async fn a_new_verification_moves_requests_to_a_new_connection() {
 
     for path in ["/1", "/2"] {
         f.transport
-            .send(server.get(path))
+            .send(get(&server, path))
             .await
             .unwrap()
-            .text()
+            .body()
             .await
             .unwrap();
     }
@@ -937,10 +898,10 @@ async fn a_new_verification_moves_requests_to_a_new_connection() {
     f.transport.reverify().await.unwrap();
     for path in ["/3", "/4"] {
         f.transport
-            .send(server.get(path))
+            .send(get(&server, path))
             .await
             .unwrap()
-            .text()
+            .body()
             .await
             .unwrap();
     }
@@ -948,7 +909,7 @@ async fn a_new_verification_moves_requests_to_a_new_connection() {
     assert_eq!(server.requests().len(), 4);
     // The first binding was retired, and its connection with it.
     eventually(
-        || server.closed.load(Ordering::SeqCst) == 1,
+        || server.closed() == 1,
         "the replaced binding's connection closes",
     )
     .await;
@@ -956,14 +917,14 @@ async fn a_new_verification_moves_requests_to_a_new_connection() {
 
 #[tokio::test]
 async fn a_response_still_being_read_survives_the_replacement_of_its_binding() {
-    let server = serve(&LEAF_A, &KEY_A, OK).await;
+    let server = serve(&LEAF_A, &KEY_A, ok()).await;
     let f = transport(vec![
         evidence("first", &LEAF_A),
         evidence("second", &LEAF_A),
     ])
     .await;
 
-    let response = f.transport.send(server.get("/in-flight")).await.unwrap();
+    let response = f.transport.send(get(&server, "/in-flight")).await.unwrap();
     f.transport.reverify().await.unwrap();
     assert_eq!(response.body().await.unwrap(), "/in-flight");
 }

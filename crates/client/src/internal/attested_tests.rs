@@ -34,6 +34,16 @@ async fn soon<T>(future: impl Future<Output = T>) -> T {
         .expect("the operation neither succeeded nor failed in time")
 }
 
+/// Runs a test under paused time with a limit. When nothing in the test
+/// can make progress any more, Tokio moves its clock to the next timer,
+/// which is this limit, and the test fails instead of hanging. The limit
+/// is far beyond any time that a test steps through.
+async fn unstuck<T>(test: impl Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(1_000 * 86_400), test)
+        .await
+        .expect("the test can make no progress")
+}
+
 type Client = Arc<AttestedClient<Record>>;
 
 fn start(client: &Client, method: Method, url: &str) -> RequestBuilder {
@@ -117,6 +127,9 @@ enum Answer {
     /// A response whose body delivers this text and then fails with the
     /// sealed-body protocol's error for a frame that does not open.
     Tampered(&'static str),
+    /// A response whose body delivers this text and then fails with the
+    /// sealed-body protocol's error for a failure of its connection.
+    CarrierBroke(&'static str),
 }
 
 type Answers = Arc<dyn Fn(&Sent) -> Answer + Send + Sync>;
@@ -183,6 +196,24 @@ impl RoundTrip for Binding {
                     Answer::Stalling(text) => {
                         let body = futures_util::stream::iter([Ok::<_, std::io::Error>(text)])
                             .chain(futures_util::stream::pending());
+                        return Ok(Response::from(http::Response::new(
+                            reqwest::Body::wrap_stream(body),
+                        )));
+                    }
+                    Answer::CarrierBroke(text) => {
+                        // A `reqwest` error, as a broken connection gives.
+                        let broken = futures_util::stream::iter([Err::<&str, _>(
+                            std::io::Error::other("connection reset"),
+                        )]);
+                        let cause =
+                            Response::from(http::Response::new(reqwest::Body::wrap_stream(broken)))
+                                .bytes()
+                                .await
+                                .expect_err("a broken body");
+                        let body = futures_util::stream::iter([
+                            Ok(text),
+                            Err(tinfoil_ehbp::Error::Http(cause)),
+                        ]);
                         return Ok(Response::from(http::Response::new(
                             reqwest::Body::wrap_stream(body),
                         )));
@@ -276,394 +307,439 @@ async fn settle() {
 
 #[tokio::test(start_paused = true)]
 async fn the_client_reports_its_route_and_its_last_verification() {
-    let f = fake(vec![ready("first"), later("second")], settings(), |_| {
-        Answer::Text("ok")
+    unstuck(async {
+        let f = fake(vec![ready("first"), later("second")], settings(), |_| {
+            Answer::Text("ok")
+        })
+        .await;
+        assert_eq!(f.client.enclave(), ENCLAVE);
+        assert_eq!(f.client.repo(), None);
+        assert_eq!(f.client.transport_mode(), TransportMode::Tls);
+        assert_eq!(f.client.base_url().as_str(), "https://enclave.example.com/");
+        assert_eq!(
+            f.client.openai_url().as_str(),
+            "https://enclave.example.com/v1/"
+        );
+        assert_eq!(f.client.current().name, "first");
+        assert_eq!(f.client.ensure_verified().await.unwrap().name, "first");
+        assert_eq!(f.script.calls(), 1);
+        assert_eq!(f.client.reverify().await.unwrap().name, "second");
+        assert_eq!(f.client.current().name, "second");
     })
-    .await;
-    assert_eq!(f.client.enclave(), ENCLAVE);
-    assert_eq!(f.client.repo(), None);
-    assert_eq!(f.client.transport_mode(), TransportMode::Tls);
-    assert_eq!(f.client.base_url().as_str(), "https://enclave.example.com/");
-    assert_eq!(
-        f.client.openai_url().as_str(),
-        "https://enclave.example.com/v1/"
-    );
-    assert_eq!(f.client.current().name, "first");
-    assert_eq!(f.client.ensure_verified().await.unwrap().name, "first");
-    assert_eq!(f.script.calls(), 1);
-    assert_eq!(f.client.reverify().await.unwrap().name, "second");
-    assert_eq!(f.client.current().name, "second");
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_base_url_replaces_the_enclaves_origin_for_both_urls() {
-    let base = Url::parse("https://enclave.example.com/prefix/").unwrap();
-    let f = fake(
-        vec![ready("first")],
-        Settings {
-            base_url: Some(base.clone()),
-            ..settings()
-        },
-        |_| Answer::Text("ok"),
-    )
-    .await;
-    assert_eq!(f.client.base_url(), &base);
-    assert_eq!(f.client.openai_url(), &base);
+    unstuck(async {
+        let base = Url::parse("https://enclave.example.com/prefix/").unwrap();
+        let f = fake(
+            vec![ready("first")],
+            Settings {
+                base_url: Some(base.clone()),
+                ..settings()
+            },
+            |_| Answer::Text("ok"),
+        )
+        .await;
+        assert_eq!(f.client.base_url(), &base);
+        assert_eq!(f.client.openai_url(), &base);
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_pinned_client_takes_no_base_url_on_another_origin() {
-    let script = Script::new([ready("first")]);
-    let mode = Scripted {
-        answers: Arc::new(|_| Answer::Text("ok")),
-        sent: Arc::default(),
-    };
-    let enclave = Enclave::from_source(ENCLAVE, script.source(), None, tokio_clock());
-    let transport = Transport::connect(enclave, Arc::new(mode), true)
-        .await
-        .unwrap();
-    let proxy = || Some(Url::parse("https://proxy.example.com/").unwrap());
-    let error = AttestedClient::new(
-        transport.clone(),
-        Settings {
-            base_url: proxy(),
-            ..settings()
-        },
-    )
-    .err()
-    .expect("a proxy needs sealed bodies");
-    assert_eq!(error.kind(), ErrorKind::Configuration);
-    assert!(error.to_string().contains("TransportMode::Ehbp"), "{error}");
+    unstuck(async {
+        let script = Script::new([ready("first")]);
+        let mode = Scripted {
+            answers: Arc::new(|_| Answer::Text("ok")),
+            sent: Arc::default(),
+        };
+        let enclave = Enclave::from_source(ENCLAVE, script.source(), None, tokio_clock());
+        let transport = Transport::connect(enclave, Arc::new(mode), true)
+            .await
+            .unwrap();
+        let proxy = || Some(Url::parse("https://proxy.example.com/").unwrap());
+        let error = AttestedClient::new(
+            transport.clone(),
+            Settings {
+                base_url: proxy(),
+                ..settings()
+            },
+        )
+        .err()
+        .expect("a proxy needs sealed bodies");
+        assert_eq!(error.kind(), ErrorKind::Configuration);
+        assert!(error.to_string().contains("TransportMode::Ehbp"), "{error}");
 
-    AttestedClient::new(
-        transport,
-        Settings {
-            mode: TransportMode::Ehbp,
-            base_url: proxy(),
-            ..settings()
-        },
-    )
-    .expect("the sealed mode goes through a proxy");
+        AttestedClient::new(
+            transport,
+            Settings {
+                mode: TransportMode::Ehbp,
+                base_url: proxy(),
+                ..settings()
+            },
+        )
+        .expect("the sealed mode goes through a proxy");
+    })
+    .await
 }
 
 // The origin restriction.
 
 #[tokio::test(start_paused = true)]
 async fn a_request_to_another_origin_is_refused_and_starts_no_verification() {
-    let f = fake(vec![ready("first")], settings(), |_| Answer::Text("ok")).await;
-    // The verification has expired, so a request that got past the guard
-    // would start one.
-    tokio::time::advance(2 * HOUR).await;
-    for url in [
-        "https://evil.example.com/v1/models",
-        "https://sub.enclave.example.com/",
-        "https://enclave.example.com.evil.example/",
-        "https://enclave.example.com:8443/",
-        "http://enclave.example.com/",
-        "http://enclave.example.com:443/",
-        "https://enclave.example.com@evil.example/",
-        "https://evil.example/https://enclave.example.com/",
-        "ftp://enclave.example.com/",
-    ] {
-        let error = get(&f.client, url)
-            .header("authorization", "Bearer secret")
-            .send()
-            .await
-            .expect_err(url);
-        assert_eq!(error.kind(), ErrorKind::Configuration, "{url}: {error}");
-        assert!(error.to_string().contains("refusing to send"), "{error}");
-        assert!(!error.to_string().contains("secret"), "{error}");
-    }
-    assert_eq!(f.script.calls(), 1);
-    assert!(f.sent().is_empty());
+    unstuck(async {
+        let f = fake(vec![ready("first")], settings(), |_| Answer::Text("ok")).await;
+        // The verification has expired, so a request that got past the guard
+        // would start one.
+        tokio::time::advance(2 * HOUR).await;
+        for url in [
+            "https://evil.example.com/v1/models",
+            "https://sub.enclave.example.com/",
+            "https://enclave.example.com.evil.example/",
+            "https://enclave.example.com:8443/",
+            "http://enclave.example.com/",
+            "http://enclave.example.com:443/",
+            "https://enclave.example.com@evil.example/",
+            "https://evil.example/https://enclave.example.com/",
+            "ftp://enclave.example.com/",
+        ] {
+            let error = get(&f.client, url)
+                .header("authorization", "Bearer secret")
+                .send()
+                .await
+                .expect_err(url);
+            assert_eq!(error.kind(), ErrorKind::Configuration, "{url}: {error}");
+            assert!(error.to_string().contains("refusing to send"), "{error}");
+            assert!(!error.to_string().contains("secret"), "{error}");
+        }
+        assert_eq!(f.script.calls(), 1);
+        assert!(f.sent().is_empty());
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_request_to_the_clients_origin_passes_whatever_its_spelling_or_path() {
-    let f = fake(vec![ready("first")], settings(), |_| Answer::Text("ok")).await;
-    for url in [
-        "https://enclave.example.com/",
-        "https://enclave.example.com:443/v1/models",
-        "HTTPS://ENCLAVE.example.COM/anything/else?x=1",
-    ] {
-        get(&f.client, url).send().await.expect(url);
-    }
-    assert_eq!(f.sent().len(), 3);
+    unstuck(async {
+        let f = fake(vec![ready("first")], settings(), |_| Answer::Text("ok")).await;
+        for url in [
+            "https://enclave.example.com/",
+            "https://enclave.example.com:443/v1/models",
+            "HTTPS://ENCLAVE.example.COM/anything/else?x=1",
+        ] {
+            get(&f.client, url).send().await.expect(url);
+        }
+        assert_eq!(f.sent().len(), 3);
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn with_a_proxy_both_the_proxy_and_the_enclave_are_the_clients_origins() {
-    let f = fake(
-        vec![ready("first")],
-        Settings {
-            mode: TransportMode::Ehbp,
-            base_url: Some(Url::parse("https://proxy.example.com/tinfoil/").unwrap()),
-            ..settings()
-        },
-        |_| Answer::Text("ok"),
-    )
-    .await;
-    // The path of the base URL is where requests are meant to go, and not
-    // a limit on where they may go.
-    for url in [
-        "https://proxy.example.com/tinfoil/v1/models",
-        "https://proxy.example.com/elsewhere",
-        "https://enclave.example.com/v1/models",
-    ] {
-        get(&f.client, url).send().await.expect(url);
-    }
-    let error = get(&f.client, "https://other.example.com/tinfoil/")
-        .send()
-        .await
-        .expect_err("another origin");
-    assert_eq!(error.kind(), ErrorKind::Configuration);
-    assert_eq!(f.sent().len(), 3);
+    unstuck(async {
+        let f = fake(
+            vec![ready("first")],
+            Settings {
+                mode: TransportMode::Ehbp,
+                base_url: Some(Url::parse("https://proxy.example.com/tinfoil/").unwrap()),
+                ..settings()
+            },
+            |_| Answer::Text("ok"),
+        )
+        .await;
+        // The path of the base URL is where requests are meant to go, and not
+        // a limit on where they may go.
+        for url in [
+            "https://proxy.example.com/tinfoil/v1/models",
+            "https://proxy.example.com/elsewhere",
+            "https://enclave.example.com/v1/models",
+        ] {
+            get(&f.client, url).send().await.expect(url);
+        }
+        let error = get(&f.client, "https://other.example.com/tinfoil/")
+            .send()
+            .await
+            .expect_err("another origin");
+        assert_eq!(error.kind(), ErrorKind::Configuration);
+        assert_eq!(f.sent().len(), 3);
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_request_that_the_mode_cannot_protect_starts_no_verification() {
-    let f = fake(vec![ready("first")], settings(), |_| Answer::Text("ok")).await;
-    tokio::time::advance(2 * HOUR).await;
-    let error = start(&f.client, Method::CONNECT, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect_err("refused");
-    assert_eq!(error.kind(), ErrorKind::Configuration);
-    assert_eq!(f.script.calls(), 1);
+    unstuck(async {
+        let f = fake(vec![ready("first")], settings(), |_| Answer::Text("ok")).await;
+        tokio::time::advance(2 * HOUR).await;
+        let error = start(&f.client, Method::CONNECT, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect_err("refused");
+        assert_eq!(error.kind(), ErrorKind::Configuration);
+        assert_eq!(f.script.calls(), 1);
+    })
+    .await
 }
 
 // The enclave header.
 
 #[tokio::test(start_paused = true)]
 async fn requests_through_a_proxy_name_the_enclave_and_others_do_not() {
-    let proxied = fake(
-        vec![ready("first")],
-        Settings {
-            mode: TransportMode::Ehbp,
-            base_url: Some(Url::parse("https://proxy.example.com/").unwrap()),
-            ..settings()
-        },
-        |_| Answer::Text("ok"),
-    )
-    .await;
-    get(&proxied.client, "https://proxy.example.com/a")
-        .send()
-        .await
-        .unwrap();
-    // A value from the caller is replaced.
-    get(&proxied.client, "https://proxy.example.com/b")
-        .header("X-Tinfoil-Enclave-Url", "https://evil.example.com")
-        .send()
-        .await
-        .unwrap();
-    for sent in proxied.sent() {
-        let values: Vec<_> = sent
-            .headers
-            .get_all("x-tinfoil-enclave-url")
-            .iter()
-            .collect();
-        assert_eq!(values, ["https://enclave.example.com"], "{}", sent.url);
-    }
+    unstuck(async {
+        let proxied = fake(
+            vec![ready("first")],
+            Settings {
+                mode: TransportMode::Ehbp,
+                base_url: Some(Url::parse("https://proxy.example.com/").unwrap()),
+                ..settings()
+            },
+            |_| Answer::Text("ok"),
+        )
+        .await;
+        get(&proxied.client, "https://proxy.example.com/a")
+            .send()
+            .await
+            .unwrap();
+        // A value from the caller is replaced.
+        get(&proxied.client, "https://proxy.example.com/b")
+            .header("X-Tinfoil-Enclave-Url", "https://evil.example.com")
+            .send()
+            .await
+            .unwrap();
+        for sent in proxied.sent() {
+            let values: Vec<_> = sent
+                .headers
+                .get_all("x-tinfoil-enclave-url")
+                .iter()
+                .collect();
+            assert_eq!(values, ["https://enclave.example.com"], "{}", sent.url);
+        }
 
-    let direct = fake(vec![ready("first")], settings(), |_| Answer::Text("ok")).await;
-    get(&direct.client, "https://enclave.example.com/a")
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        !direct.sent()[0]
-            .headers
-            .contains_key("x-tinfoil-enclave-url")
-    );
+        let direct = fake(vec![ready("first")], settings(), |_| Answer::Text("ok")).await;
+        get(&direct.client, "https://enclave.example.com/a")
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            !direct.sent()[0]
+                .headers
+                .contains_key("x-tinfoil-enclave-url")
+        );
+    })
+    .await
 }
 
 // The replay.
 
 #[tokio::test(start_paused = true)]
 async fn a_key_rejection_is_healed_by_one_replay_under_a_new_verification() {
-    let f = fake(
-        vec![ready("before"), later("after")],
-        settings(),
-        |sent| match sent.binding {
-            "before" => Answer::LacksKey,
-            _ => Answer::Text("ok"),
-        },
-    )
-    .await;
-    let response = post(&f.client, "https://enclave.example.com/v1/x")
-        .header("x-request", "1")
-        .body("payload")
-        .send()
-        .await
-        .expect("healed");
-    assert_eq!(response.text().await.unwrap(), "ok");
-    assert_eq!(f.script.calls(), 2);
-    assert_eq!(f.bindings(), ["before", "after"]);
-    // The replay is the same request.
-    let sent = f.sent();
-    assert_eq!(sent[1].text(), "payload");
-    assert_eq!(sent[1].headers.get("x-request").unwrap(), "1");
-    assert_eq!(sent[1].method, Method::POST);
-    assert_eq!(f.client.current().name, "after");
+    unstuck(async {
+        let f = fake(
+            vec![ready("before"), later("after")],
+            settings(),
+            |sent| match sent.binding {
+                "before" => Answer::LacksKey,
+                _ => Answer::Text("ok"),
+            },
+        )
+        .await;
+        let response = post(&f.client, "https://enclave.example.com/v1/x")
+            .header("x-request", "1")
+            .body("payload")
+            .send()
+            .await
+            .expect("healed");
+        assert_eq!(response.text().await.unwrap(), "ok");
+        assert_eq!(f.script.calls(), 2);
+        assert_eq!(f.bindings(), ["before", "after"]);
+        // The replay is the same request.
+        let sent = f.sent();
+        assert_eq!(sent[1].text(), "payload");
+        assert_eq!(sent[1].headers.get("x-request").unwrap(), "1");
+        assert_eq!(sent[1].method, Method::POST);
+        assert_eq!(f.client.current().name, "after");
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_request_without_a_body_is_replayed_too() {
-    let f = fake(
-        vec![ready("before"), later("after")],
-        settings(),
-        |sent| match sent.binding {
-            "before" => Answer::LacksKey,
-            _ => Answer::Text("ok"),
-        },
-    )
-    .await;
-    get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect("healed");
-    assert_eq!(f.bindings(), ["before", "after"]);
+    unstuck(async {
+        let f = fake(
+            vec![ready("before"), later("after")],
+            settings(),
+            |sent| match sent.binding {
+                "before" => Answer::LacksKey,
+                _ => Answer::Text("ok"),
+            },
+        )
+        .await;
+        get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect("healed");
+        assert_eq!(f.bindings(), ["before", "after"]);
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_streamed_body_is_not_replayed_and_the_rejection_is_reported() {
-    let f = fake(
-        vec![ready("before"), later("after")],
-        settings(),
-        |sent| match sent.binding {
-            "before" => Answer::LacksKey,
-            _ => Answer::Text("ok"),
-        },
-    )
-    .await;
-    let error = post(&f.client, "https://enclave.example.com/v1/x")
-        .body(stream(&["pay", "load"]))
-        .send()
-        .await
-        .expect_err("a stream cannot be sent again");
-    assert_eq!(error.kind(), ErrorKind::Attestation);
-    assert_eq!(
-        attempts(&error),
-        [
-            "attestation error: cannot send the request again after the enclave's key changed: \
+    unstuck(async {
+        let f = fake(
+            vec![ready("before"), later("after")],
+            settings(),
+            |sent| match sent.binding {
+                "before" => Answer::LacksKey,
+                _ => Answer::Text("ok"),
+            },
+        )
+        .await;
+        let error = post(&f.client, "https://enclave.example.com/v1/x")
+            .body(stream(&["pay", "load"]))
+            .send()
+            .await
+            .expect_err("a stream cannot be sent again");
+        assert_eq!(error.kind(), ErrorKind::Attestation);
+        assert_eq!(
+            attempts(&error),
+            [
+                "attestation error: cannot send the request again after the enclave's key changed: \
              its body is a stream, which cannot be replayed",
-            "attestation error: the peer does not hold the attested key",
-        ]
-    );
-    // Nothing was sent again, and nothing was verified for a replay.
-    assert_eq!(f.bindings(), ["before"]);
-    assert_eq!(f.script.calls(), 1);
+                "attestation error: the peer does not hold the attested key",
+            ]
+        );
+        // Nothing was sent again, and nothing was verified for a replay.
+        assert_eq!(f.bindings(), ["before"]);
+        assert_eq!(f.script.calls(), 1);
 
-    // The rejection stands: the next request verifies first.
-    get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect("under the new verification");
-    assert_eq!(f.bindings(), ["before", "after"]);
-    assert_eq!(f.script.calls(), 2);
+        // The rejection stands: the next request verifies first.
+        get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect("under the new verification");
+        assert_eq!(f.bindings(), ["before", "after"]);
+        assert_eq!(f.script.calls(), 2);
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn there_is_one_replay_and_its_failure_carries_the_rejection() {
-    // The new verification's keys are rejected as well.
-    let f = fake(
-        vec![ready("first"), later("second"), later("third")],
-        settings(),
-        |sent| match sent.binding {
-            "third" => Answer::Text("ok"),
-            _ => Answer::LacksKey,
-        },
-    )
-    .await;
-    let error = get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect_err("the replay failed");
-    assert_eq!(error.kind(), ErrorKind::Attestation);
-    assert_eq!(attempts(&error).len(), 2);
-    assert_eq!(f.bindings(), ["first", "second"]);
-    assert_eq!(f.script.calls(), 2);
+    unstuck(async {
+        // The new verification's keys are rejected as well.
+        let f = fake(
+            vec![ready("first"), later("second"), later("third")],
+            settings(),
+            |sent| match sent.binding {
+                "third" => Answer::Text("ok"),
+                _ => Answer::LacksKey,
+            },
+        )
+        .await;
+        let error = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect_err("the replay failed");
+        assert_eq!(error.kind(), ErrorKind::Attestation);
+        assert_eq!(attempts(&error).len(), 2);
+        assert_eq!(f.bindings(), ["first", "second"]);
+        assert_eq!(f.script.calls(), 2);
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_replay_whose_verification_fails_reports_every_attempt() {
-    let f = fake(
-        vec![
-            ready("first"),
-            Step::Ready(Err(Error::network("fetch 1"))),
-            Step::Ready(Err(Error::attestation("fetch 2"))),
-        ],
-        settings(),
-        |_| Answer::LacksKey,
-    )
-    .await;
-    let error = get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect_err("no new verification");
-    assert_eq!(
-        attempts(&error),
-        [
-            "attestation error: fetch 2",
-            "network error: fetch 1",
-            "attestation error: the peer does not hold the attested key",
-        ]
-    );
-    assert_eq!(f.bindings(), ["first"]);
+    unstuck(async {
+        let f = fake(
+            vec![
+                ready("first"),
+                Step::Ready(Err(Error::network("fetch 1"))),
+                Step::Ready(Err(Error::attestation("fetch 2"))),
+            ],
+            settings(),
+            |_| Answer::LacksKey,
+        )
+        .await;
+        let error = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect_err("no new verification");
+        assert_eq!(
+            attempts(&error),
+            [
+                "attestation error: fetch 2",
+                "network error: fetch 1",
+                "attestation error: the peer does not hold the attested key",
+            ]
+        );
+        assert_eq!(f.bindings(), ["first"]);
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_failure_that_is_no_key_rejection_is_not_replayed() {
-    let f = fake(vec![ready("first"), later("second")], settings(), |_| {
-        Answer::Fail(Error::network("connection reset"))
+    unstuck(async {
+        let f = fake(vec![ready("first"), later("second")], settings(), |_| {
+            Answer::Fail(Error::network("connection reset"))
+        })
+        .await;
+        let error = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect_err("failed");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert!(error.earlier_attempt().is_none());
+        assert_eq!(f.bindings(), ["first"]);
+        assert_eq!(f.script.calls(), 1);
     })
-    .await;
-    let error = get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect_err("failed");
-    assert_eq!(error.kind(), ErrorKind::Network);
-    assert!(error.earlier_attempt().is_none());
-    assert_eq!(f.bindings(), ["first"]);
-    assert_eq!(f.script.calls(), 1);
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn the_replay_layer_trusts_only_a_rejection_that_the_transport_vouches_for() {
-    use crate::internal::transport::KeyFailure;
-    use crate::internal::transport::replay::with_replay;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    unstuck(async {
+        use crate::internal::transport::KeyFailure;
+        use crate::internal::transport::replay::with_replay;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct Claims(KeyFailure, Arc<AtomicUsize>);
-    impl RoundTrip for Claims {
-        fn round_trip(&self, _: Request) -> BoxFuture<Result<Response, Failure>> {
-            self.1.fetch_add(1, Ordering::SeqCst);
-            let key = self.0;
-            Box::pin(async move {
-                Err(Failure {
-                    error: Error::attestation("claimed"),
-                    key,
+        struct Claims(KeyFailure, Arc<AtomicUsize>);
+        impl RoundTrip for Claims {
+            fn round_trip(&self, _: Request) -> BoxFuture<Result<Response, Failure>> {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                let key = self.0;
+                Box::pin(async move {
+                    Err(Failure {
+                        error: Error::attestation("claimed"),
+                        key,
+                    })
                 })
-            })
+            }
         }
-    }
-    let request = || Request::new(Method::GET, Url::parse("https://e.example/").unwrap());
-    for (claim, sends) in [
-        (KeyFailure::None, 1),
-        (KeyFailure::PeerLacksKey, 1),
-        (KeyFailure::Rejected, 2),
-    ] {
-        let count = Arc::new(AtomicUsize::new(0));
-        let chain = with_replay(Arc::new(Claims(claim, Arc::clone(&count))));
-        let failure = chain.round_trip(request()).await.unwrap_err();
-        assert_eq!(count.load(Ordering::SeqCst), sends, "{claim:?}");
-        if claim == KeyFailure::Rejected {
-            // The failed replay asks for no further replay.
-            assert_eq!(failure.key, KeyFailure::None);
-        } else {
-            assert_eq!(failure.key, claim);
+        let request = || Request::new(Method::GET, Url::parse("https://e.example/").unwrap());
+        for (claim, sends) in [
+            (KeyFailure::None, 1),
+            (KeyFailure::PeerLacksKey, 1),
+            (KeyFailure::Rejected, 2),
+        ] {
+            let count = Arc::new(AtomicUsize::new(0));
+            let chain = with_replay(Arc::new(Claims(claim, Arc::clone(&count))));
+            let failure = chain.round_trip(request()).await.unwrap_err();
+            assert_eq!(count.load(Ordering::SeqCst), sends, "{claim:?}");
+            if claim == KeyFailure::Rejected {
+                // The failed replay asks for no further replay.
+                assert_eq!(failure.key, KeyFailure::None);
+            } else {
+                assert_eq!(failure.key, claim);
+            }
         }
-    }
+    })
+    .await
 }
 
 // The cache secret.
@@ -677,265 +753,292 @@ fn with_secret(secret: &str) -> Settings {
 
 #[tokio::test(start_paused = true)]
 async fn the_secret_is_added_to_the_bodies_that_carry_it_and_to_no_other() {
-    let f = fake(vec![ready("first")], with_secret("s3cret"), |_| {
-        Answer::Text("ok")
+    unstuck(async {
+        let f = fake(vec![ready("first")], with_secret("s3cret"), |_| {
+            Answer::Text("ok")
+        })
+        .await;
+        let cases = [
+            (
+                "https://enclave.example.com/v1/chat/completions",
+                r#"{"model":"m","seed":12345678901234567890}"#,
+                r#"{"model":"m","seed":12345678901234567890,"user_cache_secret":"s3cret"}"#,
+            ),
+            (
+                "https://enclave.example.com/v1/responses?stream=true",
+                r#"{"user_cache_secret":""}"#,
+                r#"{"user_cache_secret":"s3cret"}"#,
+            ),
+            (
+                "https://enclave.example.com/v1/completions",
+                r#"{"user_cache_secret":"per-user"}"#,
+                r#"{"user_cache_secret":"per-user"}"#,
+            ),
+            (
+                "https://enclave.example.com/v1/chat/completions",
+                "not json",
+                "not json",
+            ),
+            (
+                "https://enclave.example.com/v1/embeddings",
+                r#"{"model":"m"}"#,
+                r#"{"model":"m"}"#,
+            ),
+        ];
+        for (url, body, _) in cases {
+            post(&f.client, url).body(body).send().await.expect(url);
+        }
+        let sent = f.sent();
+        for (sent, (url, _, expected)) in sent.iter().zip(cases) {
+            assert_eq!(sent.text(), expected, "{url}");
+        }
     })
-    .await;
-    let cases = [
-        (
-            "https://enclave.example.com/v1/chat/completions",
-            r#"{"model":"m","seed":12345678901234567890}"#,
-            r#"{"model":"m","seed":12345678901234567890,"user_cache_secret":"s3cret"}"#,
-        ),
-        (
-            "https://enclave.example.com/v1/responses?stream=true",
-            r#"{"user_cache_secret":""}"#,
-            r#"{"user_cache_secret":"s3cret"}"#,
-        ),
-        (
-            "https://enclave.example.com/v1/completions",
-            r#"{"user_cache_secret":"per-user"}"#,
-            r#"{"user_cache_secret":"per-user"}"#,
-        ),
-        (
-            "https://enclave.example.com/v1/chat/completions",
-            "not json",
-            "not json",
-        ),
-        (
-            "https://enclave.example.com/v1/embeddings",
-            r#"{"model":"m"}"#,
-            r#"{"model":"m"}"#,
-        ),
-    ];
-    for (url, body, _) in cases {
-        post(&f.client, url).body(body).send().await.expect(url);
-    }
-    let sent = f.sent();
-    for (sent, (url, _, expected)) in sent.iter().zip(cases) {
-        assert_eq!(sent.text(), expected, "{url}");
-    }
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn without_the_option_no_body_is_changed() {
-    let f = fake(vec![ready("first")], settings(), |_| Answer::Text("ok")).await;
-    post(&f.client, "https://enclave.example.com/v1/chat/completions")
-        .body("{}")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(f.sent()[0].text(), "{}");
+    unstuck(async {
+        let f = fake(vec![ready("first")], settings(), |_| Answer::Text("ok")).await;
+        post(&f.client, "https://enclave.example.com/v1/chat/completions")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(f.sent()[0].text(), "{}");
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_streamed_body_is_read_and_gets_the_secret_too() {
-    let f = fake(vec![ready("first")], with_secret("s3cret"), |_| {
-        Answer::Text("ok")
+    unstuck(async {
+        let f = fake(vec![ready("first")], with_secret("s3cret"), |_| {
+            Answer::Text("ok")
+        })
+        .await;
+        let url = "https://enclave.example.com/v1/chat/completions";
+        post(&f.client, url)
+            .body(stream(&[r#"{"mod"#, r#"el":"m"}"#]))
+            .send()
+            .await
+            .unwrap();
+        post(&f.client, url)
+            .body(stream(&["not ", "json"]))
+            .send()
+            .await
+            .unwrap();
+        // A stream to another endpoint stays a stream.
+        post(&f.client, "https://enclave.example.com/v1/files")
+            .body(stream(&["{}"]))
+            .send()
+            .await
+            .unwrap();
+        let sent = f.sent();
+        assert_eq!(
+            sent[0].text(),
+            r#"{"model":"m","user_cache_secret":"s3cret"}"#
+        );
+        assert_eq!(sent[1].text(), "not json");
+        assert!(sent[2].streamed);
     })
-    .await;
-    let url = "https://enclave.example.com/v1/chat/completions";
-    post(&f.client, url)
-        .body(stream(&[r#"{"mod"#, r#"el":"m"}"#]))
-        .send()
-        .await
-        .unwrap();
-    post(&f.client, url)
-        .body(stream(&["not ", "json"]))
-        .send()
-        .await
-        .unwrap();
-    // A stream to another endpoint stays a stream.
-    post(&f.client, "https://enclave.example.com/v1/files")
-        .body(stream(&["{}"]))
-        .send()
-        .await
-        .unwrap();
-    let sent = f.sent();
-    assert_eq!(
-        sent[0].text(),
-        r#"{"model":"m","user_cache_secret":"s3cret"}"#
-    );
-    assert_eq!(sent[1].text(), "not json");
-    assert!(sent[2].streamed);
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_streamed_body_that_fails_is_a_network_error_and_nothing_is_sent() {
-    let f = fake(vec![ready("first")], with_secret("s3cret"), |_| {
-        Answer::Text("ok")
+    unstuck(async {
+        let f = fake(vec![ready("first")], with_secret("s3cret"), |_| {
+            Answer::Text("ok")
+        })
+        .await;
+        let broken = futures_util::stream::iter([
+            Ok("{"),
+            Err(std::io::Error::other("the caller's stream broke")),
+        ]);
+        let error = post(&f.client, "https://enclave.example.com/v1/chat/completions")
+            .body(reqwest::Body::wrap_stream(broken))
+            .send()
+            .await
+            .expect_err("the body could not be read");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert!(f.sent().is_empty());
     })
-    .await;
-    let broken = futures_util::stream::iter([
-        Ok("{"),
-        Err(std::io::Error::other("the caller's stream broke")),
-    ]);
-    let error = post(&f.client, "https://enclave.example.com/v1/chat/completions")
-        .body(reqwest::Body::wrap_stream(broken))
-        .send()
-        .await
-        .expect_err("the body could not be read");
-    assert_eq!(error.kind(), ErrorKind::Network);
-    assert!(f.sent().is_empty());
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_declared_length_follows_the_body_and_a_replay_carries_the_secret() {
-    let f = fake(
-        vec![ready("before"), later("after")],
-        with_secret("s3cret"),
-        |sent| match sent.binding {
-            "before" => Answer::LacksKey,
-            _ => Answer::Text("ok"),
-        },
-    )
-    .await;
-    post(&f.client, "https://enclave.example.com/v1/chat/completions")
-        .header("content-length", "2")
-        .body("{}")
-        .send()
-        .await
-        .expect("healed");
-    let expected = r#"{"user_cache_secret":"s3cret"}"#;
-    for sent in f.sent() {
-        assert_eq!(sent.text(), expected, "{}", sent.binding);
-        assert_eq!(
-            sent.headers.get("content-length"),
-            Some(&HeaderValue::from(expected.len()))
-        );
-    }
-    assert_eq!(f.bindings(), ["before", "after"]);
+    unstuck(async {
+        let f = fake(
+            vec![ready("before"), later("after")],
+            with_secret("s3cret"),
+            |sent| match sent.binding {
+                "before" => Answer::LacksKey,
+                _ => Answer::Text("ok"),
+            },
+        )
+        .await;
+        post(&f.client, "https://enclave.example.com/v1/chat/completions")
+            .header("content-length", "2")
+            .body("{}")
+            .send()
+            .await
+            .expect("healed");
+        let expected = r#"{"user_cache_secret":"s3cret"}"#;
+        for sent in f.sent() {
+            assert_eq!(sent.text(), expected, "{}", sent.binding);
+            assert_eq!(
+                sent.headers.get("content-length"),
+                Some(&HeaderValue::from(expected.len()))
+            );
+        }
+        assert_eq!(f.bindings(), ["before", "after"]);
+    })
+    .await
 }
 
 // Freshness.
 
 #[tokio::test(start_paused = true)]
 async fn a_request_at_the_freshness_deadline_verifies_first_and_one_before_it_does_not() {
-    let f = fake(vec![ready("first"), later("second")], settings(), |_| {
-        Answer::Text("ok")
+    unstuck(async {
+        let f = fake(vec![ready("first"), later("second")], settings(), |_| {
+            Answer::Text("ok")
+        })
+        .await;
+        let url = "https://enclave.example.com/";
+        tokio::time::advance(HOUR - Duration::from_micros(1)).await;
+        get(&f.client, url).send().await.unwrap();
+        assert_eq!(f.script.calls(), 1);
+
+        tokio::time::advance(Duration::from_micros(1)).await;
+        get(&f.client, url).send().await.unwrap();
+        assert_eq!(f.script.calls(), 2);
+        assert_eq!(f.bindings(), ["first", "second"]);
+
+        // The new verification serves the requests that follow.
+        get(&f.client, url).send().await.unwrap();
+        assert_eq!(f.script.calls(), 2);
     })
-    .await;
-    let url = "https://enclave.example.com/";
-    tokio::time::advance(HOUR - Duration::from_micros(1)).await;
-    get(&f.client, url).send().await.unwrap();
-    assert_eq!(f.script.calls(), 1);
-
-    tokio::time::advance(Duration::from_micros(1)).await;
-    get(&f.client, url).send().await.unwrap();
-    assert_eq!(f.script.calls(), 2);
-    assert_eq!(f.bindings(), ["first", "second"]);
-
-    // The new verification serves the requests that follow.
-    get(&f.client, url).send().await.unwrap();
-    assert_eq!(f.script.calls(), 2);
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_failed_reverification_fails_the_request_and_sends_nothing() {
-    let f = fake(
-        vec![
-            ready("first"),
-            Step::Ready(Err(Error::network("unreachable"))),
-            Step::Ready(Err(Error::network("still unreachable"))),
-            later("later"),
-        ],
-        settings(),
-        |_| Answer::Text("ok"),
-    )
-    .await;
-    tokio::time::advance(HOUR).await;
-    let error = get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect_err("not verified");
-    assert_eq!(error.kind(), ErrorKind::Network);
-    assert!(f.sent().is_empty());
-    // The last verification is still what the client reports.
-    assert_eq!(f.client.current().name, "first");
+    unstuck(async {
+        let f = fake(
+            vec![
+                ready("first"),
+                Step::Ready(Err(Error::network("unreachable"))),
+                Step::Ready(Err(Error::network("still unreachable"))),
+                later("later"),
+            ],
+            settings(),
+            |_| Answer::Text("ok"),
+        )
+        .await;
+        tokio::time::advance(HOUR).await;
+        let error = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect_err("not verified");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert!(f.sent().is_empty());
+        // The last verification is still what the client reports.
+        assert_eq!(f.client.current().name, "first");
 
-    get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect("verified by the next request");
-    assert_eq!(f.bindings(), ["later"]);
+        get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect("verified by the next request");
+        assert_eq!(f.bindings(), ["later"]);
+    })
+    .await
 }
 
 // Concurrency.
 
 #[tokio::test(start_paused = true)]
 async fn requests_that_are_rejected_together_share_one_verification() {
-    let gate = Arc::new(Notify::new());
-    let f = fake(
-        vec![ready("before"), gated("after", &gate)],
-        settings(),
-        |sent| match sent.binding {
-            // Slow enough for every request to be under way before the
-            // first rejection.
-            "before" => Answer::After(Duration::from_secs(1), Box::new(Answer::LacksKey)),
-            _ => Answer::Text("ok"),
-        },
-    )
-    .await;
-    let requests: Vec<_> = (0..8)
-        .map(|_| {
-            let client = Arc::clone(&f.client);
-            tokio::spawn(async move {
-                post(&client, "https://enclave.example.com/v1/x")
-                    .body("payload")
-                    .send()
-                    .await
+    unstuck(async {
+        let gate = Arc::new(Notify::new());
+        let f = fake(
+            vec![ready("before"), gated("after", &gate)],
+            settings(),
+            |sent| match sent.binding {
+                // Slow enough for every request to be under way before the
+                // first rejection.
+                "before" => Answer::After(Duration::from_secs(1), Box::new(Answer::LacksKey)),
+                _ => Answer::Text("ok"),
+            },
+        )
+        .await;
+        let requests: Vec<_> = (0..8)
+            .map(|_| {
+                let client = Arc::clone(&f.client);
+                tokio::spawn(async move {
+                    post(&client, "https://enclave.example.com/v1/x")
+                        .body("payload")
+                        .send()
+                        .await
+                })
             })
-        })
-        .collect();
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    // Every request was rejected and now waits for the one verification.
-    assert_eq!(f.bindings(), ["before"; 8]);
-    assert_eq!(f.script.calls(), 2);
-    gate.notify_one();
-    for request in requests {
-        soon(request).await.unwrap().expect("healed");
-    }
-    assert_eq!(f.script.calls(), 2);
-    assert_eq!(f.sent().len(), 16);
-    assert!(f.bindings()[8..].iter().all(|name| *name == "after"));
+            .collect();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Every request was rejected and now waits for the one verification.
+        assert_eq!(f.bindings(), ["before"; 8]);
+        assert_eq!(f.script.calls(), 2);
+        gate.notify_one();
+        for request in requests {
+            soon(request).await.unwrap().expect("healed");
+        }
+        assert_eq!(f.script.calls(), 2);
+        assert_eq!(f.sent().len(), 16);
+        assert!(f.bindings()[8..].iter().all(|name| *name == "after"));
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_late_rejection_of_a_replaced_verification_starts_no_new_one() {
-    // One request is answered slowly by the old binding, and is rejected
-    // only after another request has already brought a new verification.
-    let f = fake(
-        vec![ready("before"), later("after"), later("unneeded")],
-        settings(),
-        |sent| match (sent.binding, sent.url.path()) {
-            ("before", "/slow") => {
-                Answer::After(Duration::from_secs(5), Box::new(Answer::LacksKey))
-            }
-            ("before", _) => Answer::LacksKey,
-            _ => Answer::Text("ok"),
-        },
-    )
-    .await;
-    let slow = {
-        let client = Arc::clone(&f.client);
-        tokio::spawn(async move {
-            get(&client, "https://enclave.example.com/slow")
-                .send()
-                .await
-        })
-    };
-    settle().await;
-    get(&f.client, "https://enclave.example.com/fast")
-        .send()
-        .await
-        .expect("healed");
-    assert_eq!(f.script.calls(), 2);
-    soon(slow)
-        .await
-        .unwrap()
-        .expect("replayed under the newer verification");
-    assert_eq!(f.script.calls(), 2);
-    assert_eq!(f.client.current().name, "after");
+    unstuck(async {
+        // One request is answered slowly by the old binding, and is rejected
+        // only after another request has already brought a new verification.
+        let f = fake(
+            vec![ready("before"), later("after"), later("unneeded")],
+            settings(),
+            |sent| match (sent.binding, sent.url.path()) {
+                ("before", "/slow") => {
+                    Answer::After(Duration::from_secs(5), Box::new(Answer::LacksKey))
+                }
+                ("before", _) => Answer::LacksKey,
+                _ => Answer::Text("ok"),
+            },
+        )
+        .await;
+        let slow = {
+            let client = Arc::clone(&f.client);
+            tokio::spawn(async move {
+                get(&client, "https://enclave.example.com/slow")
+                    .send()
+                    .await
+            })
+        };
+        settle().await;
+        get(&f.client, "https://enclave.example.com/fast")
+            .send()
+            .await
+            .expect("healed");
+        assert_eq!(f.script.calls(), 2);
+        soon(slow)
+            .await
+            .unwrap()
+            .expect("replayed under the newer verification");
+        assert_eq!(f.script.calls(), 2);
+        assert_eq!(f.client.current().name, "after");
+    })
+    .await
 }
 
 // Deadlines.
@@ -947,347 +1050,403 @@ fn assert_deadline(error: &Error) {
 
 #[tokio::test(start_paused = true)]
 async fn a_response_that_does_not_arrive_within_the_clients_timeout_is_a_timeout() {
-    let f = fake(
-        vec![ready("first")],
-        with_timeout(Duration::from_secs(5)),
-        |sent| match sent.url.path() {
-            "/never" => Answer::Never,
-            _ => Answer::After(Duration::from_millis(4_999), Box::new(Answer::Text("ok"))),
-        },
-    )
-    .await;
-    let started = tokio::time::Instant::now();
-    let error = get(&f.client, "https://enclave.example.com/never")
-        .send()
-        .await
-        .expect_err("no response");
-    assert_deadline(&error);
-    assert_eq!(started.elapsed(), Duration::from_secs(5));
+    unstuck(async {
+        let f = fake(
+            vec![ready("first")],
+            with_timeout(Duration::from_secs(5)),
+            |sent| match sent.url.path() {
+                "/never" => Answer::Never,
+                _ => Answer::After(Duration::from_millis(4_999), Box::new(Answer::Text("ok"))),
+            },
+        )
+        .await;
+        let started = tokio::time::Instant::now();
+        let error = get(&f.client, "https://enclave.example.com/never")
+            .send()
+            .await
+            .expect_err("no response");
+        assert_deadline(&error);
+        assert_eq!(started.elapsed(), Duration::from_secs(5));
 
-    // Just inside the deadline is in time.
-    get(&f.client, "https://enclave.example.com/slow")
-        .send()
-        .await
-        .expect("in time");
+        // Just inside the deadline is in time.
+        get(&f.client, "https://enclave.example.com/slow")
+            .send()
+            .await
+            .expect("in time");
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_requests_own_timeout_replaces_the_clients_in_either_direction() {
-    let f = fake(
-        vec![ready("first")],
-        with_timeout(Duration::from_secs(5)),
-        |sent| match sent.url.path() {
-            "/never" => Answer::Never,
-            _ => Answer::After(Duration::from_secs(60), Box::new(Answer::Text("ok"))),
-        },
-    )
-    .await;
-    let started = tokio::time::Instant::now();
-    let error = get(&f.client, "https://enclave.example.com/never")
-        .timeout(Duration::from_secs(2))
-        .send()
-        .await
-        .expect_err("no response");
-    assert_deadline(&error);
-    assert_eq!(started.elapsed(), Duration::from_secs(2));
+    unstuck(async {
+        let f = fake(
+            vec![ready("first")],
+            with_timeout(Duration::from_secs(5)),
+            |sent| match sent.url.path() {
+                "/never" => Answer::Never,
+                _ => Answer::After(Duration::from_secs(60), Box::new(Answer::Text("ok"))),
+            },
+        )
+        .await;
+        let started = tokio::time::Instant::now();
+        let error = get(&f.client, "https://enclave.example.com/never")
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .expect_err("no response");
+        assert_deadline(&error);
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
 
-    get(&f.client, "https://enclave.example.com/slow")
-        .timeout(Duration::from_secs(61))
-        .send()
-        .await
-        .expect("the longer deadline of the request applies");
+        get(&f.client, "https://enclave.example.com/slow")
+            .timeout(Duration::from_secs(61))
+            .send()
+            .await
+            .expect("the longer deadline of the request applies");
 
-    // The layers below never apply a deadline of their own.
-    assert!(f.sent().iter().all(|sent| sent.timeout.is_none()));
+        // The layers below never apply a deadline of their own.
+        assert!(f.sent().iter().all(|sent| sent.timeout.is_none()));
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn without_a_timeout_a_slow_response_is_waited_for() {
-    let f = fake(vec![ready("first")], settings(), |_| {
-        Answer::After(Duration::from_secs(1_800), Box::new(Answer::Text("ok")))
+    unstuck(async {
+        let f = fake(vec![ready("first")], settings(), |_| {
+            Answer::After(Duration::from_secs(1_800), Box::new(Answer::Text("ok")))
+        })
+        .await;
+        let response = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect("no deadline");
+        assert_eq!(response.text().await.unwrap(), "ok");
     })
-    .await;
-    let response = get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect("no deadline");
-    assert_eq!(response.text().await.unwrap(), "ok");
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn the_deadline_covers_the_wait_for_a_verification() {
-    let gate = Arc::new(Notify::new());
-    let f = fake(
-        vec![ready("first"), gated("stuck", &gate), later("third")],
-        with_timeout(Duration::from_secs(5)),
-        |_| Answer::Text("ok"),
-    )
-    .await;
-    tokio::time::advance(HOUR).await;
-    let started = tokio::time::Instant::now();
-    let error = get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect_err("the verification did not finish");
-    assert_deadline(&error);
-    assert_eq!(started.elapsed(), Duration::from_secs(5));
-    assert_eq!(f.script.calls(), 2);
-    assert!(f.sent().is_empty());
+    unstuck(async {
+        let gate = Arc::new(Notify::new());
+        let f = fake(
+            vec![ready("first"), gated("stuck", &gate), later("third")],
+            with_timeout(Duration::from_secs(5)),
+            |_| Answer::Text("ok"),
+        )
+        .await;
+        tokio::time::advance(HOUR).await;
+        let started = tokio::time::Instant::now();
+        let error = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect_err("the verification did not finish");
+        assert_deadline(&error);
+        assert_eq!(started.elapsed(), Duration::from_secs(5));
+        assert_eq!(f.script.calls(), 2);
+        assert!(f.sent().is_empty());
 
-    // Nobody waits for the verification any more, so it was dropped, and
-    // the next request starts one.
-    get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect("verified again");
-    assert_eq!(f.script.calls(), 3);
-    assert_eq!(f.client.current().name, "third");
+        // Nobody waits for the verification any more, so it was dropped, and
+        // the next request starts one.
+        get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect("verified again");
+        assert_eq!(f.script.calls(), 3);
+        assert_eq!(f.client.current().name, "third");
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn the_deadline_covers_the_verification_and_the_replay_after_a_rejection() {
-    let f = fake(
-        vec![
-            ready("before"),
-            Step::After(
-                Duration::from_secs(3),
-                Ok(record("after", &tokio_clock(), HOUR)),
-            ),
-        ],
-        with_timeout(Duration::from_secs(5)),
-        |sent| match sent.binding {
-            "before" => Answer::After(Duration::from_secs(1), Box::new(Answer::LacksKey)),
-            _ => Answer::Never,
-        },
-    )
-    .await;
-    let started = tokio::time::Instant::now();
-    let error = get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect_err("out of time during the replay");
-    assert_deadline(&error);
-    // One deadline from the start, not one for each attempt.
-    assert_eq!(started.elapsed(), Duration::from_secs(5));
-    assert_eq!(f.bindings(), ["before", "after"]);
+    unstuck(async {
+        let f = fake(
+            vec![
+                ready("before"),
+                Step::After(
+                    Duration::from_secs(3),
+                    Ok(record("after", &tokio_clock(), HOUR)),
+                ),
+            ],
+            with_timeout(Duration::from_secs(5)),
+            |sent| match sent.binding {
+                "before" => Answer::After(Duration::from_secs(1), Box::new(Answer::LacksKey)),
+                _ => Answer::Never,
+            },
+        )
+        .await;
+        let started = tokio::time::Instant::now();
+        let error = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect_err("out of time during the replay");
+        assert_deadline(&error);
+        // One deadline from the start, not one for each attempt.
+        assert_eq!(started.elapsed(), Duration::from_secs(5));
+        assert_eq!(f.bindings(), ["before", "after"]);
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn the_deadline_covers_the_read_of_the_body_counted_from_the_send() {
-    let f = fake(
-        vec![ready("first")],
-        with_timeout(Duration::from_secs(5)),
-        |_| {
-            Answer::After(
-                Duration::from_secs(3),
-                Box::new(Answer::Stalling("partial")),
-            )
-        },
-    )
-    .await;
-    let started = tokio::time::Instant::now();
-    let mut response = get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect("the head arrived in time");
-    assert_eq!(started.elapsed(), Duration::from_secs(3));
-    assert_eq!(response.chunk().await.unwrap().unwrap(), "partial");
+    unstuck(async {
+        let f = fake(
+            vec![ready("first")],
+            with_timeout(Duration::from_secs(5)),
+            |_| {
+                Answer::After(
+                    Duration::from_secs(3),
+                    Box::new(Answer::Stalling("partial")),
+                )
+            },
+        )
+        .await;
+        let started = tokio::time::Instant::now();
+        let mut response = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect("the head arrived in time");
+        assert_eq!(started.elapsed(), Duration::from_secs(3));
+        assert_eq!(response.chunk().await.unwrap().unwrap(), "partial");
 
-    let failed = response.chunk().await.expect_err("the body stalled");
-    assert_eq!(started.elapsed(), Duration::from_secs(5));
-    assert!(failed.is_timeout(), "{failed:?}");
-    let error = Error::from_reqwest(&failed).expect("the client's error");
-    assert_deadline(error);
-    // Nothing is read after the failure.
-    assert!(response.chunk().await.unwrap().is_none());
+        let failed = response.chunk().await.expect_err("the body stalled");
+        assert_eq!(started.elapsed(), Duration::from_secs(5));
+        assert!(failed.is_timeout(), "{failed:?}");
+        let error = Error::from_reqwest(&failed).expect("the client's error");
+        assert_deadline(error);
+        // Nothing is read after the failure.
+        assert!(response.chunk().await.unwrap().is_none());
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn data_that_arrives_after_the_deadline_is_not_delivered() {
-    let f = fake(
-        vec![ready("first")],
-        with_timeout(Duration::from_secs(5)),
-        |_| Answer::Text("complete"),
-    )
-    .await;
-    let response = get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .unwrap();
-    // The caller comes back to the body too late.
-    tokio::time::advance(Duration::from_secs(6)).await;
-    let failed = response.text().await.expect_err("past the deadline");
-    assert_deadline(Error::from_reqwest(&failed).expect("the client's error"));
+    unstuck(async {
+        let f = fake(
+            vec![ready("first")],
+            with_timeout(Duration::from_secs(5)),
+            |_| Answer::Text("complete"),
+        )
+        .await;
+        let response = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .unwrap();
+        // The caller comes back to the body too late.
+        tokio::time::advance(Duration::from_secs(6)).await;
+        let failed = response.text().await.expect_err("past the deadline");
+        assert_deadline(Error::from_reqwest(&failed).expect("the client's error"));
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_requests_own_timeout_covers_the_body_and_no_timeout_leaves_it_alone() {
-    let f = fake(vec![ready("first")], settings(), |_| {
-        Answer::Stalling("partial")
-    })
-    .await;
-    let started = tokio::time::Instant::now();
-    let mut response = get(&f.client, "https://enclave.example.com/")
-        .timeout(Duration::from_secs(2))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.chunk().await.unwrap().unwrap(), "partial");
-    let failed = response.chunk().await.expect_err("the body stalled");
-    assert_eq!(started.elapsed(), Duration::from_secs(2));
-    assert_deadline(Error::from_reqwest(&failed).expect("the client's error"));
+    unstuck(async {
+        let f = fake(vec![ready("first")], settings(), |_| {
+            Answer::Stalling("partial")
+        })
+        .await;
+        let started = tokio::time::Instant::now();
+        let mut response = get(&f.client, "https://enclave.example.com/")
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.chunk().await.unwrap().unwrap(), "partial");
+        let failed = response.chunk().await.expect_err("the body stalled");
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        assert_deadline(Error::from_reqwest(&failed).expect("the client's error"));
 
-    // Without any timeout, a stalled body is waited for.
-    let mut response = get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.chunk().await.unwrap().unwrap(), "partial");
-    let waited = tokio::time::timeout(Duration::from_secs(86_400), response.chunk()).await;
-    assert!(waited.is_err(), "the read ended by itself");
+        // Without any timeout, a stalled body is waited for.
+        let mut response = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.chunk().await.unwrap().unwrap(), "partial");
+        let waited = tokio::time::timeout(Duration::from_secs(86_400), response.chunk()).await;
+        assert!(waited.is_err(), "the read ended by itself");
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn ensure_verified_and_reverify_end_at_the_clients_timeout() {
-    let gate = Arc::new(Notify::new());
-    let f = fake(
-        vec![ready("first"), gated("stuck", &gate), gated("stuck", &gate)],
-        with_timeout(Duration::from_secs(5)),
-        |_| Answer::Text("ok"),
-    )
-    .await;
-    let started = tokio::time::Instant::now();
-    let error = f.client.reverify().await.expect_err("stuck");
-    assert_deadline(&error);
-    assert_eq!(started.elapsed(), Duration::from_secs(5));
-    assert_eq!(f.client.current().name, "first");
+    unstuck(async {
+        let gate = Arc::new(Notify::new());
+        let f = fake(
+            vec![ready("first"), gated("stuck", &gate), gated("stuck", &gate)],
+            with_timeout(Duration::from_secs(5)),
+            |_| Answer::Text("ok"),
+        )
+        .await;
+        let started = tokio::time::Instant::now();
+        let error = f.client.reverify().await.expect_err("stuck");
+        assert_deadline(&error);
+        assert_eq!(started.elapsed(), Duration::from_secs(5));
+        assert_eq!(f.client.current().name, "first");
 
-    tokio::time::advance(HOUR).await;
-    let started = tokio::time::Instant::now();
-    let error = f.client.ensure_verified().await.expect_err("stuck");
-    assert_deadline(&error);
-    assert_eq!(started.elapsed(), Duration::from_secs(5));
-    assert_eq!(f.script.calls(), 3);
+        tokio::time::advance(HOUR).await;
+        let started = tokio::time::Instant::now();
+        let error = f.client.ensure_verified().await.expect_err("stuck");
+        assert_deadline(&error);
+        assert_eq!(started.elapsed(), Duration::from_secs(5));
+        assert_eq!(f.script.calls(), 3);
+    })
+    .await
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_callers_deadline_ends_its_wait_for_a_verification_that_another_caller_started() {
-    let gate = Arc::new(Notify::new());
-    let f = fake(
-        vec![ready("first"), gated("second", &gate)],
-        with_timeout(Duration::from_secs(5)),
-        |_| Answer::Text("ok"),
-    )
-    .await;
-    tokio::time::advance(HOUR).await;
-    // A request with a long deadline of its own starts the verification.
-    let patient = {
-        let client = Arc::clone(&f.client);
-        tokio::spawn(async move {
-            get(&client, "https://enclave.example.com/")
-                .timeout(Duration::from_secs(600))
-                .send()
-                .await
-        })
-    };
-    settle().await;
-    assert_eq!(f.script.calls(), 2);
+    unstuck(async {
+        let gate = Arc::new(Notify::new());
+        let f = fake(
+            vec![ready("first"), gated("second", &gate)],
+            with_timeout(Duration::from_secs(5)),
+            |_| Answer::Text("ok"),
+        )
+        .await;
+        tokio::time::advance(HOUR).await;
+        // A request with a long deadline of its own starts the verification.
+        let patient = {
+            let client = Arc::clone(&f.client);
+            tokio::spawn(async move {
+                get(&client, "https://enclave.example.com/")
+                    .timeout(Duration::from_secs(600))
+                    .send()
+                    .await
+            })
+        };
+        settle().await;
+        assert_eq!(f.script.calls(), 2);
 
-    // A second caller joins it and gives up at the client's timeout.
-    let started = tokio::time::Instant::now();
-    let error = f.client.ensure_verified().await.expect_err("out of time");
-    assert_deadline(&error);
-    assert_eq!(started.elapsed(), Duration::from_secs(5));
+        // A second caller joins it and gives up at the client's timeout.
+        let started = tokio::time::Instant::now();
+        let error = f.client.ensure_verified().await.expect_err("out of time");
+        assert_deadline(&error);
+        assert_eq!(started.elapsed(), Duration::from_secs(5));
 
-    // The verification went on for the first caller.
-    gate.notify_one();
-    soon(patient).await.unwrap().expect("verified and sent");
-    assert_eq!(f.script.calls(), 2);
-    assert_eq!(f.client.current().name, "second");
+        // The verification went on for the first caller.
+        gate.notify_one();
+        soon(patient).await.unwrap().expect("verified and sent");
+        assert_eq!(f.script.calls(), 2);
+        assert_eq!(f.client.current().name, "second");
+    })
+    .await
 }
 
 // Cancellation.
 
 #[tokio::test(start_paused = true)]
 async fn dropping_a_request_leaves_the_client_usable_whatever_it_was_waiting_for() {
-    let gate = Arc::new(Notify::new());
-    let f = fake(
-        vec![ready("first"), gated("abandoned", &gate), later("third")],
-        settings(),
-        |sent| match sent.url.path() {
-            "/never" => Answer::Never,
-            _ => Answer::Text("ok"),
-        },
-    )
-    .await;
-    // Dropped while the response is awaited.
-    let waiting = tokio::spawn({
-        let client = Arc::clone(&f.client);
-        async move {
-            get(&client, "https://enclave.example.com/never")
-                .send()
-                .await
-        }
-    });
-    settle().await;
-    assert_eq!(f.sent().len(), 1);
-    waiting.abort();
-    assert!(waiting.await.unwrap_err().is_cancelled());
-    get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect("usable");
+    unstuck(async {
+        let gate = Arc::new(Notify::new());
+        let f = fake(
+            vec![ready("first"), gated("abandoned", &gate), later("third")],
+            settings(),
+            |sent| match sent.url.path() {
+                "/never" => Answer::Never,
+                _ => Answer::Text("ok"),
+            },
+        )
+        .await;
+        // Dropped while the response is awaited.
+        let waiting = tokio::spawn({
+            let client = Arc::clone(&f.client);
+            async move {
+                get(&client, "https://enclave.example.com/never")
+                    .send()
+                    .await
+            }
+        });
+        settle().await;
+        assert_eq!(f.sent().len(), 1);
+        waiting.abort();
+        assert!(waiting.await.unwrap_err().is_cancelled());
+        get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect("usable");
 
-    // Dropped while a verification is awaited.
-    tokio::time::advance(HOUR).await;
-    let waiting = tokio::spawn({
-        let client = Arc::clone(&f.client);
-        async move { get(&client, "https://enclave.example.com/").send().await }
-    });
-    settle().await;
-    assert_eq!(f.script.calls(), 2);
-    waiting.abort();
-    assert!(waiting.await.unwrap_err().is_cancelled());
-    // Nothing half-finished was published.
-    assert_eq!(f.client.current().name, "first");
-    get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .expect("usable");
-    assert_eq!(f.script.calls(), 3);
-    assert_eq!(f.client.current().name, "third");
+        // Dropped while a verification is awaited.
+        tokio::time::advance(HOUR).await;
+        let waiting = tokio::spawn({
+            let client = Arc::clone(&f.client);
+            async move { get(&client, "https://enclave.example.com/").send().await }
+        });
+        settle().await;
+        assert_eq!(f.script.calls(), 2);
+        waiting.abort();
+        assert!(waiting.await.unwrap_err().is_cancelled());
+        // Nothing half-finished was published.
+        assert_eq!(f.client.current().name, "first");
+        get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect("usable");
+        assert_eq!(f.script.calls(), 3);
+        assert_eq!(f.client.current().name, "third");
+    })
+    .await
 }
 
 // Body failures.
 
 #[tokio::test(start_paused = true)]
 async fn a_sealed_body_that_stops_authenticating_is_an_attestation_error_for_the_reader() {
-    let f = fake(vec![ready("first")], settings(), |_| {
-        Answer::Tampered("authentic")
-    })
-    .await;
-    let mut response = get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.chunk().await.unwrap().unwrap(), "authentic");
-    let failed = response.chunk().await.expect_err("the frame did not open");
-    let error = Error::from_reqwest(&failed).expect("the client's error");
-    assert_eq!(error.kind(), ErrorKind::Attestation);
-    assert!(!error.is_timeout());
-    assert!(error.to_string().contains("AEAD_DECRYPT_FAILED"), "{error}");
-    assert!(response.chunk().await.unwrap().is_none());
+    unstuck(async {
+        let f = fake(vec![ready("first")], settings(), |_| {
+            Answer::Tampered("authentic")
+        })
+        .await;
+        let mut response = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.chunk().await.unwrap().unwrap(), "authentic");
+        let failed = response.chunk().await.expect_err("the frame did not open");
+        let error = Error::from_reqwest(&failed).expect("the client's error");
+        assert_eq!(error.kind(), ErrorKind::Attestation);
+        assert!(!error.is_timeout());
+        assert!(error.to_string().contains("AEAD_DECRYPT_FAILED"), "{error}");
+        assert!(response.chunk().await.unwrap().is_none());
 
-    // The same through the methods that read a whole body.
-    let response = get(&f.client, "https://enclave.example.com/")
-        .send()
-        .await
-        .unwrap();
-    let failed = response.bytes().await.expect_err("the frame did not open");
-    assert_eq!(
-        Error::from_reqwest(&failed).map(Error::kind),
-        Some(ErrorKind::Attestation)
-    );
+        // The same through the methods that read a whole body.
+        let response = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .unwrap();
+        let failed = response.bytes().await.expect_err("the frame did not open");
+        assert_eq!(
+            Error::from_reqwest(&failed).map(Error::kind),
+            Some(ErrorKind::Attestation)
+        );
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_connection_that_breaks_under_a_sealed_body_is_a_network_error_for_the_reader() {
+    unstuck(async {
+        let f = fake(vec![ready("first")], settings(), |_| {
+            Answer::CarrierBroke("authentic")
+        })
+        .await;
+        let mut response = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.chunk().await.unwrap().unwrap(), "authentic");
+        let failed = response.chunk().await.expect_err("the connection broke");
+        let error = Error::from_reqwest(&failed).expect("the client's error");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert!(!error.is_timeout());
+    })
+    .await
 }
 
 #[tokio::test]
@@ -1458,42 +1617,48 @@ mod options {
 
     #[tokio::test(start_paused = true)]
     async fn connecting_fails_with_the_verifiers_rejection_after_one_retry() {
-        let fetched = Arc::new(Mutex::new(Vec::new()));
-        let log = Arc::clone(&fetched);
-        let fetch: Fetch = Arc::new(move |host, relay, nonce| {
-            log.lock().unwrap().push((host, relay, nonce));
-            Box::pin(async { Ok(b"not an attestation document".to_vec()) })
-        });
-        let (checked, settings) = checked();
-        let error = AttestedClient::connect(checked, settings, system_clock(), fetch)
-            .await
-            .err()
-            .expect("no client");
-        assert_eq!(error.kind(), ErrorKind::Attestation);
-        let source = std::error::Error::source(&error).expect("the verifier's error");
-        assert!(source.is::<crate::verifier::Error>());
-        assert_eq!(
-            error.earlier_attempt().map(Error::kind),
-            Some(ErrorKind::Attestation)
-        );
-        let fetched = fetched.lock().unwrap();
-        assert_eq!(fetched.len(), 2);
-        assert_eq!(fetched[0].0, "enclave.example.com");
-        assert_eq!(fetched[0].1, None);
-        assert_ne!(fetched[0].2, fetched[1].2);
+        unstuck(async {
+            let fetched = Arc::new(Mutex::new(Vec::new()));
+            let log = Arc::clone(&fetched);
+            let fetch: Fetch = Arc::new(move |host, relay, nonce| {
+                log.lock().unwrap().push((host, relay, nonce));
+                Box::pin(async { Ok(b"not an attestation document".to_vec()) })
+            });
+            let (checked, settings) = checked();
+            let error = AttestedClient::connect(checked, settings, system_clock(), fetch)
+                .await
+                .err()
+                .expect("no client");
+            assert_eq!(error.kind(), ErrorKind::Attestation);
+            let source = std::error::Error::source(&error).expect("the verifier's error");
+            assert!(source.is::<crate::verifier::Error>());
+            assert_eq!(
+                error.earlier_attempt().map(Error::kind),
+                Some(ErrorKind::Attestation)
+            );
+            let fetched = fetched.lock().unwrap();
+            assert_eq!(fetched.len(), 2);
+            assert_eq!(fetched[0].0, "enclave.example.com");
+            assert_eq!(fetched[0].1, None);
+            assert_ne!(fetched[0].2, fetched[1].2);
+        })
+        .await
     }
 
     #[tokio::test(start_paused = true)]
     async fn connecting_ends_at_the_timeout() {
-        let fetch: Fetch = Arc::new(|_, _, _| Box::pin(std::future::pending()));
-        let (checked, settings) = checked();
-        let started = tokio::time::Instant::now();
-        let error = AttestedClient::connect(checked, settings, system_clock(), fetch)
-            .await
-            .err()
-            .expect("no client");
-        assert_deadline(&error);
-        assert_eq!(started.elapsed(), Duration::from_secs(5));
+        unstuck(async {
+            let fetch: Fetch = Arc::new(|_, _, _| Box::pin(std::future::pending()));
+            let (checked, settings) = checked();
+            let started = tokio::time::Instant::now();
+            let error = AttestedClient::connect(checked, settings, system_clock(), fetch)
+                .await
+                .err()
+                .expect("no client");
+            assert_deadline(&error);
+            assert_eq!(started.elapsed(), Duration::from_secs(5));
+        })
+        .await
     }
 }
 
@@ -1508,25 +1673,58 @@ fn manual_clock() -> (Clock, Arc<Mutex<SystemTime>>) {
 
 mod over_tls {
     use super::*;
-    use crate::internal::transport::tls::tests::{
-        self as tls, OK, Server, made::KEY_A, made::LEAF_A, made::LEAF_B, serve,
+    use crate::internal::transport::tls::testing::made::{KEY_A, LEAF_A, LEAF_B};
+    use crate::internal::transport::tls::testing::{
+        Handler, Protocols, Seen, Server, certificate, full, roots,
     };
+    use crate::internal::transport::tls::{TlsMode, leaf_fingerprint};
 
-    /// A client in the TLS mode for `server`, whose verifications yield
-    /// `evidence` in order.
+    fn mode() -> TlsMode {
+        TlsMode::for_test(roots(), None)
+    }
+
+    /// Evidence that endorses the key of `leaf`.
+    fn evidence(name: &'static str, leaf: &[u8]) -> Record {
+        Record {
+            name,
+            tls: Some(leaf_fingerprint(&certificate(leaf)).unwrap()),
+            hpke: None,
+            expires: Some((tokio_clock())() + HOUR),
+        }
+    }
+
+    /// A server that holds key A and answers each request with its path.
+    async fn serve() -> Arc<Server> {
+        let handler: Handler =
+            Arc::new(|seen: Seen| Box::pin(async move { hyper::Response::new(full(seen.target)) }));
+        crate::internal::transport::tls::testing::serve(&LEAF_A, &KEY_A, Protocols::Both, handler)
+            .await
+    }
+
+    /// A client in the TLS mode for `server`, whose verifications play
+    /// `steps`.
+    async fn client_on(
+        server: &Server,
+        steps: Vec<Step>,
+        settings: Settings,
+    ) -> (Arc<Script>, Client) {
+        let script = Script::new(steps);
+        let host = format!("127.0.0.1:{}", server.port);
+        let enclave = Enclave::from_source(&host, script.source(), None, tokio_clock());
+        let transport = soon(Transport::connect(enclave, Arc::new(mode()), true))
+            .await
+            .expect("connected");
+        let client = Arc::new(AttestedClient::new(transport, settings).expect("a client"));
+        (script, client)
+    }
+
     async fn client(
         server: &Server,
         evidence: Vec<Record>,
         settings: Settings,
     ) -> (Arc<Script>, Client) {
-        let script = Script::new(evidence.into_iter().map(|e| Step::Ready(Ok(e))));
-        let host = format!("127.0.0.1:{}", server.port);
-        let enclave = Enclave::from_source(&host, script.source(), None, tokio_clock());
-        let transport = soon(Transport::connect(enclave, Arc::new(tls::mode()), true))
-            .await
-            .expect("connected");
-        let client = Arc::new(AttestedClient::new(transport, settings).expect("a client"));
-        (script, client)
+        let steps = evidence.into_iter().map(|e| Step::Ready(Ok(e))).collect();
+        client_on(server, steps, settings).await
     }
 
     fn url(client: &Client, path: &str) -> String {
@@ -1535,8 +1733,8 @@ mod over_tls {
 
     #[tokio::test]
     async fn a_request_reaches_the_enclave_over_a_pinned_connection() {
-        let server = serve(&LEAF_A, &KEY_A, OK).await;
-        let (script, client) = client(&server, vec![tls::evidence("a", &LEAF_A)], settings()).await;
+        let server = serve().await;
+        let (script, client) = client(&server, vec![evidence("a", &LEAF_A)], settings()).await;
         assert_eq!(
             client.base_url().as_str(),
             format!("https://127.0.0.1:{}/", server.port)
@@ -1549,10 +1747,7 @@ mod over_tls {
             assert_eq!(response.content_length(), Some(path.len() as u64 + 1));
             assert_eq!(soon(response.text()).await.unwrap(), format!("/{path}"));
         }
-        assert_eq!(
-            server.requests(),
-            ["GET /hello HTTP/1.1", "GET /v1/models HTTP/1.1"]
-        );
+        assert_eq!(server.requests(), ["GET /hello", "GET /v1/models"]);
         // One verification, one connection.
         assert_eq!(script.calls(), 1);
         assert_eq!(server.accepted(), 1);
@@ -1560,11 +1755,11 @@ mod over_tls {
 
     #[tokio::test]
     async fn a_base_url_on_the_enclaves_origin_is_where_requests_go() {
-        let server = serve(&LEAF_A, &KEY_A, OK).await;
+        let server = serve().await;
         let base = Url::parse(&format!("https://127.0.0.1:{}/api/", server.port)).unwrap();
         let (_, client) = client(
             &server,
-            vec![tls::evidence("a", &LEAF_A)],
+            vec![evidence("a", &LEAF_A)],
             Settings {
                 base_url: Some(base),
                 ..settings()
@@ -1579,12 +1774,12 @@ mod over_tls {
 
     #[tokio::test]
     async fn a_request_to_another_server_is_refused_and_never_connects() {
-        let server = serve(&LEAF_A, &KEY_A, OK).await;
+        let server = serve().await;
         // Another server with the very same certificate and key.
-        let other = serve(&LEAF_A, &KEY_A, OK).await;
-        let (_, client) = client(&server, vec![tls::evidence("a", &LEAF_A)], settings()).await;
+        let other = serve().await;
+        let (_, client) = client(&server, vec![evidence("a", &LEAF_A)], settings()).await;
         let error = soon(
-            get(&client, other.url("/steal").as_str())
+            get(&client, &format!("https://127.0.0.1:{}/steal", other.port))
                 .bearer_auth("api-key")
                 .send(),
         )
@@ -1597,8 +1792,8 @@ mod over_tls {
 
     #[tokio::test]
     async fn a_host_header_is_refused_before_anything_is_sent() {
-        let server = serve(&LEAF_A, &KEY_A, OK).await;
-        let (_, client) = client(&server, vec![tls::evidence("a", &LEAF_A)], settings()).await;
+        let server = serve().await;
+        let (_, client) = client(&server, vec![evidence("a", &LEAF_A)], settings()).await;
         let error = soon(
             get(&client, &url(&client, "x"))
                 .header("Host", "other.example")
@@ -1613,13 +1808,10 @@ mod over_tls {
     #[tokio::test]
     async fn a_new_certificate_key_is_healed_by_one_replay() {
         // The enclave holds key A; the first verification endorsed key B.
-        let server = serve(&LEAF_A, &KEY_A, OK).await;
+        let server = serve().await;
         let (script, client) = client(
             &server,
-            vec![
-                tls::evidence("before", &LEAF_B),
-                tls::evidence("after", &LEAF_A),
-            ],
+            vec![evidence("before", &LEAF_B), evidence("after", &LEAF_A)],
             settings(),
         )
         .await;
@@ -1631,19 +1823,16 @@ mod over_tls {
         assert_eq!(client.current().name, "after");
         // The request reached the server once: the first attempt ended in
         // the handshake.
-        assert_eq!(server.requests(), ["GET /secret HTTP/1.1"]);
+        assert_eq!(server.requests(), ["GET /secret"]);
     }
 
     #[tokio::test]
     async fn a_new_certificate_key_is_reported_for_a_streamed_body_and_healed_for_the_next_request()
     {
-        let server = serve(&LEAF_A, &KEY_A, OK).await;
+        let server = serve().await;
         let (script, client) = client(
             &server,
-            vec![
-                tls::evidence("before", &LEAF_B),
-                tls::evidence("after", &LEAF_A),
-            ],
+            vec![evidence("before", &LEAF_B), evidence("after", &LEAF_A)],
             settings(),
         )
         .await;
@@ -1671,13 +1860,13 @@ mod over_tls {
 
     #[tokio::test]
     async fn a_key_that_no_verification_explains_fails_after_one_replay() {
-        let server = serve(&LEAF_A, &KEY_A, OK).await;
+        let server = serve().await;
         let (script, client) = client(
             &server,
             vec![
-                tls::evidence("first", &LEAF_B),
-                tls::evidence("second", &LEAF_B),
-                tls::evidence("third", &LEAF_B),
+                evidence("first", &LEAF_B),
+                evidence("second", &LEAF_B),
+                evidence("third", &LEAF_B),
             ],
             settings(),
         )
@@ -1693,18 +1882,13 @@ mod over_tls {
 
     #[tokio::test]
     async fn concurrent_requests_during_a_rotation_share_one_verification() {
-        let server = serve(&LEAF_A, &KEY_A, OK).await;
+        let server = serve().await;
         let gate = Arc::new(Notify::new());
-        let script = Script::new([
-            Step::Ready(Ok(tls::evidence("before", &LEAF_B))),
-            Step::Gated(Arc::clone(&gate), Ok(tls::evidence("after", &LEAF_A))),
-        ]);
-        let host = format!("127.0.0.1:{}", server.port);
-        let enclave = Enclave::from_source(&host, script.source(), None, tokio_clock());
-        let transport = soon(Transport::connect(enclave, Arc::new(tls::mode()), true))
-            .await
-            .unwrap();
-        let client: Client = Arc::new(AttestedClient::new(transport, settings()).unwrap());
+        let steps = vec![
+            Step::Ready(Ok(evidence("before", &LEAF_B))),
+            Step::Gated(Arc::clone(&gate), Ok(evidence("after", &LEAF_A))),
+        ];
+        let (script, client) = client_on(&server, steps, settings()).await;
 
         let requests: Vec<_> = (0..6)
             .map(|n| {
@@ -1717,7 +1901,13 @@ mod over_tls {
             .collect();
         // The second verification starts once the first handshake has been
         // refused; the others join it.
-        tls::eventually(|| script.calls() == 2, "the rotation is noticed").await;
+        for _ in 0..500 {
+            if script.calls() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(script.calls(), 2, "the rotation was not noticed");
         gate.notify_one();
         for (n, request) in requests.into_iter().enumerate() {
             let body = soon(request).await.unwrap().expect("healed");
@@ -2081,7 +2271,7 @@ mod over_ehbp {
         let gate = Arc::new(Notify::new());
         let hold = Arc::clone(&gate);
         let server = serve(&held, move |_: &Seen| Reply::never(&hold)).await;
-        let (_, client) = client(&server, &[&held], with_timeout(Duration::from_millis(300))).await;
+        let (_, client) = client(&server, &[&held], with_timeout(Duration::from_secs(1))).await;
         let error = soon(post(&client, &url(&client, "slow")).body("x").send())
             .await
             .expect_err("no response");
@@ -2106,7 +2296,7 @@ mod over_ehbp {
         let (_, client) = client(&server, &[&held], settings()).await;
         let mut response = soon(
             post(&client, &url(&client, "stream"))
-                .timeout(Duration::from_millis(400))
+                .timeout(Duration::from_secs(1))
                 .body("x")
                 .send(),
         )

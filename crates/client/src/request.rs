@@ -277,13 +277,13 @@ macro_rules! http_request_methods {
             /// waits for, the request, its replay, and the read of the
             /// response body. When it passes before the response arrives,
             /// the error is a network error whose
-            /// [`is_timeout`]($crate::Error::is_timeout) is `true`.
+            /// [`is_timeout`](crate::Error::is_timeout) is `true`.
             ///
             /// # Reading the body
             ///
             /// The body is read with `reqwest`'s methods, and a failed
             /// read is a `reqwest::Error`.
-            /// [`Error::from_reqwest`]($crate::Error::from_reqwest) returns
+            /// [`Error::from_reqwest`](crate::Error::from_reqwest) returns
             /// the client's error inside it: an attestation error when a
             /// sealed body stops authenticating, a network error when the
             /// connection breaks or the deadline passes. After a failed

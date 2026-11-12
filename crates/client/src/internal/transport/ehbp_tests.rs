@@ -1581,7 +1581,10 @@ async fn a_loopback_request_connects_directly_whatever_the_proxy_settings() {
     let key = key(1);
     let (proxy, listener) = proxy().await;
     let server = serve(&key, |_| Reply::ok("direct")).await;
-    let mode = EhbpMode { proxy: Some(proxy) };
+    let mode = EhbpMode {
+        proxy: Some(proxy),
+        roots: None,
+    };
     let bound = bind(&mode, Some(&key.public_hex)).expect("bound");
 
     for request in [
@@ -1603,7 +1606,10 @@ async fn a_loopback_request_connects_directly_whatever_the_proxy_settings() {
 async fn a_request_to_another_host_goes_through_the_proxy() {
     let key = key(1);
     let (proxy, listener) = proxy().await;
-    let mode = EhbpMode { proxy: Some(proxy) };
+    let mode = EhbpMode {
+        proxy: Some(proxy),
+        roots: None,
+    };
     let bound = bind(&mode, Some(&key.public_hex)).expect("bound");
 
     // The proxy refuses the tunnel, so nothing leaves the machine.
@@ -1647,4 +1653,112 @@ async fn a_request_timeout_is_a_network_error_marked_as_a_timeout() {
     let result = bound(&key).round_trip(request).await;
     let error = ordinary(result, ErrorKind::Network);
     assert!(error.is_timeout(), "{error:?}");
+}
+
+// Over HTTP/2, against a local TLS server.
+
+mod over_tls {
+    use std::convert::Infallible;
+
+    use http_body_util::{BodyExt, StreamBody};
+    use hyper::body::{Bytes, Frame};
+
+    use super::*;
+    use crate::internal::transport::tls::testing::made::{KEY_A, LEAF_A};
+    use crate::internal::transport::tls::testing::{Handler, Protocols, Seen, full, roots, serve};
+
+    fn https(port: u16, path: &str) -> Url {
+        Url::parse(&format!("https://127.0.0.1:{port}{path}")).expect("url")
+    }
+
+    #[tokio::test]
+    async fn the_carrier_offers_http2_then_http1() {
+        let handler: Handler = Arc::new(|_| Box::pin(async { hyper::Response::new(full("")) }));
+        let server = serve(&LEAF_A, &KEY_A, Protocols::Both, handler).await;
+        // The carrier trusts only the compiled-in roots, so the handshake
+        // with the local server fails; what it offered is on record by
+        // then.
+        let sent = bound(&key(1)).round_trip(post(https(server.port, "/"), "{}"));
+        let result = tokio::time::timeout(PATIENCE, sent).await.expect("in time");
+        assert!(result.is_err());
+        assert_eq!(server.offered(), [["h2", "http/1.1"]]);
+        assert!(server.seen().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_streamed_exchange_over_http2_is_sealed_and_opened_frame_by_frame() {
+        let key = key(1);
+        // The enclave's side: opens the sealed request and answers with
+        // the plaintext in two sealed frames.
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let handler: Handler = {
+            let (key, opened) = (key.clone(), Arc::clone(&opened));
+            Arc::new(move |seen: Seen| {
+                let (key, opened) = (key.clone(), Arc::clone(&opened));
+                Box::pin(async move {
+                    let encapsulated = seen
+                        .headers
+                        .get("ehbp-encapsulated-key")
+                        .and_then(|value| value.to_str().ok());
+                    let Opened::Sealed(body, mut sealer) = open(&key, encapsulated, &seen.body)
+                    else {
+                        let mut refused = hyper::Response::new(full("not sealed to this key"));
+                        *refused.status_mut() = hyper::StatusCode::BAD_REQUEST;
+                        return refused;
+                    };
+                    *opened.lock().unwrap() = body.clone();
+                    let (first, second) = body.split_at(body.len() / 2);
+                    let frames = [first, second].map(|part| {
+                        Ok::<_, Infallible>(Frame::data(Bytes::from(sealer.frame(part))))
+                    });
+                    hyper::Response::builder()
+                        .header("Ehbp-Response-Nonce", sealer.nonce_hex.as_str())
+                        .body(StreamBody::new(futures_util::stream::iter(frames)).boxed())
+                        .expect("a response")
+                })
+            })
+        };
+        let server = serve(&LEAF_A, &KEY_A, Protocols::Both, handler).await;
+        let mode = EhbpMode {
+            proxy: None,
+            roots: Some(roots()),
+        };
+        let bound = bind(&mode, Some(&key.public_hex)).expect("bound");
+
+        let parts = ["part one, ", "part two"].map(Ok::<_, std::io::Error>);
+        let body = reqwest::Body::wrap_stream(futures_util::stream::iter(parts));
+        let sent = bound.round_trip(post(https(server.port, "/v1/chat"), body));
+        let response = tokio::time::timeout(PATIENCE, sent)
+            .await
+            .expect("in time")
+            .expect("a response");
+
+        assert_eq!(response.version(), reqwest::Version::HTTP_2);
+        let answer = tokio::time::timeout(PATIENCE, response.text())
+            .await
+            .expect("in time")
+            .expect("a body");
+        assert_eq!(answer, "part one, part two");
+
+        // The server saw one HTTP/2 request whose body was two sealed
+        // frames, one for each part of the stream, and nothing in the
+        // clear.
+        assert_eq!(server.handshakes()[0].1.as_deref(), Some("h2"));
+        let seen = &server.seen()[0];
+        assert_eq!(seen.version, reqwest::Version::HTTP_2);
+        assert_eq!(*opened.lock().unwrap(), b"part one, part two");
+        assert!(!seen.body.windows(4).any(|window| window == b"part"));
+        // However the transport cut the body up on the way, the sealed
+        // frames in it are one for each part of the stream: a length, then
+        // that many bytes of ciphertext and tag.
+        let mut plaintext_lengths = Vec::new();
+        let mut rest = &seen.body[..];
+        while !rest.is_empty() {
+            let (length, after) = rest.split_at(4);
+            let length = u32::from_be_bytes(length.try_into().expect("four bytes")) as usize;
+            plaintext_lengths.push(length - 16);
+            rest = &after[length..];
+        }
+        assert_eq!(plaintext_lengths, ["part one, ".len(), "part two".len()]);
+    }
 }
