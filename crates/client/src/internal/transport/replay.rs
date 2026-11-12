@@ -6,7 +6,7 @@ use crate::internal::transport::RoundTrip;
 
 /// `next` behind a layer that sends a request a second time when the first
 /// attempt fails with a
-/// [`KeyRejection`](crate::internal::transport::KeyRejection). The
+/// [`KeyFailure::Rejected`](crate::internal::transport::KeyFailure::Rejected). The
 /// rejection has already invalidated the verification, so the second
 /// attempt verifies the same enclave host again and goes out under the new
 /// keys.

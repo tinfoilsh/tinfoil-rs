@@ -15,7 +15,7 @@ use crate::verifier::Verification;
 /// The state behind an `EnclaveHttpClient` or a `RouterHttpClient`.
 pub(crate) struct AttestedClient {
     /// The verified enclave and the transport bound to its keys.
-    transport: Arc<Transport>,
+    transport: Transport,
     /// The request chain, from the origin restriction inward.
     chain: Arc<dyn RoundTrip>,
     /// Collects the parts of a request; it never sends.
@@ -90,7 +90,8 @@ impl Execute for AttestedClient {
     /// Sends `request` through the chain, within the request's own timeout
     /// or else the `timeout` option.
     fn execute(&self, request: Request) -> ResponseFuture {
-        ResponseFuture::new(self.chain.round_trip(request))
+        let sent = self.chain.round_trip(request);
+        ResponseFuture::new(async move { sent.await.map_err(|failure| failure.error) })
     }
 
     fn start(&self, method: Method, url: Url) -> reqwest::RequestBuilder {

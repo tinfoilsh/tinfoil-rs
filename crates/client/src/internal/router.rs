@@ -28,7 +28,7 @@ pub(crate) const MAX_ROUTER_LIST_BYTES: usize = 32 << 20;
 /// list that passes verification, and otherwise for [`FALLBACK_ROUTER`].
 ///
 /// 1. The list is fetched from [`ROUTER_LIST_URL`] with the rules of an
-///    attestation fetch (HTTPS-only redirects, a size bound of
+///    attestation fetch (no redirects, a size bound of
 ///    [`MAX_ROUTER_LIST_BYTES`]). It is a JSON array of hosts. A list that
 ///    cannot be fetched or parsed is an empty list, not an error, and an
 ///    entry that is not a host with an optional port is skipped.
