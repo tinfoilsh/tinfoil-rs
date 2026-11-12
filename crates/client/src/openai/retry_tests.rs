@@ -56,6 +56,17 @@ fn an_http_date_is_read_in_the_preferred_format_only() {
         http_date("Sat, 01 Jan 2000 00:00:00 GMT"),
         Some(at(946_684_800))
     );
+    // The last day of each kind of month, and the leap day of a century
+    // year that has one.
+    for (date, seconds) in [
+        ("Tue, 29 Feb 2000 00:00:00 GMT", 951_782_400),
+        ("Sun, 28 Feb 2027 00:00:00 GMT", 1_803_772_800),
+        ("Fri, 30 Apr 2027 00:00:00 GMT", 1_809_043_200),
+        ("Sun, 31 Jan 2027 00:00:00 GMT", 1_801_353_600),
+        ("Fri, 31 Dec 2027 00:00:00 GMT", 1_830_211_200),
+    ] {
+        assert_eq!(http_date(date), Some(at(seconds)), "{date}");
+    }
     assert_eq!(
         http_date("Fri, 31 Dec 9999 23:59:59 GMT"),
         Some(at(253_402_300_799))
@@ -75,6 +86,16 @@ fn an_http_date_is_read_in_the_preferred_format_only() {
         "Sun, 06 Nov 1994 08:60:00 GMT",
         "Sun, 00 Nov 1994 08:49:37 GMT",
         "Sun, 32 Nov 1994 08:49:37 GMT",
+        // Days that their month does not have.
+        "Wed, 31 Nov 1994 08:49:37 GMT",
+        "Sat, 31 Apr 2027 00:00:00 GMT",
+        "Thu, 31 Jun 2027 00:00:00 GMT",
+        "Fri, 31 Sep 2027 00:00:00 GMT",
+        "Wed, 30 Feb 2028 00:00:00 GMT",
+        "Wed, 31 Feb 2027 00:00:00 GMT",
+        "Mon, 29 Feb 2027 00:00:00 GMT",
+        "Thu, 29 Feb 2100 00:00:00 GMT",
+        "Sun, 32 Jan 2027 00:00:00 GMT",
         "Sun, 6 Nov 1994 08:49:37 GMT",
         "Sun, 06 Nov 94 08:49:37 GMT",
         "Sun, 06 Nov 1969 08:49:37 GMT",

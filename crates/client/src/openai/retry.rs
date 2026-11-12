@@ -30,7 +30,8 @@ const RETRY_AFTER_MS: &str = "retry-after-ms";
 /// Decides the wait between the attempts of a call.
 ///
 /// A response that is to be tried again names its wait in `Retry-After-Ms`
-/// (milliseconds) or else in `Retry-After` (seconds, or an HTTP date).
+/// (milliseconds) or else in `Retry-After`: seconds, or a date in the one
+/// form that [`http_date`] reads.
 /// Either number may have a fraction. Both headers arrive from whoever
 /// answered, which in [`TransportMode::Ehbp`](crate::TransportMode::Ehbp)
 /// can be a proxy, so neither is obeyed beyond the limit: the smaller of
@@ -138,8 +139,12 @@ fn random() -> u64 {
 }
 
 /// The instant that an HTTP date in the preferred format names, as in
-/// `Sun, 06 Nov 1994 08:49:37 GMT`. The name of the day is not compared
-/// with the date.
+/// `Sun, 06 Nov 1994 08:49:37 GMT`: three letters for the day, two digits
+/// for the day of the month, the English abbreviation of the month, four
+/// digits for the year, the time, and `GMT` (or `UTC`), each separated by
+/// one space. The two obsolete formats of an HTTP date are not read. The
+/// date must exist: a day beyond the end of its month is refused. The
+/// name of the day is not compared with the date.
 fn http_date(text: &str) -> Option<SystemTime> {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -172,7 +177,14 @@ fn http_date(text: &str) -> Option<SystemTime> {
     let month = u64::try_from(MONTHS.iter().position(|name| *name == month)?).ok()?;
     let year = digits(year, 4)?;
     let (hour, minute, second) = (digits(hour, 2)?, digits(minute, 2)?, digits(second, 2)?);
-    if year < 1970 || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        1 if leap => 29,
+        1 => 28,
+        3 | 5 | 8 | 10 => 30,
+        _ => 31,
+    };
+    if year < 1970 || day < 1 || day > days_in_month || hour > 23 || minute > 59 || second > 60 {
         return None;
     }
 
