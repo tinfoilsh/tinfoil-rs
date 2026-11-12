@@ -112,18 +112,12 @@ impl Error {
     #[cfg(feature = "openai")]
     pub fn from_openai(error: &async_openai::error::OpenAIError) -> Option<&Error> {
         use async_openai::error::OpenAIError;
-        let mut next: Option<&(dyn StdError + 'static)> = match error {
-            OpenAIError::Boxed(boxed) => Some(boxed.as_ref()),
-            OpenAIError::Reqwest(error) => Some(error),
-            _ => None,
+        let source: &(dyn StdError + 'static) = match error {
+            OpenAIError::Boxed(boxed) => boxed.as_ref(),
+            OpenAIError::Reqwest(error) => error,
+            _ => return None,
         };
-        while let Some(error) = next {
-            if let Some(found) = error.downcast_ref::<Error>() {
-                return Some(found);
-            }
-            next = error.source();
-        }
-        None
+        Self::find_in(source)
     }
 
     /// The client error behind a failed read of a response body, if there
