@@ -27,28 +27,16 @@ pub(crate) const MAX_DOCUMENT_BYTES: usize = 32 << 20;
 pub(crate) const MAX_REQUESTS: usize = 10;
 
 /// Where the attestation document of `host` is fetched with `nonce`:
-/// `https://<host>/.well-known/tinfoil-attestation?nonce=<lowercase hex>`,
-/// or, through a relay,
-/// `https://<relay>/.well-known/tinfoil-attestation?nonce=<hex>&enclave=<host, query-escaped>`.
+/// `https://<host>/.well-known/tinfoil-attestation?nonce=<lowercase hex>`.
 ///
-/// `host` and `relay` are each a host with an optional port, not a URL: a
-/// value that carries a scheme, a path, a query or user information is
-/// refused, and so is an empty one. The error is a configuration error,
-/// and nothing has been sent.
-pub(crate) fn document_url(
-    host: &str,
-    relay: Option<&str>,
-    nonce: &[u8; NONCE_SIZE],
-) -> Result<Url, Error> {
+/// `host` is a host with an optional port, not a URL: a value that carries
+/// a scheme, a path, a query or user information is refused, and so is an
+/// empty one. The error is a configuration error, and nothing has been
+/// sent.
+pub(crate) fn document_url(host: &str, nonce: &[u8; NONCE_SIZE]) -> Result<Url, Error> {
     let mut url = authority_url(host)?;
-    let mut query = format!("nonce={}", lower_hex(nonce));
-    if let Some(relay) = relay {
-        url = authority_url(relay)?;
-        query.push_str("&enclave=");
-        query.push_str(&query_escape(host));
-    }
     url.set_path(ATTESTATION_PATH);
-    url.set_query(Some(&query));
+    url.set_query(Some(&format!("nonce={}", lower_hex(nonce))));
     Ok(url)
 }
 
@@ -69,27 +57,22 @@ pub(crate) fn document_url(
 ///   stops once it exceeds [`MAX_DOCUMENT_BYTES`].
 ///
 /// Every failure is a network error (a connection failure, a timeout, a
-/// status above 299, an oversized body), except an invalid `host` or
-/// `relay`, which is a configuration error raised before anything is sent.
+/// status above 299, an oversized body), except an invalid `host`, which
+/// is a configuration error raised before anything is sent.
 ///
 /// Dropping the future closes the connection and leaves nothing behind.
-pub(crate) async fn document(
-    host: &str,
-    relay: Option<&str>,
-    nonce: &[u8; NONCE_SIZE],
-) -> Result<Vec<u8>, Error> {
-    document_through(host, relay, nonce, None).await
+pub(crate) async fn document(host: &str, nonce: &[u8; NONCE_SIZE]) -> Result<Vec<u8>, Error> {
+    document_through(host, nonce, None).await
 }
 
 /// [`document`], with `proxy` in place of the environment's proxy settings
 /// when there is one. Only tests pass one.
 async fn document_through(
     host: &str,
-    relay: Option<&str>,
     nonce: &[u8; NONCE_SIZE],
     proxy: Option<reqwest::Proxy>,
 ) -> Result<Vec<u8>, Error> {
-    let url = document_url(host, relay, nonce)?;
+    let url = document_url(host, nonce)?;
     let client = client_for(&url, true, proxy)?;
     get_bounded(
         &client,
@@ -101,8 +84,8 @@ async fn document_through(
     .await
 }
 
-/// A `reqwest` client for material that is not attested yet: documents,
-/// the router list, the gateway catalog.
+/// A `reqwest` client for material that is not attested yet: documents
+/// and the router list.
 ///
 /// - Certificates are checked in the standard way against the root
 ///   certificates that are compiled in, on the `ring` provider. The
@@ -336,26 +319,6 @@ pub(crate) fn lower_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// `text` as the value of a query parameter: letters, digits and `-_.~`
-/// stay, and every other byte becomes `%XX`.
-fn query_escape(text: &str) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(char::from(byte));
-            continue;
-        }
-        out.push('%');
-        for nibble in [byte >> 4, byte & 0x0f] {
-            if let Some(digit) = DIGITS.get(usize::from(nibble)) {
-                out.push(char::from(*digit));
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -534,7 +497,7 @@ mod tests {
 
     #[test]
     fn the_document_url_carries_the_nonce_in_lowercase_hex() {
-        let url = document_url("enclave.example.com", None, &NONCE).expect("url");
+        let url = document_url("enclave.example.com", &NONCE).expect("url");
         assert_eq!(
             url.as_str(),
             format!(
@@ -542,55 +505,24 @@ mod tests {
                 "ab".repeat(NONCE_SIZE)
             )
         );
-        let url = document_url("Enclave.Example.com:8443", None, &NONCE).expect("url");
+        let url = document_url("Enclave.Example.com:8443", &NONCE).expect("url");
         assert_eq!(url.host_str(), Some("enclave.example.com"));
         assert_eq!(url.port(), Some(8443));
     }
 
     #[test]
-    fn a_relay_is_asked_for_the_enclave_by_its_escaped_host() {
-        let url = document_url(
-            "replica-1.example.com:8443",
-            Some("gateway.example.com"),
-            &NONCE,
-        )
-        .expect("url");
-        assert_eq!(
-            url.as_str(),
-            format!(
-                "https://gateway.example.com/.well-known/tinfoil-attestation?nonce={}&enclave=replica-1.example.com%3A8443",
-                "ab".repeat(NONCE_SIZE)
-            )
-        );
-        let url = document_url(
-            "[2001:db8::1]:443",
-            Some("gateway.example.com:9000"),
-            &NONCE,
-        )
-        .expect("url");
-        assert_eq!(url.port(), Some(9000));
-        assert!(
-            url.query()
-                .is_some_and(|q| q.ends_with("&enclave=%5B2001%3Adb8%3A%3A1%5D%3A443"))
-        );
-    }
-
-    #[test]
-    fn a_host_or_relay_that_is_not_an_authority_is_refused_before_any_io() {
-        for (host, relay) in [
-            ("", None),
-            ("https://enclave.example.com", None),
-            ("enclave.example.com/path", None),
-            ("user:pw@enclave.example.com", None),
-            ("enclave.example.com?x=1", None),
-            ("enclave.example.com&enclave=evil.example", None),
-            ("enclave.example.com", Some("")),
-            ("enclave.example.com", Some("gateway.example.com/x")),
-            ("enclave.example.com", Some("user@gateway.example.com")),
-            ("enclave.example.com#x", Some("gateway.example.com")),
+    fn a_host_that_is_not_an_authority_is_refused_before_any_io() {
+        for host in [
+            "",
+            "https://enclave.example.com",
+            "enclave.example.com/path",
+            "user:pw@enclave.example.com",
+            "enclave.example.com?x=1",
+            "enclave.example.com&enclave=evil.example",
+            "enclave.example.com#x",
         ] {
-            let error = document_url(host, relay, &NONCE).expect_err(host);
-            assert_eq!(error.kind(), ErrorKind::Configuration, "{host:?} {relay:?}");
+            let error = document_url(host, &NONCE).expect_err(host);
+            assert_eq!(error.kind(), ErrorKind::Configuration, "{host:?}");
         }
     }
 
@@ -885,7 +817,7 @@ mod tests {
                 drop(socket);
             }
         });
-        let error = document_through(&host, None, &NONCE, Some(proxy))
+        let error = document_through(&host, &NONCE, Some(proxy))
             .await
             .expect_err("no TLS");
         assert_eq!(error.kind(), ErrorKind::Network);
@@ -896,7 +828,7 @@ mod tests {
     #[tokio::test]
     async fn the_document_of_another_host_is_fetched_through_the_proxy() {
         let (proxy, listener) = proxy().await;
-        let error = document_through("enclave.example.com", None, &NONCE, Some(proxy))
+        let error = document_through("enclave.example.com", &NONCE, Some(proxy))
             .await
             .expect_err("the proxy refuses the tunnel");
         assert_eq!(error.kind(), ErrorKind::Network);

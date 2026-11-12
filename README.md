@@ -290,7 +290,6 @@ These bounds are fixed:
 |---|---|---|
 | `openai` | yes | The OpenAI clients over async-openai, with its chat completion, embedding, audio and responses APIs; `chat_relaxed`; the `sse` and `multimodal` modules. Without it the crate is the HTTP clients and the verifier. |
 | `openai-<family>` | no | One further API family of async-openai on the OpenAI clients; each implies `openai`. The families: `administration`, `batches`, `byot`, `chatkit`, `completions`, `containers`, `content-provenance-checks`, `evals`, `files`, `fine-tuning`, `images`, `models`, `moderations`, `safety`, `skills`, `uploads`, `vector-stores`. |
-| `unstable-gateway` | no | **Experimental and not implemented.** The types of a gateway route, whose calls fail with an error that says so. Do not enable it; it may change or be removed in any release. |
 
 Every call of an enabled family goes through the attested client. async-openai's realtime API is not offered, because it opens WebSocket connections of its own that the attested client cannot protect. One helper of async-openai makes a request of its own: `ImagesResponse::save` (`openai-images`) downloads with a plain HTTP client, and that download is not attested.
 

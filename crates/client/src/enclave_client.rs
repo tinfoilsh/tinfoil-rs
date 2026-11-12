@@ -348,7 +348,6 @@ impl EnclaveHttpClientBuilder {
         let common = self.options.common;
         let checked = enclave::Config {
             host: self.host,
-            relay: None,
             repo: self.repo,
             verifier: common.verifier,
             verification_check: common.verification_check,

@@ -263,7 +263,6 @@ impl RouterHttpClientBuilder {
         let enclave_for = move |host: &str| {
             let checked = enclave::Config {
                 host: host.to_owned(),
-                relay: None,
                 repo: Some(router::ROUTER_REPO.to_owned()),
                 verifier: Some(Arc::clone(&verifier)),
                 verification_check: check.clone(),
@@ -313,7 +312,6 @@ impl RouterHttpClientBuilder {
         }
         let fallback = enclave::Config {
             host: router::FALLBACK_ROUTER.to_owned(),
-            relay: None,
             repo: Some(router::ROUTER_REPO.to_owned()),
             verifier: common.verifier,
             verification_check: common.verification_check,

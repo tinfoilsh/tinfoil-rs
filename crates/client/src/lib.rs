@@ -9,24 +9,12 @@
 //! verification expires or the enclave's key changes, and refuses a
 //! request to any origin other than the one that it is bound to.
 //!
-//! # The gateway route is not implemented
-//!
-//! The feature `unstable-gateway`, which is off by default, is
-//! experimental and **not implemented**. It adds the types and signatures
-//! of the gateway route without the machinery behind them: each of its
-//! functions that would perform network I/O fails with an error whose
-//! message says that the function is not implemented yet. That error has
-//! the kind [`ErrorKind::Configuration`], since retrying cannot help; it
-//! does not mean that an option is wrong. Do not enable the feature to use
-//! the gateway; everything else in the crate is complete without it.
-//!
 //! # Choosing a client
 //!
 //! | route | HTTP client | OpenAI client |
 //! |---|---|---|
 //! | Tinfoil's router, discovered (recommended) | [`RouterHttpClient`] | `Client`, or `RouterOpenAIClient` to configure it |
 //! | an enclave that the caller names | [`EnclaveHttpClient`] | `EnclaveOpenAIClient` |
-//! | Tinfoil's gateway (feature `unstable-gateway`: experimental, not implemented) | `GatewayHttpClient` | `GatewayOpenAIClient` |
 //!
 //! The OpenAI clients need the `openai` feature, which is on by default.
 //!
@@ -122,7 +110,6 @@
 //! | feature | what it adds |
 //! |---|---|
 //! | `openai` (default) | the OpenAI clients over `async_openai`, with its chat completion, embedding, audio and responses APIs; the relaxed chat helper; the `sse` and `multimodal` modules |
-//! | `unstable-gateway` | the types of the gateway route. Experimental and not implemented: its calls fail, and anything behind it may change or be removed in any release |
 //!
 //! The other API families of `async_openai` are opt-in. Each feature below
 //! implies `openai` and adds the family's calls to the OpenAI clients,
@@ -161,8 +148,6 @@
 
 mod enclave_client;
 mod error;
-#[cfg(feature = "unstable-gateway")]
-mod gateway_client;
 mod internal;
 #[cfg(feature = "openai")]
 mod openai;
@@ -195,11 +180,6 @@ pub use async_openai::types::embeddings;
 
 pub use enclave_client::{EnclaveHttpClient, EnclaveHttpClientBuilder};
 pub use error::{Error, ErrorKind};
-#[cfg(feature = "unstable-gateway")]
-pub use gateway_client::{
-    Catalog, CatalogEntry, GatewayHttpClient, GatewayHttpClientBuilder, ModelPin,
-    ReplicaVerification, fetch_catalog,
-};
 #[cfg(feature = "openai")]
 pub use openai::relaxed::{
     RelaxedChat, RelaxedChatRequestBuilder, RelaxedResponse, RelaxedStream, RelaxedStreamChunk,
@@ -210,8 +190,6 @@ pub use openai::{
     Client, EnclaveOpenAIClient, EnclaveOpenAIClientBuilder, RouterOpenAIClient,
     RouterOpenAIClientBuilder,
 };
-#[cfg(all(feature = "openai", feature = "unstable-gateway"))]
-pub use openai::{GatewayOpenAIClient, GatewayOpenAIClientBuilder};
 pub use options::TransportMode;
 pub use request::RequestBuilder;
 pub use router_client::{RouterHttpClient, RouterHttpClientBuilder};

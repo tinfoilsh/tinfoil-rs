@@ -65,21 +65,16 @@ pub(crate) fn fresh_at(evidence: &impl Evidence, now: SystemTime) -> bool {
 /// One attempt to obtain evidence: fetch a document and verify it.
 pub(crate) type Source<V> = Arc<dyn Fn() -> BoxFuture<Result<V, Error>> + Send + Sync + 'static>;
 
-/// Fetches the attestation document of a host, through a relay if one is
-/// given, for a nonce. The clients use [`fetch::document`].
+/// Fetches the attestation document of a host for a nonce. The clients
+/// use [`fetch::document`].
 pub(crate) type Fetch = Arc<
-    dyn Fn(String, Option<String>, [u8; NONCE_SIZE]) -> BoxFuture<Result<Vec<u8>, Error>>
-        + Send
-        + Sync
-        + 'static,
+    dyn Fn(String, [u8; NONCE_SIZE]) -> BoxFuture<Result<Vec<u8>, Error>> + Send + Sync + 'static,
 >;
 
 /// What describes an [`Enclave`].
 pub(crate) struct Config {
     /// The enclave: a host with an optional port.
     pub(crate) host: String,
-    /// A host that fetches the attestation document on the client's behalf.
-    pub(crate) relay: Option<String>,
     /// The repository pin, `org/project[@revision][@sha256:digest]`, or
     /// `None` to accept a config that the verifier authorizes.
     pub(crate) repo: Option<String>,
@@ -103,7 +98,6 @@ pub(crate) struct Enclave<V = Verification> {
 /// A [`Config`] that passed its checks, with the verifier that it selects.
 pub(crate) struct Checked {
     host: String,
-    relay: Option<String>,
     repo: Option<String>,
     verifier: Arc<Verifier>,
     verification_check: Option<VerificationCheck>,
@@ -134,7 +128,7 @@ impl Config {
     /// both go through here. Each failure is a configuration error, in this
     /// order:
     ///
-    /// 1. the host, or the relay, is not a host with an optional port;
+    /// 1. the host is not a host with an optional port;
     /// 2. the repository pin is `Some("")` ([`check_pin`]);
     /// 3. the verifier cannot verify against the pin
     ///    (`Verifier::check_repo_verifiability`): the pin is not a
@@ -142,9 +136,6 @@ impl Config {
     ///    it out. The verifier's usage error is the source.
     pub(crate) fn check(self) -> Result<Checked, Error> {
         authority_url(&self.host)?;
-        if let Some(relay) = &self.relay {
-            authority_url(relay)?;
-        }
         check_pin(self.repo.as_deref())?;
         let verifier = self.verifier.unwrap_or_else(|| Arc::new(Verifier::new()));
         verifier
@@ -152,7 +143,6 @@ impl Config {
             .map_err(from_verifier)?;
         Ok(Checked {
             host: self.host,
-            relay: self.relay,
             repo: self.repo,
             verifier,
             verification_check: self.verification_check,
@@ -162,9 +152,7 @@ impl Config {
 
 /// Fetches attestation documents over the network ([`fetch::document`]).
 pub(crate) fn network_fetch() -> Fetch {
-    Arc::new(|host, relay, nonce| {
-        Box::pin(async move { fetch::document(&host, relay.as_deref(), &nonce).await })
-    })
+    Arc::new(|host, nonce| Box::pin(async move { fetch::document(&host, &nonce).await }))
 }
 
 impl Enclave<Verification> {
@@ -178,7 +166,7 @@ impl Enclave<Verification> {
     /// The enclave of a description that was checked already.
     ///
     /// One attempt to obtain a verification is, in order: a fresh random
-    /// nonce; `fetch` for the host, the relay and the nonce;
+    /// nonce; `fetch` for the host and the nonce;
     /// `Verifier::verify_v3` on the document with the nonce and the pin
     /// (a usage error is a configuration error, any other rejection is an
     /// attestation error, and the verifier's error is the source either
@@ -186,15 +174,15 @@ impl Enclave<Verification> {
     pub(crate) fn from_checked(checked: Checked, clock: Clock, fetch: Fetch) -> Self {
         let verifier = checked.verifier;
         let source: Source<Verification> = {
-            let (host, relay, repo) = (checked.host.clone(), checked.relay, checked.repo.clone());
+            let (host, repo) = (checked.host.clone(), checked.repo.clone());
             let verifier = Arc::clone(&verifier);
             Arc::new(move || {
-                let (host, relay, repo) = (host.clone(), relay.clone(), repo.clone());
+                let (host, repo) = (host.clone(), repo.clone());
                 let (verifier, fetch) = (Arc::clone(&verifier), Arc::clone(&fetch));
                 Box::pin(async move {
                     let nonce =
                         random_nonce().map_err(|error| Error::wrap(ErrorKind::Network, error))?;
-                    let document = fetch(host, relay, nonce).await?;
+                    let document = fetch(host, nonce).await?;
                     let verification = verifier
                         .verify_v3(&document, &nonce, repo.as_deref())
                         .map_err(from_verifier)?;
@@ -787,25 +775,24 @@ mod tests {
         assert_eq!(script.calls(), 2);
     }
 
-    fn config(host: &str, relay: Option<&str>, repo: Option<&str>) -> Config {
+    fn config(host: &str, repo: Option<&str>) -> Config {
         Config {
             host: host.to_owned(),
-            relay: relay.map(str::to_owned),
             repo: repo.map(str::to_owned),
             verifier: None,
             verification_check: None,
         }
     }
 
-    type Fetched = Arc<Mutex<Vec<(String, Option<String>, [u8; NONCE_SIZE])>>>;
+    type Fetched = Arc<Mutex<Vec<(String, [u8; NONCE_SIZE])>>>;
 
     /// A fetch that records its arguments and returns `result`.
     fn recording_fetch(result: Result<Vec<u8>, Error>) -> (Fetch, Fetched) {
         let fetched: Fetched = Arc::default();
         let fetch: Fetch = {
             let fetched = Arc::clone(&fetched);
-            Arc::new(move |host, relay, nonce| {
-                fetched.lock().unwrap().push((host, relay, nonce));
+            Arc::new(move |host, nonce| {
+                fetched.lock().unwrap().push((host, nonce));
                 let result = result.clone();
                 Box::pin(async move { result })
             })
@@ -816,27 +803,20 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_enclave_that_cannot_be_verified_is_refused_before_any_fetch() {
         for (config, reason) in [
-            (config("", None, Some("owner/name")), "enclave host"),
+            (config("", Some("owner/name")), "enclave host"),
             (
-                config("https://enclave.example.com", None, Some("owner/name")),
+                config("https://enclave.example.com", Some("owner/name")),
                 "enclave host",
             ),
             (
-                config("enclave.example.com/x", None, Some("owner/name")),
+                config("enclave.example.com/x", Some("owner/name")),
                 "enclave host",
             ),
             (
-                config("enclave.example.com", Some("gateway.example.com/x"), None),
-                "enclave host",
-            ),
-            (
-                config("enclave.example.com", None, Some("")),
+                config("enclave.example.com", Some("")),
                 "repository pin is empty",
             ),
-            (
-                config("enclave.example.com", None, Some("not a reference")),
-                "",
-            ),
+            (config("enclave.example.com", Some("not a reference")), ""),
         ] {
             let (fetch, fetched) = recording_fetch(Ok(Vec::new()));
             let error = Enclave::with_fetch(config, tokio_clock(), fetch)
@@ -852,7 +832,7 @@ mod tests {
     async fn a_pin_that_the_verifier_refuses_keeps_the_verifiers_error_as_its_source() {
         let (fetch, _) = recording_fetch(Ok(Vec::new()));
         let error = Enclave::with_fetch(
-            config("enclave.example.com", None, Some("not a reference")),
+            config("enclave.example.com", Some("not a reference")),
             tokio_clock(),
             fetch,
         )
@@ -869,11 +849,7 @@ mod tests {
     async fn each_attempt_fetches_with_a_fresh_nonce_and_a_rejected_document_is_tried_once_more() {
         let (fetch, fetched) = recording_fetch(Ok(b"not a document".to_vec()));
         let enclave = Enclave::with_fetch(
-            config(
-                "enclave.example.com:8443",
-                Some("gateway.example.com"),
-                Some("owner/name"),
-            ),
+            config("enclave.example.com:8443", Some("owner/name")),
             tokio_clock(),
             fetch,
         )
@@ -896,23 +872,19 @@ mod tests {
 
         let fetched = fetched.lock().unwrap();
         assert_eq!(fetched.len(), 2);
-        for (host, relay, _) in fetched.iter() {
+        for (host, _) in fetched.iter() {
             assert_eq!(host, "enclave.example.com:8443");
-            assert_eq!(relay.as_deref(), Some("gateway.example.com"));
         }
-        assert_ne!(fetched[0].2, fetched[1].2);
-        assert_ne!(fetched[0].2, [0u8; NONCE_SIZE]);
+        assert_ne!(fetched[0].1, fetched[1].1);
+        assert_ne!(fetched[0].1, [0u8; NONCE_SIZE]);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_failed_fetch_is_reported_as_it_is_and_tried_once_more() {
         let (fetch, fetched) = recording_fetch(Err(Error::network("HTTP 503")));
-        let enclave = Enclave::with_fetch(
-            config("enclave.example.com", None, None),
-            tokio_clock(),
-            fetch,
-        )
-        .expect("an enclave");
+        let enclave =
+            Enclave::with_fetch(config("enclave.example.com", None), tokio_clock(), fetch)
+                .expect("an enclave");
         let error = enclave.verify().await.expect_err("the fetch fails");
         assert_eq!(error.to_string(), "network error: HTTP 503");
         assert_eq!(fetched.lock().unwrap().len(), 2);

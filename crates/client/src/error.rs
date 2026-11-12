@@ -15,9 +15,8 @@ pub enum ErrorKind {
     Configuration,
     /// The client could not reach what it needed: a network failure, a
     /// timeout, or an HTTP error status while it fetched attestation
-    /// material, a failed connection to the enclave, or a gateway that keeps
-    /// routing a request away from the enclave that it was sealed to. Retry
-    /// later with the same client.
+    /// material, or a failed connection to the enclave. Retry later with
+    /// the same client.
     Network,
     /// Rejected evidence, policy or channel binding: the enclave could not
     /// be trusted, or what it answered could not be authenticated. The
@@ -294,18 +293,6 @@ impl Error {
         .timed_out()
     }
 
-    /// The error of a function whose body is not written yet. Its kind is
-    /// [`ErrorKind::Configuration`], because retrying cannot help, and its
-    /// message says that `what` is not implemented yet in this version of
-    /// the crate, so that it cannot be read as a problem with the caller's
-    /// options.
-    #[cfg(any(test, feature = "unstable-gateway"))]
-    pub(crate) fn not_implemented(what: &'static str) -> Self {
-        Self::configuration(format!(
-            "{what} is not implemented yet in this version of the crate"
-        ))
-    }
-
     /// The same error with `change` applied. An error that other holders
     /// share is copied first, with its cause, its source chain and its
     /// earlier attempt as they are.
@@ -469,15 +456,6 @@ mod tests {
             .and_then(|source| source.downcast_ref::<std::io::Error>())
             .expect("an I/O error");
         assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
-    }
-
-    #[test]
-    fn a_placeholder_says_that_the_function_is_not_implemented_yet() {
-        let error = Error::not_implemented("router discovery");
-        assert_eq!(
-            error.to_string(),
-            "configuration error: router discovery is not implemented yet in this version of the crate"
-        );
     }
 
     #[cfg(feature = "openai")]

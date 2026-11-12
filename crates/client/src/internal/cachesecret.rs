@@ -11,7 +11,7 @@
 //! 4. the secret stored in `~/.tinfoil/user_cache_secret`, generated on
 //!    first use.
 //!
-//! Steps 3 and 4 apply to the router and gateway routes only: an explicit
+//! Steps 3 and 4 apply to the router route only: an explicit
 //! enclave does not read the member unless it is a router, so a client for
 //! one sends a secret only when the option is set.
 //!
@@ -58,7 +58,7 @@ const GROUP_AND_OTHERS: u32 = 0o077;
 /// How many names are tried for the temporary file of a new secret.
 const CANDIDATE_ATTEMPTS: usize = 16;
 
-/// The client-level secret for a router or gateway client: the option when
+/// The client-level secret for a router client: the option when
 /// it is set, then a non-empty environment value, then the stored secret.
 ///
 /// It never fails. Where no secret can be stored or the stored one cannot

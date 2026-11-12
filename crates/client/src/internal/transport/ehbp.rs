@@ -155,8 +155,7 @@ impl<V: Evidence> Mode<V> for EhbpMode {
     }
 }
 
-/// The request checks of the EHBP mode. The gateway runs them before it
-/// reads its catalog or verifies a replica. Each refusal is a configuration
+/// The request checks of the EHBP mode. Each refusal is a configuration
 /// error, and none repeats the URL, which may hold a credential.
 ///
 /// 1. A request with the `CONNECT` method or an `Upgrade` header: its

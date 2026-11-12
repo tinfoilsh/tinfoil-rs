@@ -17,14 +17,9 @@ use crate::options::TransportMode;
 use crate::router_client::{RouterHttpClient, RouterHttpClientBuilder};
 use crate::verifier::{BoxError, Verification, Verifier};
 
-#[cfg(feature = "unstable-gateway")]
-mod gateway;
 pub(crate) mod relaxed;
 pub(crate) mod retry;
 pub(crate) mod service;
-
-#[cfg(feature = "unstable-gateway")]
-pub use gateway::{GatewayOpenAIClient, GatewayOpenAIClientBuilder};
 
 use relaxed::RelaxedChat;
 
@@ -126,9 +121,6 @@ pub(crate) async fn embed_batch(
         .map(|embedding| embedding.embedding)
         .collect())
 }
-
-#[cfg(feature = "unstable-gateway")]
-pub(crate) use openai_client_methods;
 
 /// An OpenAI client for Tinfoil's recommended route: the drop-in.
 ///
