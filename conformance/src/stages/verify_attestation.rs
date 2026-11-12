@@ -107,7 +107,9 @@ pub(crate) fn run(input: &Input, verifier: &Verifier) -> (Output, i32) {
     let Some(appraisal) = appraisal else {
         return malformed(stage);
     };
-    let verified = match verifier.verify_v3_at(&doc, &nonce, &input.repo, appraisal) {
+    // An empty repository in the input is the absence of a pin.
+    let repo = Some(input.repo.as_str()).filter(|repo| !repo.is_empty());
+    let verified = match verifier.verify_v3_at(&doc, &nonce, repo, appraisal) {
         Ok(verified) => verified,
         Err(error) => return rejection(&error),
     };

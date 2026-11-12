@@ -50,10 +50,11 @@ fn every_public_name_is_importable_and_has_its_signature() {
     let _: fn() -> Verifier = Verifier::new;
     let _: fn() -> Verifier = Verifier::default;
     let _: fn() -> VerifierBuilder = Verifier::builder;
-    let _: fn(&Verifier, &[u8], &[u8], &str) -> Result<Verification, Error> = Verifier::verify_v3;
-    let _: fn(&Verifier, &[u8], &[u8], &str, SystemTime) -> Result<Verification, Error> =
+    let _: fn(&Verifier, &[u8], &[u8], Option<&str>) -> Result<Verification, Error> =
+        Verifier::verify_v3;
+    let _: fn(&Verifier, &[u8], &[u8], Option<&str>, SystemTime) -> Result<Verification, Error> =
         Verifier::verify_v3_at;
-    let _: fn(&Verifier, &str) -> Result<(), Error> = Verifier::check_repo_verifiability;
+    let _: fn(&Verifier, Option<&str>) -> Result<(), Error> = Verifier::check_repo_verifiability;
     let _: fn(&Verifier) -> bool = Verifier::caller_authorizes_config;
     let _: for<'a> fn(&'a Verifier) -> Option<&'a Expected> = Verifier::pinned_registers;
     let _: fn(&Verifier) -> Duration = Verifier::freshness_max_age;
@@ -216,7 +217,9 @@ fn every_public_name_is_importable_and_has_its_signature() {
     assert!(expected.to_string().starts_with("TDX"));
 
     // Errors.
-    let error: Error = verifier.verify_v3(b"{}", &[0; NONCE_SIZE], "").unwrap_err();
+    let error: Error = verifier
+        .verify_v3(b"{}", &[0; NONCE_SIZE], None)
+        .unwrap_err();
     let _: Option<&(dyn StdError + 'static)> = error.source();
     match error {
         Error::Verification(rejected) => {
@@ -243,7 +246,7 @@ fn every_public_name_is_importable_and_has_its_signature() {
         "envelope provenance quote policy"
     );
     let usage: Error = verifier
-        .verify_v3(b"{}", &[0; NONCE_SIZE - 1], "")
+        .verify_v3(b"{}", &[0; NONCE_SIZE - 1], None)
         .unwrap_err();
     assert!(matches!(usage, Error::Usage(_)));
     fn assert_error<T: StdError + Send + Sync + 'static>() {}
