@@ -48,13 +48,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build
-        run: cargo build --locked --verbose
-
-      - name: Run unit tests
-        run: cargo test --locked --lib --verbose
-
-      - name: Run integration tests
-        run: cargo test --locked --test '*' --verbose
+        run: cargo build --locked --workspace --verbose
 
       - name: Test the verifier crate
         run: cargo test --locked -p tinfoil-verifier --verbose
@@ -64,27 +58,6 @@ jobs:
 
       - name: Test the client crate with every feature
         run: cargo test --locked -p tinfoil-next --all-features --verbose
-
-      - name: Check if API key is available
-        # Bash only — Windows runner uses pwsh by default, but bash is
-        # available there too. Force it explicitly so the heredoc syntax
-        # works on every OS in the matrix.
-        id: gate
-        shell: bash
-        env:
-          TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
-        run: |
-          if [ -z "$TINFOIL_API_KEY" ]; then
-            echo "run=false" >> $GITHUB_OUTPUT
-          else
-            echo "run=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Run API integration tests
-        if: steps.gate.outputs.run == 'true'
-        env:
-          TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
-        run: cargo test --locked --test '*' --verbose -- --ignored
 
   msrv:
     name: MSRV (1.88)
@@ -111,10 +84,7 @@ jobs:
             ${{ runner.os }}-cargo-msrv-
 
       - name: Build on MSRV
-        run: cargo build --locked --verbose
-
-      - name: Unit tests on MSRV
-        run: cargo test --locked --lib --verbose
+        run: cargo build --locked --workspace --verbose
 
       - name: Test the verifier crate on MSRV
         run: cargo test --locked -p tinfoil-verifier --verbose
