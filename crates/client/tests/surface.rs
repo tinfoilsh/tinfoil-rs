@@ -316,8 +316,13 @@ async fn router_options_that_pass_every_check_reach_the_placeholder() {
 /// keeps every connection open.
 async fn plain_server(answer: &'static [u8]) -> (String, Arc<AtomicUsize>) {
     use tokio::io::AsyncWriteExt;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let host = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a local port");
+    let host = format!(
+        "127.0.0.1:{}",
+        listener.local_addr().expect("an address").port()
+    );
     let accepted = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&accepted);
     tokio::spawn(async move {

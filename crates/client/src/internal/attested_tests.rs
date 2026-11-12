@@ -1325,7 +1325,8 @@ mod options {
             let verifier = Verifier::builder().config_authorizer(|_| Ok(())).build();
             Arc::new(verifier.expect("a verifier"))
         };
-        let cases: Vec<(&str, Option<&str>, Option<Arc<Verifier>>)> = vec![
+        type Case = (&'static str, Option<&'static str>, Option<Arc<Verifier>>);
+        let cases: Vec<Case> = vec![
             ("https://enclave.example.com", Some("owner/name"), None),
             ("enclave.example.com/v1", Some("owner/name"), None),
             ("user@enclave.example.com", Some("owner/name"), None),

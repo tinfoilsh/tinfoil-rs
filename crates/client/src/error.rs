@@ -135,13 +135,13 @@ impl Error {
     /// crate's clients fails, the client's error travels inside that
     /// `reqwest::Error`, and this returns it, with its [`kind`](Self::kind):
     ///
-    /// - [`ErrorKind::Attestation`]: in
+    /// - An attestation error: in
     ///   [`TransportMode::Ehbp`](crate::TransportMode::Ehbp), a part of the
     ///   body did not authenticate, or the body ended inside a sealed
     ///   frame. What was read before it was authentic; nothing of the
     ///   failing frame or after it was delivered.
-    /// - [`ErrorKind::Network`]: the connection failed while the body was
-    ///   read, or the request's deadline passed, in which case
+    /// - A network error: the connection failed while the body was read,
+    ///   or the request's deadline passed, in which case
     ///   [`is_timeout`](Self::is_timeout) is `true` (and so is
     ///   `reqwest::Error::is_timeout`).
     ///
