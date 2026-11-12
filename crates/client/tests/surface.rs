@@ -300,17 +300,6 @@ async fn an_enclave_client_reports_its_options_in_the_documented_order() {
     assert!(message.contains("repository pin is empty"), "{message}");
 }
 
-#[tokio::test]
-async fn router_options_that_pass_every_check_reach_the_placeholder() {
-    let message = router_refusal(
-        RouterHttpClient::builder()
-            .transport_mode(TransportMode::Ehbp)
-            .base_url("https://proxy.invalid/"),
-    )
-    .await;
-    assert!(message.contains("not implemented yet"), "{message}");
-}
-
 /// A local server that accepts connections, counts them, and answers each
 /// with `answer` (nothing, if it is empty) without ever speaking TLS. It
 /// keeps every connection open.

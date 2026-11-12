@@ -61,6 +61,14 @@ pub(crate) struct Settings {
     pub(crate) timeout: Option<Duration>,
 }
 
+/// The implementation of a transport mode.
+pub(crate) fn mode_for(mode: TransportMode) -> Result<Arc<dyn Mode<Verification>>, Error> {
+    Ok(match mode {
+        TransportMode::Tls => Arc::new(TlsMode::new()),
+        TransportMode::Ehbp => Arc::new(EhbpMode::new()?),
+    })
+}
+
 impl AttestedClient<Verification> {
     /// Verifies the enclave of `checked` and returns the client for it:
     /// the transport in the mode of `settings`, with the verification's
@@ -76,10 +84,7 @@ impl AttestedClient<Verification> {
         clock: Clock,
         fetch: Fetch,
     ) -> Result<Self, Error> {
-        let mode: Arc<dyn Mode<Verification>> = match settings.mode {
-            TransportMode::Tls => Arc::new(TlsMode::new()),
-            TransportMode::Ehbp => Arc::new(EhbpMode::new()?),
-        };
+        let mode = mode_for(settings.mode)?;
         let enclave = Enclave::from_checked(checked, clock, fetch);
         let transport = within(settings.timeout, Transport::connect(enclave, mode, true)).await?;
         Self::new(transport, settings)
@@ -178,7 +183,7 @@ impl<V: Evidence> AttestedClient<V> {
 /// `operation`, ended with a network error that is marked as a timeout if
 /// it has not finished after `timeout`. Without a timeout it runs as it
 /// is. The operation is dropped when its time is up.
-async fn within<T>(
+pub(crate) async fn within<T>(
     timeout: Option<Duration>,
     operation: impl Future<Output = Result<T, Error>>,
 ) -> Result<T, Error> {

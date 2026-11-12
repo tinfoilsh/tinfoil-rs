@@ -11,7 +11,8 @@
 //!
 //! # Status
 //!
-//! [`EnclaveHttpClient`] is complete. The other clients are their API
+//! [`EnclaveHttpClient`] and [`RouterHttpClient`] are complete. The other
+//! clients are their API
 //! without the machinery behind it: the types, the signatures and their
 //! documented contracts are in place, and each of their functions that
 //! would perform network I/O (their `connect`, `fetch_catalog`, the
