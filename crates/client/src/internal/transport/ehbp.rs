@@ -12,6 +12,7 @@ use tinfoil_ehbp::{Code, ServerIdentity};
 use crate::error::{Error, ErrorKind};
 use crate::internal::BoxFuture;
 use crate::internal::enclave::Evidence;
+use crate::internal::fetch::{never_proxied, route, tls_builder};
 use crate::internal::transport::base_url::is_loopback;
 use crate::internal::transport::{Failure, Mode, RoundTrip};
 
@@ -68,47 +69,36 @@ const MAX_PROBLEM_BYTES: usize = 64 * 1024;
 ///   reported as an attestation error marked
 ///   [`Failure::peer_lacks_key`]. Any other `422` is an ordinary response.
 /// - **Redirects** are not followed; a `3xx` is returned to the caller.
-/// - **Network.** Each binding has a carrier `reqwest::Client` of its own,
+/// - **Network.** Each binding has carrier `reqwest::Client`s of its own,
 ///   with the standard certificate checks against the compiled-in roots on
-///   the `ring` provider; it is not pinned, since the sealing is the
+///   the `ring` provider; they are not pinned, since the sealing is the
 ///   binding. Connections are pooled within a binding and closed with it,
 ///   so the first request after a new verification opens a new connection:
 ///   behind a proxy, the old one may lead to the instance whose key was
-///   rejected. A forward proxy from the environment is used as `reqwest`
-///   uses it by default. A failure of the carrier is a network error.
+///   rejected. A failure of a carrier is a network error.
+/// - **Proxies.** A forward proxy from the environment is used as `reqwest`
+///   uses it by default, except for a request to `localhost` or a loopback
+///   address ([`never_proxied`]), which always connects directly: such a
+///   request may travel over plain `http`, and a proxy would read its URL
+///   and headers. A binding therefore has two carriers, and each request
+///   takes the one for its host.
 pub(crate) struct EhbpMode {
-    /// The TLS configuration of every carrier client.
-    tls: rustls::ClientConfig,
-    /// Whether the carrier clients read the environment's proxy settings.
-    environment_proxy: bool,
+    /// A proxy in place of the environment's proxy settings. Only tests
+    /// set one.
+    proxy: Option<reqwest::Proxy>,
 }
 
 impl EhbpMode {
-    /// The mode, with the TLS configuration of its carrier clients.
+    /// The mode.
     pub(crate) fn new() -> Result<Self, Error> {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let mut roots = rustls::RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let tls = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .map_err(|error| Error::wrap(ErrorKind::Configuration, error))?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        Ok(Self {
-            tls,
-            environment_proxy: true,
-        })
+        Ok(Self { proxy: None })
     }
 
-    /// The carrier client of one binding.
-    fn carrier(&self) -> Result<reqwest::Client, Error> {
-        let mut builder = reqwest::Client::builder()
-            .tls_backend_preconfigured(self.tls.clone())
-            .redirect(reqwest::redirect::Policy::none());
-        if !self.environment_proxy {
-            builder = builder.no_proxy();
-        }
-        builder
+    /// A carrier client of one binding: `direct` for the hosts that are
+    /// never proxied, and otherwise for all others.
+    fn carrier(&self, direct: bool) -> Result<reqwest::Client, Error> {
+        let builder = tls_builder()?.redirect(reqwest::redirect::Policy::none());
+        route(builder, direct, self.proxy.clone())
             .build()
             .map_err(|error| Error::wrap(ErrorKind::Configuration, error))
     }
@@ -137,7 +127,8 @@ impl<V: Evidence> Mode<V> for EhbpMode {
         })?;
         Ok(Arc::new(Sealing {
             identity,
-            carrier: self.carrier()?,
+            proxied: self.carrier(false)?,
+            direct: self.carrier(true)?,
         }))
     }
 }
@@ -199,7 +190,10 @@ fn is_reserved(name: &HeaderName) -> bool {
 /// The transport bound to one attested HPKE key.
 struct Sealing {
     identity: ServerIdentity,
-    carrier: reqwest::Client,
+    /// The carrier for the hosts that the environment's proxy applies to.
+    proxied: reqwest::Client,
+    /// The carrier for the hosts that are never proxied.
+    direct: reqwest::Client,
 }
 
 impl RoundTrip for Sealing {
@@ -209,10 +203,15 @@ impl RoundTrip for Sealing {
         // of the transport, so each request gets a client for its own
         // origin; the client is a handle on the shared carrier and holds
         // nothing else that outlives the request.
+        let carrier = if never_proxied(request.url()) {
+            &self.direct
+        } else {
+            &self.proxied
+        };
         let sealing = tinfoil_ehbp::Client::with_identity_and_http_client(
             request.url().clone(),
             self.identity.clone(),
-            self.carrier.clone(),
+            carrier.clone(),
         );
         // A body in memory is known to be empty or not, and the protocol's
         // client treats it accordingly. A stream is a body whatever it

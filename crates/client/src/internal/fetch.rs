@@ -78,8 +78,19 @@ pub(crate) async fn document(
     relay: Option<&str>,
     nonce: &[u8; NONCE_SIZE],
 ) -> Result<Vec<u8>, Error> {
+    document_through(host, relay, nonce, None).await
+}
+
+/// [`document`], with `proxy` in place of the environment's proxy settings
+/// when there is one. Only tests pass one.
+async fn document_through(
+    host: &str,
+    relay: Option<&str>,
+    nonce: &[u8; NONCE_SIZE],
+    proxy: Option<reqwest::Proxy>,
+) -> Result<Vec<u8>, Error> {
     let url = document_url(host, relay, nonce)?;
-    let client = plain_client()?;
+    let client = client_for(&url, true, proxy)?;
     get_bounded(
         &client,
         url,
@@ -103,11 +114,70 @@ pub(crate) async fn document(
 /// - A forward proxy named by `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`
 ///   is used, as `reqwest` does by default. The material proves itself
 ///   once it is verified, so a proxy can only make the fetch fail.
+///
+/// `reqwest` applies the environment's proxy to every host that `NO_PROXY`
+/// does not name, a loopback host included. A request whose URL is known
+/// takes its client from [`plain_client_for`], which keeps a loopback host
+/// away from the proxy.
 pub(crate) fn plain_client() -> Result<Client, Error> {
     client_builder(true)?
         .https_only(true)
         .build()
         .map_err(|error| Error::wrap(ErrorKind::Configuration, error))
+}
+
+/// The client of [`plain_client`] for a fetch that starts at `url`: when
+/// [`never_proxied`] holds for `url`, the client connects directly whatever
+/// the environment says. A redirect cannot leave the kind of host that the
+/// client was chosen for (see [`redirect_policy`]).
+pub(crate) fn plain_client_for(url: &Url) -> Result<Client, Error> {
+    client_for(url, true, None)
+}
+
+/// [`plain_client_for`], with the rule of [`redirect_policy`] that
+/// `https_only` selects, and with `proxy` in place of the environment's
+/// proxy settings when there is one. Only tests pass the last two.
+fn client_for(url: &Url, https_only: bool, proxy: Option<reqwest::Proxy>) -> Result<Client, Error> {
+    let builder = client_builder(https_only)?.https_only(https_only);
+    route(builder, never_proxied(url), proxy)
+        .build()
+        .map_err(|error| Error::wrap(ErrorKind::Configuration, error))
+}
+
+/// `builder` with its proxy settings: none when `direct`, otherwise
+/// `proxy`, and without one the environment's, which is `reqwest`'s
+/// default.
+pub(crate) fn route(
+    builder: ClientBuilder,
+    direct: bool,
+    proxy: Option<reqwest::Proxy>,
+) -> ClientBuilder {
+    match (direct, proxy) {
+        (true, _) => builder.no_proxy(),
+        (false, Some(proxy)) => builder.proxy(proxy),
+        (false, None) => builder,
+    }
+}
+
+/// Whether a request to `url` never goes through a proxy from the
+/// environment: its host is the name `localhost`, or a loopback IP address
+/// (`127.0.0.0/8`, `::1`, or an IPv4 loopback address mapped into IPv6).
+///
+/// The name is matched whole: a subdomain of `localhost` and `localhost.`
+/// with a trailing dot are proxied like any other name. A URL holds its
+/// host in lowercase, so the spelling of the caller does not matter.
+pub(crate) fn never_proxied(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(name)) => name == "localhost",
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => {
+            address.is_loopback()
+                || address
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| mapped.is_loopback())
+        }
+        None => false,
+    }
 }
 
 /// The redirect rule for unattested material. A redirect is followed
@@ -116,6 +186,9 @@ pub(crate) fn plain_client() -> Result<Client, Error> {
 /// - its target is not an `https://` URL, when `https_only` is set, as it
 ///   always is outside this module's own tests: a redirect never moves a
 ///   fetch to plaintext;
+/// - it leads from a host that is [`never_proxied`] to one that is not, or
+///   the other way: the client was built for one kind, with or without
+///   the environment's proxy;
 /// - [`MAX_REQUESTS`] requests have already been made in the chain.
 ///
 /// A redirect that is not followed fails the fetch. The target may be on
@@ -126,6 +199,12 @@ fn redirect_policy(https_only: bool) -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(move |attempt| {
         if https_only && attempt.url().scheme() != "https" {
             attempt.error("refusing a redirect to a URL that is not HTTPS")
+        } else if attempt
+            .previous()
+            .last()
+            .is_some_and(|from| never_proxied(from) != never_proxied(attempt.url()))
+        {
+            attempt.error("refusing a redirect between a loopback host and another host")
         } else if attempt.previous().len() >= MAX_REQUESTS {
             attempt.error("stopped after too many redirects")
         } else {
@@ -137,6 +216,15 @@ fn redirect_policy(https_only: bool) -> reqwest::redirect::Policy {
 /// The settings that every client for unattested material shares.
 /// `https_only` is that of [`redirect_policy`].
 fn client_builder(https_only: bool) -> Result<ClientBuilder, Error> {
+    Ok(tls_builder()?
+        .redirect(redirect_policy(https_only))
+        .pool_max_idle_per_host(0))
+}
+
+/// A client builder with the certificate checks that every client of this
+/// crate starts from: the standard checks against the root certificates
+/// that are compiled in, on the `ring` provider.
+pub(crate) fn tls_builder() -> Result<ClientBuilder, Error> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -145,10 +233,7 @@ fn client_builder(https_only: bool) -> Result<ClientBuilder, Error> {
         .map_err(|error| Error::wrap(ErrorKind::Configuration, error))?
         .with_root_certificates(roots)
         .with_no_client_auth();
-    Ok(Client::builder()
-        .tls_backend_preconfigured(tls)
-        .redirect(redirect_policy(https_only))
-        .pool_max_idle_per_host(0))
+    Ok(Client::builder().tls_backend_preconfigured(tls))
 }
 
 /// Sends a `GET` for `url` with the SDK headers and returns the body.
@@ -698,6 +783,138 @@ mod tests {
                 .expect("body");
         }
         assert_eq!(server.accepted.load(Ordering::SeqCst), 3);
+    }
+
+    /// A listener that stands for a forward proxy: it counts connections,
+    /// records the first line of each request and answers `502`.
+    async fn proxy() -> (reqwest::Proxy, Server) {
+        let server = serve(b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\n\r\n".to_vec()).await;
+        let origin = server.url.origin().ascii_serialization();
+        (reqwest::Proxy::all(origin).expect("proxy"), server)
+    }
+
+    #[test]
+    fn only_localhost_and_loopback_addresses_are_never_proxied() {
+        for (url, expected) in [
+            ("https://localhost/", true),
+            ("https://LOCALHOST:8443/", true),
+            ("http://127.0.0.1:8080/", true),
+            ("https://127.9.9.9/", true),
+            ("https://[::1]/", true),
+            ("https://[::ffff:127.0.0.1]/", true),
+            ("https://localhost./", false),
+            ("https://app.localhost/", false),
+            ("https://localhost.example.com/", false),
+            ("https://enclave.example.com/", false),
+            ("https://10.0.0.1/", false),
+            ("https://128.0.0.1/", false),
+            ("https://[::2]/", false),
+            ("https://[::ffff:10.0.0.1]/", false),
+        ] {
+            let parsed = Url::parse(url).expect("url");
+            assert_eq!(never_proxied(&parsed), expected, "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_loopback_fetch_connects_directly_whatever_the_proxy_settings() {
+        let (proxy, listener) = proxy().await;
+        let server = serve(ok(b"{}")).await;
+        let client = client_for(&server.url, false, Some(proxy)).expect("client");
+        let body = get_bounded(&client, server.url.clone(), 1024, FETCH_TIMEOUT, "document")
+            .await
+            .expect("fetched directly");
+        assert_eq!(body, b"{}");
+        assert_eq!(server.accepted.load(Ordering::SeqCst), 1);
+        assert_eq!(listener.accepted.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_document_of_a_loopback_host_is_fetched_directly_whatever_the_proxy_settings() {
+        let (proxy, listener) = proxy().await;
+        // The server closes every connection, so the fetch fails once it
+        // has connected; what matters is where it connected.
+        let server = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let host = server.local_addr().expect("address").to_string();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&accepted);
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = server.accept().await {
+                count.fetch_add(1, Ordering::SeqCst);
+                drop(socket);
+            }
+        });
+        let error = document_through(&host, None, &NONCE, Some(proxy))
+            .await
+            .expect_err("no TLS");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        assert_eq!(listener.accepted.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_document_of_another_host_is_fetched_through_the_proxy() {
+        let (proxy, listener) = proxy().await;
+        let error = document_through("enclave.example.com", None, &NONCE, Some(proxy))
+            .await
+            .expect_err("the proxy refuses the tunnel");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert_eq!(listener.accepted.load(Ordering::SeqCst), 1);
+        let requests = listener.requests.lock().await;
+        assert!(
+            requests[0].starts_with("CONNECT enclave.example.com:443 HTTP/1.1"),
+            "{requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fetch_from_another_host_goes_through_the_proxy() {
+        let (proxy, listener) = proxy().await;
+        let url = Url::parse("http://enclave.example.com/document").expect("url");
+        let client = client_for(&url, false, Some(proxy)).expect("client");
+        let error = get_bounded(&client, url, 1024, FETCH_TIMEOUT, "document")
+            .await
+            .expect_err("the proxy's answer");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert_eq!(listener.accepted.load(Ordering::SeqCst), 1);
+        let requests = listener.requests.lock().await;
+        assert!(
+            requests[0].starts_with("GET http://enclave.example.com/document HTTP/1.1"),
+            "{requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_from_a_loopback_host_to_another_host_is_refused() {
+        let (proxy, listener) = proxy().await;
+        let server =
+            serve_with(|_| Reply::Send(redirect("http://enclave.example.com/document"))).await;
+        let client = client_for(&server.url, false, Some(proxy)).expect("client");
+        let error = get_bounded(&client, server.url.clone(), 1024, FETCH_TIMEOUT, "document")
+            .await
+            .expect_err("a redirect to another kind of host");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert_eq!(server.accepted.load(Ordering::SeqCst), 1);
+        assert_eq!(listener.accepted.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_from_another_host_to_a_loopback_host_is_refused() {
+        // The proxy answers for the other host, with a redirect to a local
+        // server that must not be contacted through it or at all.
+        let target = serve(ok(b"{}")).await;
+        let location = target.url.to_string();
+        let listener = serve_with(move |_| Reply::Send(redirect(&location))).await;
+        let origin = listener.url.origin().ascii_serialization();
+        let proxy = reqwest::Proxy::all(origin).expect("proxy");
+        let url = Url::parse("http://enclave.example.com/document").expect("url");
+        let client = client_for(&url, false, Some(proxy)).expect("client");
+        let error = get_bounded(&client, url, 1024, FETCH_TIMEOUT, "document")
+            .await
+            .expect_err("a redirect to another kind of host");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert_eq!(listener.accepted.load(Ordering::SeqCst), 1);
+        assert_eq!(target.accepted.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

@@ -457,11 +457,10 @@ async fn write_reply(
 
 // The client's side.
 
-/// The mode, kept away from any proxy of the test machine.
+/// The mode. Every server of these tests is on a loopback address, which
+/// no proxy of the test machine applies to.
 fn mode() -> EhbpMode {
-    let mut mode = EhbpMode::new().expect("mode");
-    mode.environment_proxy = false;
-    mode
+    EhbpMode::new().expect("mode")
 }
 
 fn evidence(name: &'static str, hpke: Option<&str>) -> Record {
@@ -1487,6 +1486,56 @@ async fn dropping_a_request_before_its_response_leaves_the_binding_usable() {
         assert_eq!(text(response).await, "whole");
     }
     assert_eq!(server.accepted(), 2);
+}
+
+/// A listener that stands for a forward proxy: it answers every request
+/// with `502`, and its server records what it received.
+async fn proxy() -> (reqwest::Proxy, Server) {
+    let listener = serve(&key(9), |_| Reply::ok("").status(502)).await;
+    let origin = listener.url.origin().ascii_serialization();
+    (reqwest::Proxy::all(origin).expect("proxy"), listener)
+}
+
+#[tokio::test]
+async fn a_loopback_request_connects_directly_whatever_the_proxy_settings() {
+    let key = key(1);
+    let (proxy, listener) = proxy().await;
+    let server = serve(&key, |_| Reply::ok("direct")).await;
+    let mode = EhbpMode { proxy: Some(proxy) };
+    let bound = bind(&mode, Some(&key.public_hex)).expect("bound");
+
+    for request in [
+        get(server.url("/v1/models?key=secret")),
+        with_header(
+            post(server.url("/v1/chat"), "{}"),
+            "authorization",
+            "Bearer token",
+        ),
+    ] {
+        let response = bound.round_trip(request).await.expect("a response");
+        assert_eq!(text(response).await, "direct");
+    }
+    assert_eq!(server.seen().len(), 2);
+    assert_eq!(listener.accepted(), 0, "{:?}", listener.seen());
+}
+
+#[tokio::test]
+async fn a_request_to_another_host_goes_through_the_proxy() {
+    let key = key(1);
+    let (proxy, listener) = proxy().await;
+    let mode = EhbpMode { proxy: Some(proxy) };
+    let bound = bind(&mode, Some(&key.public_hex)).expect("bound");
+
+    // The proxy refuses the tunnel, so nothing leaves the machine.
+    let url = Url::parse("https://enclave.example.com/v1/models").unwrap();
+    let result = bound.round_trip(get(url)).await;
+    ordinary(result, ErrorKind::Network);
+    assert_eq!(listener.accepted(), 1);
+    let seen = &listener.seen()[0];
+    assert_eq!(
+        (seen.method.as_str(), seen.target.as_str()),
+        ("CONNECT", "enclave.example.com:443")
+    );
 }
 
 #[tokio::test]
