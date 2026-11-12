@@ -351,4 +351,4 @@ pub(crate) fn spki_fingerprint(spki_der: &[u8]) -> String {
 
 #[cfg(test)]
 #[path = "tls_tests.rs"]
-mod tests;
+pub(crate) mod tests;

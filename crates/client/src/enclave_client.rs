@@ -7,9 +7,9 @@ use std::time::Duration;
 use reqwest::Url;
 
 use crate::error::Error;
-use crate::internal::attested::AttestedClient;
-use crate::internal::enclave;
+use crate::internal::attested::{AttestedClient, Settings};
 use crate::internal::transport::base_url;
+use crate::internal::{enclave, system_clock};
 use crate::options::{RouteOptions, Secret, TransportMode};
 use crate::request::http_request_methods;
 use crate::verifier::{BoxError, Verification, Verifier};
@@ -283,58 +283,79 @@ impl EnclaveHttpClientBuilder {
     ///
     /// Before any network I/O, in this order, each a configuration error:
     ///
-    /// 1. `host` is empty, or is not a host with an optional port.
+    /// 1. `host` is empty.
     /// 2. `base_url` is empty, is not an absolute `http` or `https` URL, or
     ///    carries a user name or password (this error does not repeat the
     ///    URL), a query string or a fragment; or it uses `http://` for a
     ///    host other than `localhost` or a loopback IP address.
     /// 3. `user_cache_secret` is empty, or `timeout` is zero.
-    /// 4. `repo` is `Some("")`, or is not a repository reference, or the
-    ///    verifier cannot verify against it: a verifier with a config
-    ///    authorizer takes no pin, and one with an embedded config takes
-    ///    only a matching one.
+    /// 4. `host` is not a host with an optional port; `repo` is
+    ///    `Some("")`, or is not a repository reference, or the verifier
+    ///    cannot verify against it: a verifier with a config authorizer
+    ///    takes no pin, and one with an embedded config takes only a
+    ///    matching one.
     /// 5. The mode is [`TransportMode::Tls`] and `base_url` is on another
     ///    origin than the enclave: that is a proxy, which requires
     ///    [`TransportMode::Ehbp`].
     ///
     /// Then the enclave is verified, as
     /// [`ensure_verified`](EnclaveHttpClient::ensure_verified) describes,
-    /// with its errors.
+    /// with its errors. The transport mode is the option and nothing else:
+    /// an enclave whose attestation endorses no key for the mode fails
+    /// the verification with an attestation error; the client does not
+    /// fall back to the other mode.
     ///
     /// # Cancel safety
     ///
     /// Dropping the future stops the verification and closes its
     /// connection. No client exists and nothing is left behind.
-    ///
-    /// **Not implemented yet.** In this version of the crate the call makes the
-    /// checks that need no network and then fails with an error that says so;
-    /// the text above is the contract that it will meet.
     pub async fn connect(self) -> Result<EnclaveHttpClient, Error> {
-        self.check()?;
-        Err(Error::not_implemented("EnclaveHttpClient::connect"))
+        let (checked, settings) = self.prepare()?;
+        let inner =
+            AttestedClient::connect(checked, settings, system_clock(), enclave::network_fetch())
+                .await?;
+        Ok(EnclaveHttpClient {
+            inner: Arc::new(inner),
+        })
     }
 
     /// The checks that `connect` makes before any network I/O, in the
     /// order that it documents.
     pub(crate) fn check(&self) -> Result<(), Error> {
-        base_url::authority_url(&self.host)?;
-        let base = self.options.checked_base_url()?;
-        self.options.common.check()?;
-        enclave::check_pin(self.repo.as_deref())?;
-        let default_verifier;
-        let verifier = match &self.options.common.verifier {
-            Some(verifier) => verifier.as_ref(),
-            None => {
-                default_verifier = Verifier::new();
-                &default_verifier
-            }
-        };
-        verifier
-            .check_repo_verifiability(self.repo.as_deref())
-            .map_err(enclave::from_verifier)?;
-        if let (TransportMode::Tls, Some(base)) = (self.options.mode(), &base) {
-            base_url::validate_for_tls(base, &self.host)?;
+        self.clone().prepare().map(drop)
+    }
+
+    /// Checks the options, in the order that `connect` documents, and
+    /// returns what a client is made from. It does no I/O. The host, the
+    /// pin and the verifier are checked by [`enclave::Config::check`], which
+    /// also selects the verifier that the client then verifies with.
+    pub(crate) fn prepare(self) -> Result<(enclave::Checked, Settings), Error> {
+        if self.host.is_empty() {
+            return Err(Error::configuration("an enclave host is required"));
         }
-        Ok(())
+        let base_url = self.options.checked_base_url()?;
+        self.options.common.check()?;
+        let mode = self.options.mode();
+        let common = self.options.common;
+        let checked = enclave::Config {
+            host: self.host,
+            relay: None,
+            repo: self.repo,
+            verifier: common.verifier,
+            verification_check: common.verification_check,
+        }
+        .check()?;
+        if let (TransportMode::Tls, Some(base_url)) = (mode, &base_url) {
+            base_url::validate_for_tls(base_url, checked.host())?;
+        }
+        Ok((
+            checked,
+            Settings {
+                mode,
+                base_url,
+                secret: common.user_cache_secret,
+                timeout: common.timeout,
+            },
+        ))
     }
 }

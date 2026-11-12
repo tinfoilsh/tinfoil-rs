@@ -92,8 +92,12 @@ impl Error {
         self.inner.timeout
     }
 
-    /// The failure of the first attempt, when this error is the failure of
-    /// the one retry that a verification gets.
+    /// The failure of the attempt before the one that this error reports:
+    /// the first attempt of a verification, when this error is the failure
+    /// of the one retry that a verification gets; or the key rejection of
+    /// a request, when this error is the failure of the one replay that
+    /// the request gets, or says that its body could not be sent again.
+    /// The earlier failure can have an earlier attempt of its own.
     pub fn earlier_attempt(&self) -> Option<&Error> {
         self.inner.earlier_attempt.as_ref()
     }
@@ -113,6 +117,43 @@ impl Error {
             OpenAIError::Reqwest(error) => Some(error),
             _ => None,
         };
+        while let Some(error) = next {
+            if let Some(found) = error.downcast_ref::<Error>() {
+                return Some(found);
+            }
+            next = error.source();
+        }
+        None
+    }
+
+    /// The client error behind a failed read of a response body, if there
+    /// is one.
+    ///
+    /// The body of a response is read with `reqwest`'s methods
+    /// (`chunk`, `bytes`, `text`, `json`, `bytes_stream`), which return a
+    /// `reqwest::Error`. When the read of a response from one of this
+    /// crate's clients fails, the client's error travels inside that
+    /// `reqwest::Error`, and this returns it, with its [`kind`](Self::kind):
+    ///
+    /// - [`ErrorKind::Attestation`]: in
+    ///   [`TransportMode::Ehbp`](crate::TransportMode::Ehbp), a part of the
+    ///   body did not authenticate, or the body ended inside a sealed
+    ///   frame. What was read before it was authentic; nothing of the
+    ///   failing frame or after it was delivered.
+    /// - [`ErrorKind::Network`]: the connection failed while the body was
+    ///   read, or the request's deadline passed, in which case
+    ///   [`is_timeout`](Self::is_timeout) is `true` (and so is
+    ///   `reqwest::Error::is_timeout`).
+    ///
+    /// `None` means that the error did not come from reading such a body:
+    /// for example, a body that is not the JSON that the caller asked for.
+    pub fn from_reqwest(error: &reqwest::Error) -> Option<&Error> {
+        Self::find_in(error)
+    }
+
+    /// The first client error among `error` and its sources.
+    pub(crate) fn find_in<'a>(error: &'a (dyn StdError + 'static)) -> Option<&'a Error> {
+        let mut next = Some(error);
         while let Some(error) = next {
             if let Some(found) = error.downcast_ref::<Error>() {
                 return Some(found);
@@ -166,6 +207,30 @@ impl Error {
     /// The same error, with the failure of the attempt before it attached.
     pub(crate) fn after(self, earlier: Error) -> Self {
         self.rebuild(|inner| inner.earlier_attempt = Some(earlier))
+    }
+
+    /// The same error, with `earliest` attached behind the attempts that it
+    /// already carries: an error that is itself the failure of a retry
+    /// keeps its first attempt, and `earliest` becomes the attempt before
+    /// that one.
+    pub(crate) fn after_all(self, earliest: Error) -> Self {
+        let earlier = match self.inner.earlier_attempt.clone() {
+            Some(earlier) => earlier.after_all(earliest),
+            None => earliest,
+        };
+        self.after(earlier)
+    }
+
+    /// A network error for a deadline that passed, marked as a timeout.
+    /// Its source is an I/O error of the kind `TimedOut`, which is what
+    /// `reqwest` recognizes as a timeout when the error travels inside one
+    /// of its own.
+    pub(crate) fn deadline(message: &'static str) -> Self {
+        Self::wrap(
+            ErrorKind::Network,
+            std::io::Error::new(std::io::ErrorKind::TimedOut, message),
+        )
+        .timed_out()
     }
 
     /// The error of a function whose body is not written yet. Its kind is
@@ -300,6 +365,48 @@ mod tests {
             shared.earlier_attempt().map(Error::to_string).as_deref(),
             Some("attestation error: first")
         );
+    }
+
+    #[test]
+    fn an_attempt_is_attached_behind_the_attempts_that_an_error_already_has() {
+        let replay = Error::network("second fetch").after(Error::network("first fetch"));
+        let joined = replay.after_all(Error::attestation("key rejected"));
+        let chain: Vec<String> = std::iter::successors(Some(&joined), |e| e.earlier_attempt())
+            .map(Error::to_string)
+            .collect();
+        assert_eq!(
+            chain,
+            [
+                "network error: second fetch",
+                "network error: first fetch",
+                "attestation error: key rejected"
+            ]
+        );
+        let single = Error::network("replay").after_all(Error::attestation("key rejected"));
+        assert_eq!(
+            single.earlier_attempt().map(Error::kind),
+            Some(ErrorKind::Attestation)
+        );
+        assert!(
+            single
+                .earlier_attempt()
+                .unwrap()
+                .earlier_attempt()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_passed_deadline_is_a_network_timeout_that_reqwest_would_recognize() {
+        let error = Error::deadline("too slow");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert!(error.is_timeout());
+        assert_eq!(error.to_string(), "network error: too slow");
+        let io = error
+            .source()
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .expect("an I/O error");
+        assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
     }
 
     #[test]

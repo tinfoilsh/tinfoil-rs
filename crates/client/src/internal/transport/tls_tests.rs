@@ -24,7 +24,7 @@ use crate::internal::transport::{Failure, KeyFailure, Mode, RoundTrip, Transport
 /// certificate authority that only these tests trust, two server keys, and
 /// server certificates for them. The keys are fixed numbers, good for
 /// nothing but telling two keys apart.
-mod made {
+pub(crate) mod made {
     use std::str::FromStr;
     use std::sync::LazyLock;
 
@@ -169,29 +169,29 @@ mod made {
     const LONG: (u64, u64) = (YEAR_2020, YEAR_2100);
 
     /// The authority that the tests trust.
-    pub(super) static CA: LazyLock<Vec<u8>> = LazyLock::new(|| authority(TRUSTED, &TRUSTED_KEY));
+    pub(crate) static CA: LazyLock<Vec<u8>> = LazyLock::new(|| authority(TRUSTED, &TRUSTED_KEY));
     /// Key A, in the form that a TLS server loads.
-    pub(super) static KEY_A: LazyLock<Vec<u8>> =
+    pub(crate) static KEY_A: LazyLock<Vec<u8>> =
         LazyLock::new(|| SERVER_KEY_A.to_pkcs8_der().unwrap().as_bytes().to_vec());
     /// Key B, in the form that a TLS server loads.
-    pub(super) static KEY_B: LazyLock<Vec<u8>> =
+    pub(crate) static KEY_B: LazyLock<Vec<u8>> =
         LazyLock::new(|| SERVER_KEY_B.to_pkcs8_der().unwrap().as_bytes().to_vec());
     /// Key A, for 127.0.0.1, under the trusted authority.
-    pub(super) static LEAF_A: LazyLock<Vec<u8>> =
+    pub(crate) static LEAF_A: LazyLock<Vec<u8>> =
         LazyLock::new(|| leaf(&SERVER_KEY_A, TRUSTED, &TRUSTED_KEY, local(), LONG));
     /// Key B, for 127.0.0.1, under the trusted authority.
-    pub(super) static LEAF_B: LazyLock<Vec<u8>> =
+    pub(crate) static LEAF_B: LazyLock<Vec<u8>> =
         LazyLock::new(|| leaf(&SERVER_KEY_B, TRUSTED, &TRUSTED_KEY, local(), LONG));
     /// Key A, for 127.0.0.1, under an authority that nothing trusts.
-    pub(super) static LEAF_A_OTHER_CA: LazyLock<Vec<u8>> =
+    pub(crate) static LEAF_A_OTHER_CA: LazyLock<Vec<u8>> =
         LazyLock::new(|| leaf(&SERVER_KEY_A, UNTRUSTED, &UNTRUSTED_KEY, local(), LONG));
     /// Key A, under the trusted authority, for another name.
-    pub(super) static LEAF_A_WRONG_NAME: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    pub(crate) static LEAF_A_WRONG_NAME: LazyLock<Vec<u8>> = LazyLock::new(|| {
         let other = GeneralName::DnsName(Ia5String::new("other.example").unwrap());
         leaf(&SERVER_KEY_A, TRUSTED, &TRUSTED_KEY, vec![other], LONG)
     });
     /// Key A, for 127.0.0.1, under the trusted authority, expired in 2020.
-    pub(super) static LEAF_A_EXPIRED: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    pub(crate) static LEAF_A_EXPIRED: LazyLock<Vec<u8>> = LazyLock::new(|| {
         let one_day = (YEAR_2020, YEAR_2020 + DAY);
         leaf(&SERVER_KEY_A, TRUSTED, &TRUSTED_KEY, local(), one_day)
     });
@@ -205,37 +205,37 @@ fn certificate(der: &[u8]) -> CertificateDer<'static> {
     CertificateDer::from(der.to_vec())
 }
 
-fn fingerprint(der: &[u8]) -> String {
+pub(crate) fn fingerprint(der: &[u8]) -> String {
     leaf_fingerprint(&certificate(der)).unwrap()
 }
 
-fn roots() -> RootCertStore {
+pub(crate) fn roots() -> RootCertStore {
     let mut roots = RootCertStore::empty();
     roots.add(certificate(&CA)).unwrap();
     roots
 }
 
-fn mode() -> TlsMode {
+pub(crate) fn mode() -> TlsMode {
     TlsMode::for_test(roots(), None)
 }
 
 /// What the local server answers to one request.
 #[derive(Clone)]
-struct Reply {
-    status: &'static str,
-    headers: &'static str,
-    close: bool,
+pub(crate) struct Reply {
+    pub(crate) status: &'static str,
+    pub(crate) headers: &'static str,
+    pub(crate) close: bool,
 }
 
-const OK: Reply = Reply {
+pub(crate) const OK: Reply = Reply {
     status: "200 OK",
     headers: "",
     close: false,
 };
 
 /// A local TLS server that records what it saw.
-struct Server {
-    port: u16,
+pub(crate) struct Server {
+    pub(crate) port: u16,
     /// TCP connections accepted.
     accepted: Arc<AtomicUsize>,
     /// The kind of each completed TLS handshake.
@@ -247,7 +247,7 @@ struct Server {
 }
 
 impl Server {
-    fn url(&self, path: &str) -> Url {
+    pub(crate) fn url(&self, path: &str) -> Url {
         Url::parse(&format!("https://127.0.0.1:{}{path}", self.port)).unwrap()
     }
     /// A request for the server by a name that is not a loopback name, so
@@ -257,13 +257,13 @@ impl Server {
         let url = format!("https://enclave.test:{}{path}", self.port);
         Request::new(Method::GET, Url::parse(&url).unwrap())
     }
-    fn get(&self, path: &str) -> Request {
+    pub(crate) fn get(&self, path: &str) -> Request {
         Request::new(Method::GET, self.url(path))
     }
-    fn accepted(&self) -> usize {
+    pub(crate) fn accepted(&self) -> usize {
         self.accepted.load(Ordering::SeqCst)
     }
-    fn requests(&self) -> Vec<String> {
+    pub(crate) fn requests(&self) -> Vec<String> {
         self.requests.lock().unwrap().clone()
     }
     fn handshakes(&self) -> Vec<Option<HandshakeKind>> {
@@ -273,7 +273,7 @@ impl Server {
 
 /// A server that presents `leaf` with `key` and answers every request with
 /// `reply`. The response body is the request's path.
-async fn serve(leaf: &[u8], key: &[u8], reply: Reply) -> Server {
+pub(crate) async fn serve(leaf: &[u8], key: &[u8], reply: Reply) -> Server {
     let config = ServerConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()
         .unwrap()
@@ -359,7 +359,7 @@ async fn serve(leaf: &[u8], key: &[u8], reply: Reply) -> Server {
     server
 }
 
-fn evidence(name: &'static str, pinned_leaf: &[u8]) -> Record {
+pub(crate) fn evidence(name: &'static str, pinned_leaf: &[u8]) -> Record {
     Record {
         name,
         tls: Some(fingerprint(pinned_leaf)),
@@ -375,7 +375,7 @@ fn bound_to(pinned_leaf: &[u8]) -> Arc<dyn RoundTrip> {
 
 /// The longest that a test waits for the local server, on real time. A
 /// request that hangs fails its test instead of stalling the run.
-const PATIENCE: Duration = Duration::from_secs(10);
+pub(crate) const PATIENCE: Duration = Duration::from_secs(10);
 
 /// Sending with a limit.
 trait Guarded {
@@ -404,7 +404,7 @@ impl GuardedBody for Response {
 }
 
 /// Waits until `condition` holds; fails the test if it never does.
-async fn eventually(condition: impl Fn() -> bool, what: &str) {
+pub(crate) async fn eventually(condition: impl Fn() -> bool, what: &str) {
     for _ in 0..500 {
         if condition() {
             return;

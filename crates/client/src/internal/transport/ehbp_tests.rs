@@ -33,18 +33,18 @@ type Kem = X25519HkdfSha256;
 type PrivateKey = <Kem as hpke::Kem>::PrivateKey;
 
 /// Bounds a wait that a regression would turn into a hang.
-const PATIENCE: Duration = Duration::from_secs(20);
+pub(crate) const PATIENCE: Duration = Duration::from_secs(20);
 
 // The enclave's side of the protocol.
 
 /// An HPKE key pair.
 #[derive(Clone)]
-struct Key {
+pub(crate) struct Key {
     private: PrivateKey,
-    public_hex: String,
+    pub(crate) public_hex: String,
 }
 
-fn key(seed: u8) -> Key {
+pub(crate) fn key(seed: u8) -> Key {
     let (private, public) = Kem::derive_keypair(&[seed; 32]);
     Key {
         private,
@@ -142,21 +142,21 @@ fn open(key: &Key, encapsulated: Option<&str>, wire: &[u8]) -> Opened {
 
 /// One request as the server received it.
 #[derive(Clone, Debug)]
-struct Seen {
-    method: String,
-    target: String,
+pub(crate) struct Seen {
+    pub(crate) method: String,
+    pub(crate) target: String,
     /// The headers, with their names in lowercase.
-    headers: Vec<(String, String)>,
+    pub(crate) headers: Vec<(String, String)>,
     /// The body as it was on the wire.
-    wire: Vec<u8>,
+    pub(crate) wire: Vec<u8>,
     /// The body after opening; the wire body of a request that was not
     /// sealed.
-    body: Vec<u8>,
-    sealed: bool,
+    pub(crate) body: Vec<u8>,
+    pub(crate) sealed: bool,
 }
 
 impl Seen {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(have, _)| have == name)
@@ -165,7 +165,7 @@ impl Seen {
 }
 
 /// One step of a response body.
-enum Part {
+pub(crate) enum Part {
     /// A frame with this plaintext.
     Data(Vec<u8>),
     /// A frame with this plaintext and one bit of its ciphertext flipped.
@@ -176,12 +176,12 @@ enum Part {
     Wait(Arc<Notify>),
 }
 
-fn data(text: &str) -> Part {
+pub(crate) fn data(text: &str) -> Part {
     Part::Data(text.as_bytes().to_vec())
 }
 
 /// What the response to a sealed request says about its sealing.
-enum NonceHeader {
+pub(crate) enum NonceHeader {
     /// The nonce that the body is sealed under.
     Honest,
     /// No nonce, and the body in plaintext.
@@ -193,7 +193,7 @@ enum NonceHeader {
 }
 
 /// The application's answer to one request.
-struct Reply {
+pub(crate) struct Reply {
     status: u16,
     headers: Vec<(&'static str, String)>,
     parts: Vec<Part>,
@@ -203,7 +203,7 @@ struct Reply {
 }
 
 impl Reply {
-    fn parts(parts: Vec<Part>) -> Self {
+    pub(crate) fn parts(parts: Vec<Part>) -> Self {
         Self {
             status: 200,
             headers: Vec::new(),
@@ -213,33 +213,33 @@ impl Reply {
         }
     }
     /// An answer that never starts.
-    fn never(gate: &Arc<Notify>) -> Self {
+    pub(crate) fn never(gate: &Arc<Notify>) -> Self {
         let mut reply = Self::ok("never");
         reply.hold = Some(Arc::clone(gate));
         reply
     }
-    fn ok(body: &str) -> Self {
+    pub(crate) fn ok(body: &str) -> Self {
         Self::parts(vec![data(body)])
     }
-    fn status(mut self, status: u16) -> Self {
+    pub(crate) fn status(mut self, status: u16) -> Self {
         self.status = status;
         self
     }
-    fn header(mut self, name: &'static str, value: &str) -> Self {
+    pub(crate) fn header(mut self, name: &'static str, value: &str) -> Self {
         self.headers.push((name, value.to_owned()));
         self
     }
-    fn nonce(mut self, nonce: NonceHeader) -> Self {
+    pub(crate) fn nonce(mut self, nonce: NonceHeader) -> Self {
         self.nonce = nonce;
         self
     }
     /// The same answer, never sealed and without a nonce: what a proxy in
     /// front of the enclave would send.
-    fn plaintext(self) -> Self {
+    pub(crate) fn plaintext(self) -> Self {
         self.nonce(NonceHeader::Absent)
     }
     /// The enclave's answer to a body that it cannot open.
-    fn key_mismatch() -> Self {
+    pub(crate) fn key_mismatch() -> Self {
         Self::ok(&format!(
             r#"{{"type":"{}","title":"failed to decrypt request"}}"#,
             tinfoil_ehbp::KEY_CONFIG_PROBLEM_TYPE
@@ -250,21 +250,21 @@ impl Reply {
     }
 }
 
-struct Server {
-    url: Url,
+pub(crate) struct Server {
+    pub(crate) url: Url,
     /// How many connections the server has accepted.
     accepted: Arc<AtomicUsize>,
     seen: Arc<Mutex<Vec<Seen>>>,
 }
 
 impl Server {
-    fn accepted(&self) -> usize {
+    pub(crate) fn accepted(&self) -> usize {
         self.accepted.load(Ordering::SeqCst)
     }
-    fn seen(&self) -> Vec<Seen> {
+    pub(crate) fn seen(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
     }
-    fn url(&self, path: &str) -> Url {
+    pub(crate) fn url(&self, path: &str) -> Url {
         self.url.join(path).expect("url")
     }
 }
@@ -273,7 +273,10 @@ type App = Arc<dyn Fn(&Seen) -> Reply + Send + Sync>;
 
 /// A server that holds `key` and answers each request that it can open
 /// with what `app` returns for it.
-async fn serve(key: &Key, app: impl Fn(&Seen) -> Reply + Send + Sync + 'static) -> Server {
+pub(crate) async fn serve(
+    key: &Key,
+    app: impl Fn(&Seen) -> Reply + Send + Sync + 'static,
+) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let address = listener.local_addr().expect("address");
     let accepted = Arc::new(AtomicUsize::new(0));
@@ -466,11 +469,11 @@ async fn write_reply(
 
 /// The mode. Every server of these tests is on a loopback address, which
 /// no proxy of the test machine applies to.
-fn mode() -> EhbpMode {
+pub(crate) fn mode() -> EhbpMode {
     EhbpMode::new().expect("mode")
 }
 
-fn evidence(name: &'static str, hpke: Option<&str>) -> Record {
+pub(crate) fn evidence(name: &'static str, hpke: Option<&str>) -> Record {
     Record {
         name,
         tls: Some("tls".to_owned()),
@@ -488,11 +491,11 @@ fn bound(key: &Key) -> Arc<dyn RoundTrip> {
     bind(&mode(), Some(&key.public_hex)).expect("bound")
 }
 
-fn get(url: Url) -> Request {
+pub(crate) fn get(url: Url) -> Request {
     Request::new(Method::GET, url)
 }
 
-fn post(url: Url, body: impl Into<reqwest::Body>) -> Request {
+pub(crate) fn post(url: Url, body: impl Into<reqwest::Body>) -> Request {
     let mut request = Request::new(Method::POST, url);
     *request.body_mut() = Some(body.into());
     request

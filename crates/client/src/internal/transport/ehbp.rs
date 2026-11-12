@@ -20,7 +20,7 @@ use crate::internal::transport::{Failure, Mode, RoundTrip};
 
 #[cfg(test)]
 #[path = "ehbp_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 /// The prefix of the header names that belong to the protocol.
 const PROTOCOL_HEADER_PREFIX: &str = "ehbp-";

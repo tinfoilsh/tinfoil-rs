@@ -2440,6 +2440,7 @@ dependencies = [
  "hmac",
  "hpke",
  "http",
+ "http-body",
  "http-body-util",
  "libc",
  "p256",
