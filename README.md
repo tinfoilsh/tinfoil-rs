@@ -146,11 +146,11 @@ The base URL must be absolute and use HTTPS (`http://` is accepted for `localhos
 
 ## What verification covers
 
-A verification passes only if all of the following hold. They are checked offline, against trust anchors that are compiled into the verifier.
+A verification passes only if all of the following hold. They are checked offline. The roots of trust are compiled into the verifier and cannot be replaced: the Sigstore trusted root, and the AMD and Intel roots for the hardware evidence. The rest of the policy has defaults that a `Verifier` of your own can replace: Tinfoil's public keys for config endorsements and for freshness approvals, the public registry as the only accepted config registry, the freshness window, and how a config is authorized (see [Custom verification policy](#custom-verification-policy)).
 
 - **The hardware evidence is authentic.** The AMD SEV-SNP report or Intel TDX quote is signed by a key that chains to the vendor's root, and it satisfies the platform policy.
 - **The evidence answers this request.** The document is bound to a fresh random nonce that the client sent.
-- **The enclave runs what the pin names.** The enclave's measurement matches reference values that are themselves authenticated, through signed endorsements and the Sigstore trusted root, for the repository that the client pins. Without a pin (`None` on an enclave client), the enclave must run a config that Tinfoil's public registry authorizes.
+- **The enclave runs what the pin names.** The enclave's measurement matches reference values that are themselves authenticated, through signed endorsements and the Sigstore trusted root, for the repository that the client pins. Without a pin (`None` on an enclave client), the enclave must run a config that the verifier's policy authorizes, which by default is one that Tinfoil signed into the public registry.
 - **The evidence is fresh.** The signed freshness proofs are no older than the freshness window (seven days by default), and the verification expires when they stop vouching for the document.
 - **The keys belong to the enclave.** The TLS key fingerprint and the HPKE key that the client binds its traffic to are part of what the hardware signed.
 
@@ -194,7 +194,7 @@ async fn connect_pinned(launch_digest: &str) -> Result<RouterHttpClient, Box<dyn
 }
 ```
 
-The verifier has further options, among them your own config signing keys, a config authorizer, and embedded references for a config that you pin yourself; see the documentation of `tinfoil::verifier::VerifierBuilder`. To verify a document that you fetched yourself, call `Verifier::verify_v3`.
+The other options replace a default of the policy: `config_signing_keys` (the keys that config endorsements must be signed with, in place of Tinfoil's), `freshness_signing_keys` (the keys that approve the runtime and the platform policy), `config_registry_ids` (the registries whose config endorsements are accepted, in place of the public one), `config_authorizer` (your own function decides which config is authorized, in place of endorsement verification), and `embedded_references` (reference values that you supply and trust yourself). None of them replaces the Sigstore, AMD or Intel roots. See the documentation of `tinfoil::verifier::VerifierBuilder`. To verify a document that you fetched yourself, call `Verifier::verify_v3`.
 
 ## Error handling
 
@@ -261,7 +261,7 @@ These bounds are fixed:
 
 - A verification that fails with a network or attestation error is tried once more after one second. A configuration error and a rejection by `verification_check` are not tried again. During discovery, each listed router gets a single verification.
 - A request that the enclave rejects because its keys changed is sent once more after a new verification, if its body can be sent again. A streamed body cannot; the OpenAI clients rebuild an upload once.
-- The OpenAI clients send a call again at most twice (three attempts) when the response has status `429` or `5xx`, after a backoff or the response's `Retry-After`. An error of the SDK itself (a refused verification, a refused request, a failed connection, a deadline) is reported once. Nothing is tried again once a stream has started.
+- The OpenAI clients send a call again at most twice (three attempts) when the response has status `429` or `5xx`, after a backoff or the response's `Retry-After`. A `429` whose error is `insufficient_quota` is not tried again. An error of the SDK itself (a refused verification, a refused request, a failed connection, a deadline) is reported once. Nothing is tried again once a stream has started.
 - The HTTP clients do not retry on a status code.
 
 ## More on the OpenAI clients
@@ -316,7 +316,7 @@ cargo fmt --all --check
 
 The code examples of this README are compiled as documentation tests of the `tinfoil` crate.
 
-`conformance/` is a test tool that runs the verifier over shared test vectors; it is not part of a release. `scripts/sync_trust.py` regenerates the trust anchors that are embedded in the verifier.
+`conformance/` is a test tool that runs the verifier over shared test vectors; it is not part of a release. `scripts/sync_trust.py` regenerates the trust material that is embedded in the verifier: the Sigstore, AMD and Intel roots, and Tinfoil's default signing key.
 
 ## Reporting Vulnerabilities
 

@@ -349,7 +349,8 @@ the `tinfoil-verifier` crate:
   is parsed as JSON.
 - **Limits:** a line or an event of more than 16 MiB is an error.
 - **Relaxed calls are tried again** on `429` and `5xx`, at most twice, as
-  typed calls are. Nothing is tried again once a stream has started.
+  typed calls are; a `429` whose error is `insufficient_quota` is not.
+  Nothing is tried again once a stream has started.
 - **Error types:** `create` and `create_stream` return `OpenAIError` (0.2:
   `tinfoil::Error`); a `4xx` response whose body is not an API error object is
   `OpenAIError::JSONDeserialize`. `RelaxedToolCall::arguments` returns
@@ -366,7 +367,8 @@ the `tinfoil-verifier` crate:
 
 ### OpenAI retries
 
-- A `429` or `5xx` response is tried again at most twice. A failure of the
+- A `429` or `5xx` response is tried again at most twice, except a `429` whose
+  error is `insufficient_quota`, which is reported at once. A failure of the
   attested client (verification, connection, deadline) is reported once.
 
 ## New in 0.3
