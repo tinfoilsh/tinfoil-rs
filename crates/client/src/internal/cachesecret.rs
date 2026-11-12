@@ -14,6 +14,14 @@
 //! Steps 3 and 4 apply to the router and gateway routes only: an explicit
 //! enclave does not read the member unless it is a router, so a client for
 //! one sends a secret only when the option is set.
+//!
+//! The stored secret is trusted only as far as the file system shows that
+//! the user put it there. A directory or a file that is a symbolic link,
+//! that is of another kind, that is larger than a secret can be, or that
+//! (on Unix) belongs to another user or is accessible by the group or by
+//! others, is left as it is and not used: someone else could have chosen
+//! or read the secret, and with it the cache scope. The client then uses
+//! a secret of its own for the life of the process.
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -39,16 +47,26 @@ pub(crate) const FILE_NAME: &str = "user_cache_secret";
 #[cfg(windows)]
 const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
+/// The largest file that is read as a secret. A larger one is not a
+/// secret that any Tinfoil SDK wrote, and is refused whole, not cut.
+const MAX_SECRET_BYTES: usize = 4096;
+
+/// The permission bits of the group and of others.
+#[cfg(unix)]
+const GROUP_AND_OTHERS: u32 = 0o077;
+
 /// How many names are tried for the temporary file of a new secret.
 const CANDIDATE_ATTEMPTS: usize = 16;
 
 /// The client-level secret for a router or gateway client: the option when
 /// it is set, then a non-empty environment value, then the stored secret.
 ///
-/// It never fails. Where no secret can be stored (no home directory, a
-/// directory that cannot be created, a file that is not a regular file) it
-/// returns one secret kept for the life of the process, so that the cache
-/// is still scoped but the scope resets when the process exits. `None`
+/// It never fails. Where no secret can be stored or the stored one cannot
+/// be trusted (no home directory, a directory that cannot be created, a
+/// file that is not a regular file, a directory or file that is not
+/// private to the user) it returns one secret kept for the life of the
+/// process, so that the cache is still scoped but the scope resets when
+/// the process exits. `None`
 /// only when the operating system supplies no random bytes; requests then
 /// carry no secret.
 ///
@@ -110,7 +128,11 @@ fn process_secret() -> Option<Secret> {
 /// - The file is read only if it is a regular file, checked without
 ///   following a symbolic link and again on the open handle. Its content
 ///   is the secret, with surrounding whitespace removed; it must be valid
-///   UTF-8 and not empty.
+///   UTF-8, not empty, and no longer than [`MAX_SECRET_BYTES`].
+/// - On Unix, a directory or a file that exists must belong to the user
+///   that the process acts as, and must grant nothing to the group or to
+///   others ([`check_private`]). One that does not is refused: it is not
+///   read, not replaced and not repaired.
 /// - A new secret is 32 random bytes in lowercase hexadecimal. It is
 ///   written to a temporary file with mode `0600` in the same directory and
 ///   then hard-linked to the final name, which fails if the name exists:
@@ -152,16 +174,56 @@ pub(crate) fn generate() -> Option<Secret> {
     Some(Secret::new(lower_hex(&bytes)))
 }
 
-/// An error unless `dir` is a directory, judged without following a
-/// symbolic link.
+/// An error unless `dir` is a directory that is private to the user,
+/// judged without following a symbolic link.
 fn check_dir(dir: &Path) -> io::Result<()> {
-    if fs::symlink_metadata(dir)?.is_dir() {
+    let metadata = fs::symlink_metadata(dir)?;
+    if !metadata.is_dir() {
+        return Err(io::Error::other(
+            "the user cache secret directory is not a directory",
+        ));
+    }
+    check_private(&metadata)
+}
+
+/// An error unless the file or directory that `metadata` describes
+/// belongs to the user that the process acts as and grants no access to
+/// the group or to others. Anyone else who could write it could choose
+/// the user's cache scope, and anyone else who could read it could join
+/// that scope.
+#[cfg(unix)]
+fn check_private(metadata: &fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if is_private(metadata.mode(), metadata.uid(), current_user()?) {
         Ok(())
     } else {
         Err(io::Error::other(
-            "the user cache secret directory is not a directory",
+            "the user cache secret is not private to the current user",
         ))
     }
+}
+
+/// Where there are no owners and modes, there is nothing to check.
+#[cfg(not(unix))]
+fn check_private(_: &fs::Metadata) -> io::Result<()> {
+    Ok(())
+}
+
+/// Whether a file with `mode` that `owner` owns is private to `user`.
+#[cfg(unix)]
+fn is_private(mode: u32, owner: u32, user: u32) -> bool {
+    owner == user && mode & GROUP_AND_OTHERS == 0
+}
+
+/// The user that the process acts as: the owner of a pipe that it has
+/// just made, which the system assigns from the effective user. Nothing
+/// is written to the file system.
+#[cfg(unix)]
+fn current_user() -> io::Result<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let (reader, _writer) = io::pipe()?;
+    let pipe = File::from(std::os::fd::OwnedFd::from(reader));
+    Ok(pipe.metadata()?.uid())
 }
 
 /// Makes sure that `dir` is a directory, creating it, and its parents,
@@ -182,8 +244,9 @@ fn ensure_dir(dir: &Path) -> io::Result<()> {
 
 /// The secret in the file at `path`: `Some` when the file holds one, `None`
 /// when it holds only whitespace. A missing file is the error
-/// `NotFound`; a path that is not a regular file, and content that is not
-/// UTF-8, are other errors.
+/// `NotFound`; a path that is not a regular file, a file that is not
+/// private to the user, one that is longer than [`MAX_SECRET_BYTES`], and
+/// content that is not UTF-8, are other errors.
 fn read_secret(path: &Path) -> io::Result<Option<Secret>> {
     let not_regular = || io::Error::other("the user cache secret path is not a regular file");
     if !fs::symlink_metadata(path)?.is_file() {
@@ -199,12 +262,23 @@ fn read_secret(path: &Path) -> io::Result<Option<Secret>> {
     // the check of the open handle below then refuses it.
     #[cfg(windows)]
     std::os::windows::fs::OpenOptionsExt::custom_flags(&mut options, OPEN_REPARSE_POINT);
-    let mut file = options.open(path)?;
-    if !file.metadata()?.is_file() {
+    let file = options.open(path)?;
+    // Judged on the open handle: what is read is what was checked.
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(not_regular());
     }
+    check_private(&metadata)?;
+    // One byte more than the limit is asked for, to tell a file of
+    // exactly the limit from a longer one.
+    let limit = u64::try_from(MAX_SECRET_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
     let mut content = Vec::new();
-    file.read_to_end(&mut content)?;
+    file.take(limit).read_to_end(&mut content)?;
+    if content.len() > MAX_SECRET_BYTES {
+        return Err(io::Error::other("the user cache secret file is too large"));
+    }
     let text = String::from_utf8(content)
         .map_err(|_| io::Error::other("the user cache secret is not valid UTF-8"))?;
     let secret = text.trim();
@@ -270,9 +344,26 @@ mod tests {
         fn file(&self) -> PathBuf {
             self.dir().join(FILE_NAME)
         }
+        /// Stores `content` as the secret, private to the user as a
+        /// stored secret is.
         fn store(&self, content: &[u8]) {
             fs::create_dir_all(self.dir()).unwrap();
             fs::write(self.file(), content).unwrap();
+            #[cfg(unix)]
+            {
+                self.chmod(self.dir(), 0o700);
+                self.chmod(self.file(), 0o600);
+            }
+        }
+        #[cfg(unix)]
+        fn chmod(&self, path: PathBuf, mode: u32) {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        #[cfg(unix)]
+        fn mode(&self, path: PathBuf) -> u32 {
+            use std::os::unix::fs::PermissionsExt;
+            fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
         }
     }
 
@@ -366,6 +457,104 @@ mod tests {
     }
 
     #[test]
+    fn a_file_longer_than_a_secret_can_be_is_refused_whole() {
+        let home = Home::new();
+        // At the limit, with the whitespace that is trimmed.
+        let mut longest = vec![b'a'; MAX_SECRET_BYTES - 1];
+        longest.push(b'\n');
+        home.store(&longest);
+        let read = exposed(load_or_generate(&home.0)).unwrap();
+        assert_eq!(read.len(), MAX_SECRET_BYTES - 1);
+
+        // One byte more: not a shorter secret, and not replaced.
+        for size in [MAX_SECRET_BYTES + 1, MAX_SECRET_BYTES * 64] {
+            let large = vec![b'a'; size];
+            home.store(&large);
+            assert!(load_or_generate(&home.0).is_none(), "{size}");
+            assert_eq!(fs::read(home.file()).unwrap().len(), size);
+            // The client falls back to the secret of the process.
+            let fallback = exposed(resolve_from(None, None, Some(home.0.clone()))).unwrap();
+            assert!(is_generated(&fallback), "{size}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_the_group_or_others_can_access_is_refused_and_left_as_it_is() {
+        for mode in [0o640, 0o604, 0o660, 0o606, 0o620, 0o602, 0o610, 0o601, 0o644, 0o666, 0o777] {
+            let home = Home::new();
+            home.store(b"planted");
+            home.chmod(home.file(), mode);
+            assert!(load_or_generate(&home.0).is_none(), "{mode:o}");
+            assert_eq!(home.mode(home.file()), mode);
+            assert_eq!(fs::read(home.file()).unwrap(), b"planted");
+            // The client still scopes the cache, with a secret of its own.
+            let fallback = exposed(resolve_from(None, None, Some(home.0.clone()))).unwrap();
+            assert!(is_generated(&fallback), "{mode:o}");
+        }
+        // Private modes are read.
+        for mode in [0o600, 0o400, 0o700] {
+            let home = Home::new();
+            home.store(b"stored");
+            home.chmod(home.file(), mode);
+            let read = exposed(load_or_generate(&home.0));
+            assert_eq!(read.as_deref(), Some("stored"), "{mode:o}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_the_group_or_others_can_access_is_refused_and_left_as_it_is() {
+        for mode in [0o750, 0o705, 0o770, 0o707, 0o755, 0o777, 0o1777, 0o710, 0o701] {
+            // With a secret in it.
+            let home = Home::new();
+            home.store(b"planted");
+            home.chmod(home.dir(), mode);
+            assert!(load_or_generate(&home.0).is_none(), "{mode:o}");
+            assert_eq!(home.mode(home.dir()), mode);
+
+            // Empty: no secret is stored in it either.
+            let home = Home::new();
+            fs::create_dir(home.dir()).unwrap();
+            home.chmod(home.dir(), mode);
+            assert!(load_or_generate(&home.0).is_none(), "{mode:o}");
+            assert!(!home.file().exists(), "{mode:o}");
+            assert_eq!(fs::read_dir(home.dir()).unwrap().count(), 0, "{mode:o}");
+        }
+        // A private directory that exists is used.
+        let home = Home::new();
+        fs::create_dir(home.dir()).unwrap();
+        home.chmod(home.dir(), 0o700);
+        let stored = exposed(load_or_generate(&home.0)).unwrap();
+        assert_eq!(fs::read_to_string(home.file()).unwrap(), stored);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_the_current_users_own_files_are_private() {
+        use std::os::unix::fs::MetadataExt;
+        // The user that the process acts as owns what it creates.
+        let home = Home::new();
+        home.store(b"stored");
+        let owner = fs::metadata(home.file()).unwrap().uid();
+        assert_eq!(current_user().unwrap(), owner);
+        assert_eq!(fs::metadata(&home.0).unwrap().uid(), owner);
+
+        assert!(is_private(0o100600, owner, owner));
+        assert!(is_private(0o040700, owner, owner));
+        // Another owner, the administrator included, whatever the mode.
+        for other in [owner.wrapping_add(1), 0, u32::MAX] {
+            if other != owner {
+                assert!(!is_private(0o100600, other, owner), "{other}");
+                assert!(!is_private(0o100400, other, owner), "{other}");
+            }
+        }
+        for mode in [0o100640, 0o100604, 0o100601, 0o040750, 0o040701] {
+            assert!(!is_private(mode, owner, owner), "{mode:o}");
+        }
+    }
+
+    #[test]
     fn a_path_that_is_not_a_directory_or_not_a_regular_file_is_refused() {
         // The directory's name is taken by a file.
         let home = Home::new();
@@ -375,6 +564,11 @@ mod tests {
         // The file's name is taken by a directory.
         let home = Home::new();
         fs::create_dir_all(home.file()).unwrap();
+        #[cfg(unix)]
+        {
+            home.chmod(home.dir(), 0o700);
+            home.chmod(home.file(), 0o700);
+        }
         assert!(load_or_generate(&home.0).is_none());
     }
 
@@ -392,6 +586,7 @@ mod tests {
 
         let home = Home::new();
         fs::create_dir(home.dir()).unwrap();
+        home.chmod(home.dir(), 0o700);
         symlink(elsewhere.file(), home.file()).unwrap();
         assert!(load_or_generate(&home.0).is_none());
         // And the link is still a link: nothing was written through it.
@@ -400,6 +595,7 @@ mod tests {
         // A link that leads nowhere is not a missing file either.
         let home = Home::new();
         fs::create_dir(home.dir()).unwrap();
+        home.chmod(home.dir(), 0o700);
         symlink(home.0.join("missing"), home.file()).unwrap();
         assert!(load_or_generate(&home.0).is_none());
         assert!(!home.0.join("missing").exists());

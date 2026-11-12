@@ -180,6 +180,17 @@ impl RouterHttpClientBuilder {
     /// `0700`) and which the other Tinfoil SDKs on the machine share. This
     /// is the only place where a client reads the environment or the file
     /// system.
+    ///
+    /// A stored secret is used only if the file system shows that it is
+    /// the user's own. The file or its directory is left untouched and
+    /// not used when it is a symbolic link or not a regular file or
+    /// directory, when the file is larger than 4 KiB or holds no secret,
+    /// and, on Unix, when either belongs to another user or grants any
+    /// access to the group or to others. The client then uses a random
+    /// secret that lasts for the process, so its requests are still
+    /// scoped, but share no cache with other processes; `connect` does
+    /// not fail. Restore the modes `0700` and `0600`, or remove the file,
+    /// to get a stored secret again.
     pub fn user_cache_secret(mut self, secret: impl Into<String>) -> Self {
         self.options.common.user_cache_secret = Some(Secret::new(secret));
         self

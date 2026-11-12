@@ -334,6 +334,10 @@ the `tinfoil-verifier` crate:
 - When the option is unset, **router clients** resolve the secret as before:
   `TINFOIL_USER_CACHE_SECRET`, then `~/.tinfoil/user_cache_secret`, created on
   first use. **Enclave clients add no secret** unless the option is set.
+- On Unix the stored secret is used only if the file and `~/.tinfoil` belong
+  to the current user and grant nothing to the group or to others (`0600` in
+  `0700`, as the SDKs create them), and only if the file is at most 4 KiB.
+  Otherwise the client uses a random secret for the life of the process.
 - The secret is added to the JSON body of `POST` requests to
   `…/chat/completions`, `…/completions` and `…/responses`, also for requests
   that you send through the HTTP clients. A non-empty `user_cache_secret` in

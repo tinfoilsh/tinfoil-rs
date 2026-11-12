@@ -275,7 +275,7 @@ These bounds are fixed:
 - `tinfoil::multimodal` builds image and audio content parts from files and bytes.
 - `tinfoil::sse::parse_event_stream` is the bounded server-sent-event parser, for streaming endpoints that you call through an HTTP client.
 
-**Prompt caching.** Multi-user services must scope prompt caches to each end user: set `user_cache_secret(..)` on the builder, or a `user_cache_secret` member in a request's JSON body, which wins. When the option is unset, the router clients take the secret from `TINFOIL_USER_CACHE_SECRET` or from `~/.tinfoil/user_cache_secret`, which they create on first use; the enclave clients add nothing. See [Prompt caching](https://docs.tinfoil.sh/sdk/prompt-caching).
+**Prompt caching.** Multi-user services must scope prompt caches to each end user: set `user_cache_secret(..)` on the builder, or a `user_cache_secret` member in a request's JSON body, which wins. When the option is unset, the router clients take the secret from `TINFOIL_USER_CACHE_SECRET` or from `~/.tinfoil/user_cache_secret`, which they create on first use (mode `0600`, in a directory of mode `0700`); the enclave clients add nothing. A stored secret that is not the user's own is not used: a file or directory that is a symbolic link, a file larger than 4 KiB, and on Unix a file or directory that belongs to another user or that the group or others can access. The client leaves it as it is and uses a random secret for the life of the process instead. See [Prompt caching](https://docs.tinfoil.sh/sdk/prompt-caching).
 
 ## Cargo features
 
