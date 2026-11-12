@@ -4,7 +4,7 @@
 use tinfoil_verifier::conformance::endorsement::approval::verify_approval_timestamp;
 use tinfoil_verifier::conformance::endorsement::approval_window;
 
-use super::{accepted, appraisal_time, rejected, trusted_root};
+use super::{accepted, appraisal_time, is_unset_clock, rejected, trusted_root};
 use crate::{
     AcceptOutputs, CODE_PROVENANCE_REJECTED, Input, Output, STAGE_VERIFY_TIMESTAMP, decode_base64,
     malformed,
@@ -12,12 +12,12 @@ use crate::{
 
 /// Runs the stage.
 ///
-/// An input without an appraisal time, fields that do not decode and a
-/// trusted root that is not one are malformed input; everything about the
-/// response is a rejection.
+/// An input without an appraisal time or with that of an unset clock,
+/// fields that do not decode and a trusted root that is not one are
+/// malformed input; everything about the response is a rejection.
 pub(crate) fn run(input: &Input) -> (Output, i32) {
     let stage = STAGE_VERIFY_TIMESTAMP;
-    let Some(now) = appraisal_time(input) else {
+    let Some(now) = appraisal_time(input).filter(|_| !is_unset_clock(input)) else {
         return malformed(stage);
     };
     let Some(response) = decode_base64(&input.timestamp_response_b64) else {
@@ -29,8 +29,9 @@ pub(crate) fn run(input: &Input) -> (Output, i32) {
     let Some(root) = trusted_root(input) else {
         return malformed(stage);
     };
+    // No timestamp falls in a window that has no representable ends.
     let Ok(window) = approval_window(now, None, None) else {
-        return malformed(stage);
+        return rejected(stage, CODE_PROVENANCE_REJECTED);
     };
     match verify_approval_timestamp(&root, &response, &covered, &window) {
         Ok(at) => accepted(

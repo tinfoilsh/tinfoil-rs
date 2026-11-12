@@ -57,7 +57,12 @@ pub(crate) fn run(input: &Input) -> (Output, i32) {
     if trusted_root(input).is_none() {
         return malformed(stage);
     }
-    let now = appraisal_time(input).or_else(|| Instant::from_system_time(SystemTime::now()));
+    // Only an input that states no time is appraised now.
+    let now = if input.verification_time_unix == 0 {
+        Instant::from_system_time(SystemTime::now())
+    } else {
+        appraisal_time(input)
+    };
     let Some(now) = now else {
         return malformed(stage);
     };

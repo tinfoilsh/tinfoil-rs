@@ -120,8 +120,9 @@ pub struct Input {
     /// The Sigstore trusted-root JSON, base64.
     pub sigstore_trusted_root_json_b64: String,
 
-    /// The appraisal time in seconds since the epoch; zero means now.
-    pub verification_time_unix: u64,
+    /// The appraisal time in seconds since the epoch, before it when
+    /// negative; zero means now.
+    pub verification_time_unix: i64,
 }
 
 /// The stdout JSON of one adapter run.
@@ -387,12 +388,16 @@ mod tests {
                 r#"{"schema_version":"1","signing_keys_pem":"x"}"#,
             ),
             (
-                "negative time",
-                r#"{"schema_version":"1","verification_time_unix":-1}"#,
-            ),
-            (
                 "fractional time",
                 r#"{"schema_version":"1","verification_time_unix":1.5}"#,
+            ),
+            (
+                "time above a signed 64-bit integer",
+                r#"{"schema_version":"1","verification_time_unix":9223372036854775808}"#,
+            ),
+            (
+                "time below a signed 64-bit integer",
+                r#"{"schema_version":"1","verification_time_unix":-9223372036854775809}"#,
             ),
         ];
         for (name, input) in cases {
