@@ -166,7 +166,7 @@ impl<V: Evidence> AttestedClient<V> {
     }
 
     /// The `timeout` option.
-    #[cfg(any(test, feature = "openai"))]
+    #[cfg(feature = "openai")]
     pub(crate) fn timeout(&self) -> Option<Duration> {
         self.timeout
     }

@@ -23,16 +23,43 @@ fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
 #[test]
 fn an_http_date_is_read_in_the_preferred_format_only() {
     assert_eq!(http_date("Thu, 01 Jan 1970 00:00:00 GMT"), Some(at(0)));
-    assert_eq!(http_date("Sun, 06 Nov 1994 08:49:37 GMT"), Some(at(784_111_777)));
-    assert_eq!(http_date("Fri, 15 Jan 2027 08:00:00 GMT"), Some(at(1_800_000_000)));
-    assert_eq!(http_date("Fri, 15 Jan 2027 08:00:00 UTC"), Some(at(1_800_000_000)));
+    assert_eq!(
+        http_date("Sun, 06 Nov 1994 08:49:37 GMT"),
+        Some(at(784_111_777))
+    );
+    assert_eq!(
+        http_date("Fri, 15 Jan 2027 08:00:00 GMT"),
+        Some(at(1_800_000_000))
+    );
+    assert_eq!(
+        http_date("Fri, 15 Jan 2027 08:00:00 UTC"),
+        Some(at(1_800_000_000))
+    );
     // The leap day, the day after it, and the turn of a year.
-    assert_eq!(http_date("Thu, 29 Feb 2024 12:00:00 GMT"), Some(at(1_709_208_000)));
-    assert_eq!(http_date("Fri, 01 Mar 2024 00:00:00 GMT"), Some(at(1_709_251_200)));
-    assert_eq!(http_date("Wed, 31 Dec 2025 23:59:59 GMT"), Some(at(1_767_225_599)));
-    assert_eq!(http_date("Thu, 01 Jan 2026 00:00:00 GMT"), Some(at(1_767_225_600)));
-    assert_eq!(http_date("Sat, 01 Jan 2000 00:00:00 GMT"), Some(at(946_684_800)));
-    assert_eq!(http_date("Fri, 31 Dec 9999 23:59:59 GMT"), Some(at(253_402_300_799)));
+    assert_eq!(
+        http_date("Thu, 29 Feb 2024 12:00:00 GMT"),
+        Some(at(1_709_208_000))
+    );
+    assert_eq!(
+        http_date("Fri, 01 Mar 2024 00:00:00 GMT"),
+        Some(at(1_709_251_200))
+    );
+    assert_eq!(
+        http_date("Wed, 31 Dec 2025 23:59:59 GMT"),
+        Some(at(1_767_225_599))
+    );
+    assert_eq!(
+        http_date("Thu, 01 Jan 2026 00:00:00 GMT"),
+        Some(at(1_767_225_600))
+    );
+    assert_eq!(
+        http_date("Sat, 01 Jan 2000 00:00:00 GMT"),
+        Some(at(946_684_800))
+    );
+    assert_eq!(
+        http_date("Fri, 31 Dec 9999 23:59:59 GMT"),
+        Some(at(253_402_300_799))
+    );
 
     for unread in [
         "",
@@ -75,24 +102,48 @@ fn a_wait_is_read_from_the_headers_against_the_limit() {
     assert_eq!(ask(&[("retry-after-ms", "120000")]), wait(120_000));
     assert_eq!(ask(&[("retry-after", "-0")]), wait(0));
     // The first value of a repeated header.
-    assert_eq!(ask(&[("retry-after", "3"), ("retry-after", "9")]), wait(3_000));
+    assert_eq!(
+        ask(&[("retry-after", "3"), ("retry-after", "9")]),
+        wait(3_000)
+    );
 
-    for too_long in ["120.5", "121", "1e9", "1e400", "inf", "+infinity", "4000000000"] {
-        assert_eq!(ask(&[("retry-after", too_long)]), Some(Asked::TooLong), "{too_long}");
+    for too_long in [
+        "120.5",
+        "121",
+        "1e9",
+        "1e400",
+        "inf",
+        "+infinity",
+        "4000000000",
+    ] {
+        assert_eq!(
+            ask(&[("retry-after", too_long)]),
+            Some(Asked::TooLong),
+            "{too_long}"
+        );
     }
     for ignored in ["-1", "-inf", "nan", "NaN", "soon", "1 2", "1s", ""] {
         assert_eq!(ask(&[("retry-after", ignored)]), None, "{ignored:?}");
         assert_eq!(ask(&[("retry-after-ms", ignored)]), None, "{ignored:?}");
     }
 
-    assert_eq!(ask(&[("retry-after", "Fri, 15 Jan 2027 08:02:00 GMT")]), wait(120_000));
+    assert_eq!(
+        ask(&[("retry-after", "Fri, 15 Jan 2027 08:02:00 GMT")]),
+        wait(120_000)
+    );
     assert_eq!(
         ask(&[("retry-after", "Fri, 15 Jan 2027 08:02:01 GMT")]),
         Some(Asked::TooLong)
     );
-    assert_eq!(ask(&[("retry-after", "Fri, 15 Jan 2027 07:00:00 GMT")]), wait(0));
+    assert_eq!(
+        ask(&[("retry-after", "Fri, 15 Jan 2027 07:00:00 GMT")]),
+        wait(0)
+    );
     // A date is not a number of milliseconds.
-    assert_eq!(ask(&[("retry-after-ms", "Fri, 15 Jan 2027 08:02:00 GMT")]), None);
+    assert_eq!(
+        ask(&[("retry-after-ms", "Fri, 15 Jan 2027 08:02:00 GMT")]),
+        None
+    );
 }
 
 #[test]
@@ -105,14 +156,20 @@ fn the_backoff_doubles_to_its_ceiling_and_is_shortened_by_less_than_a_quarter() 
 
     let wait = Duration::from_secs(1);
     assert_eq!(shortened(wait, 0), wait);
-    assert_eq!(shortened(wait, 249_999_999), Duration::from_nanos(750_000_001));
+    assert_eq!(
+        shortened(wait, 249_999_999),
+        Duration::from_nanos(750_000_001)
+    );
     assert_eq!(shortened(wait, 250_000_000), wait);
     for random in [1, 7, u64::MAX, u64::MAX / 3] {
         let shortened = shortened(wait, random);
         assert!(shortened > Duration::from_millis(750) && shortened <= wait);
     }
     // Too short to have a quarter.
-    assert_eq!(shortened(Duration::from_nanos(3), 99), Duration::from_nanos(3));
+    assert_eq!(
+        shortened(Duration::from_nanos(3), 99),
+        Duration::from_nanos(3)
+    );
     assert_eq!(shortened(Duration::ZERO, 99), Duration::ZERO);
 }
 

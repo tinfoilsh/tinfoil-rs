@@ -340,10 +340,7 @@ async fn a_server_that_speaks_tls_1_2_only_is_pinned_like_any_other() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.body().await.unwrap(), "/v1/models");
-    assert_eq!(
-        server.versions(),
-        [Some(rustls::ProtocolVersion::TLSv1_2)]
-    );
+    assert_eq!(server.versions(), [Some(rustls::ProtocolVersion::TLSv1_2)]);
 
     // Another key under the same version: refused in the handshake, as a
     // key failure, before any request.
@@ -371,7 +368,11 @@ async fn a_server_that_speaks_tls_1_2_only_is_pinned_like_any_other() {
         .await
         .unwrap_err();
     assert_eq!(failure.key, KeyFailure::PeerLacksKey);
-    assert!(failure.error.to_string().contains("Expired"), "{}", failure.error);
+    assert!(
+        failure.error.to_string().contains("Expired"),
+        "{}",
+        failure.error
+    );
     assert!(server.requests().is_empty());
 }
 

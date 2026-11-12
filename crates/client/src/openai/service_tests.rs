@@ -513,7 +513,10 @@ async fn a_wait_never_outlasts_the_timeout_option() {
         ] {
             let (waited, sent, result) = retried_after(five, 503, header).await;
             assert_eq!((waited, sent), (Duration::ZERO, 1), "{header:?}");
-            assert!(matches!(result, Err(OpenAIError::ApiError(_))), "{header:?}");
+            assert!(
+                matches!(result, Err(OpenAIError::ApiError(_))),
+                "{header:?}"
+            );
         }
         // The backoff is cut to the timeout.
         let brief = Some(Duration::from_millis(100));
@@ -596,12 +599,18 @@ async fn milliseconds_are_preferred_and_a_bad_value_falls_through_to_the_seconds
             let result = f.openai.chat().create(chat_request()).await.map(|_| ());
             (started.elapsed(), f.sent().len(), result.is_ok())
         };
-        assert_eq!(both("300", "9").await, (Duration::from_millis(300), 2, true));
+        assert_eq!(
+            both("300", "9").await,
+            (Duration::from_millis(300), 2, true)
+        );
         assert_eq!(both("-1", "9").await, (Duration::from_secs(9), 2, true));
         assert_eq!(both("soon", "9").await, (Duration::from_secs(9), 2, true));
         // Too long in the preferred header: the other is not consulted.
         assert_eq!(both("120001", "1").await, (Duration::ZERO, 1, false));
-        assert_eq!(both("1", "4000000000").await, (Duration::from_millis(1), 2, true));
+        assert_eq!(
+            both("1", "4000000000").await,
+            (Duration::from_millis(1), 2, true)
+        );
     })
     .await
 }
@@ -652,7 +661,10 @@ async fn a_relaxed_request_obeys_the_same_bounds_on_its_waits() {
             (started.elapsed(), f.sent().len(), result.is_ok())
         };
         assert_eq!(relaxed(None, "7").await, (Duration::from_secs(7), 2, true));
-        assert_eq!(relaxed(None, "4000000000").await, (Duration::ZERO, 1, false));
+        assert_eq!(
+            relaxed(None, "4000000000").await,
+            (Duration::ZERO, 1, false)
+        );
         assert_eq!(relaxed(None, "-3").await.1, 2);
         let five = Some(Duration::from_secs(5));
         assert_eq!(relaxed(five, "6").await, (Duration::ZERO, 1, false));
@@ -663,7 +675,11 @@ async fn a_relaxed_request_obeys_the_same_bounds_on_its_waits() {
         })
         .await;
         let started = tokio::time::Instant::now();
-        let result = f.openai.relaxed().create_stream(serde_json::json!({})).await;
+        let result = f
+            .openai
+            .relaxed()
+            .create_stream(serde_json::json!({}))
+            .await;
         assert!(matches!(result, Err(OpenAIError::ApiError(_))));
         assert_eq!((started.elapsed(), f.sent().len()), (Duration::ZERO, 1));
     })

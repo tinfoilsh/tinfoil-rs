@@ -481,7 +481,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_file_that_the_group_or_others_can_access_is_refused_and_left_as_it_is() {
-        for mode in [0o640, 0o604, 0o660, 0o606, 0o620, 0o602, 0o610, 0o601, 0o644, 0o666, 0o777] {
+        for mode in [
+            0o640, 0o604, 0o660, 0o606, 0o620, 0o602, 0o610, 0o601, 0o644, 0o666, 0o777,
+        ] {
             let home = Home::new();
             home.store(b"planted");
             home.chmod(home.file(), mode);
@@ -505,7 +507,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_directory_that_the_group_or_others_can_access_is_refused_and_left_as_it_is() {
-        for mode in [0o750, 0o705, 0o770, 0o707, 0o755, 0o777, 0o1777, 0o710, 0o701] {
+        for mode in [
+            0o750, 0o705, 0o770, 0o707, 0o755, 0o777, 0o1777, 0o710, 0o701,
+        ] {
             // With a secret in it.
             let home = Home::new();
             home.store(b"planted");

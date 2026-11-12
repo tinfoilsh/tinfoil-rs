@@ -543,7 +543,10 @@ async fn a_check_that_panics_fails_the_shared_verification_for_every_waiter_and_
     assert_eq!(mode.bound(), ["a"]);
 
     // The transport is as usable as after any failed verification.
-    assert_eq!(transport.ensure_verified().await.expect("verified").name, "c");
+    assert_eq!(
+        transport.ensure_verified().await.expect("verified").name,
+        "c"
+    );
     assert_eq!(served_by(&transport).await, "c");
     assert_eq!(script.calls(), 3);
 }
