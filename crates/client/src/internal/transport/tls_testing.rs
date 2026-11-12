@@ -189,6 +189,26 @@ pub(crate) mod made {
         let other = GeneralName::DnsName(Ia5String::new("other.example").unwrap());
         leaf(&SERVER_KEY_A, TRUSTED, &TRUSTED_KEY, vec![other], LONG)
     });
+    /// Key A, under the trusted authority, for the address 127.0.0.1 and
+    /// for no name.
+    pub(crate) static LEAF_A_ADDRESS_ONLY: LazyLock<Vec<u8>> = LazyLock::new(|| {
+        let address = GeneralName::IpAddress(OctetString::new([127, 0, 0, 1]).unwrap());
+        leaf(&SERVER_KEY_A, TRUSTED, &TRUSTED_KEY, vec![address], LONG)
+    });
+    /// Key A, under the trusted authority, for another address.
+    pub(crate) static LEAF_A_OTHER_ADDRESS: LazyLock<Vec<u8>> = LazyLock::new(|| {
+        let address = GeneralName::IpAddress(OctetString::new([127, 0, 0, 2]).unwrap());
+        leaf(&SERVER_KEY_A, TRUSTED, &TRUSTED_KEY, vec![address], LONG)
+    });
+    /// Key A, under the trusted authority, for the names of the local
+    /// server and for no address.
+    pub(crate) static LEAF_A_NAMES_ONLY: LazyLock<Vec<u8>> = LazyLock::new(|| {
+        let names = vec![
+            GeneralName::DnsName(Ia5String::new("localhost").unwrap()),
+            GeneralName::DnsName(Ia5String::new("127.0.0.1").unwrap()),
+        ];
+        leaf(&SERVER_KEY_A, TRUSTED, &TRUSTED_KEY, names, LONG)
+    });
     /// Key A, for 127.0.0.1, under the trusted authority, expired in 2020.
     pub(crate) static LEAF_A_EXPIRED: LazyLock<Vec<u8>> = LazyLock::new(|| {
         let one_day = (YEAR_2020, YEAR_2020 + DAY);
@@ -244,6 +264,8 @@ pub(crate) enum Protocols {
     Both,
     /// HTTP/1.1 only.
     Http1Only,
+    /// HTTP/2 and HTTP/1.1, over TLS 1.2 and no later version.
+    BothOverTls12,
 }
 
 /// A local TLS server and what it saw.
@@ -258,6 +280,8 @@ pub(crate) struct Server {
     /// The kind of each completed handshake and the protocol that it
     /// settled on.
     handshakes: Mutex<Vec<(Option<HandshakeKind>, Option<String>)>>,
+    /// The TLS version of each completed handshake.
+    versions: Mutex<Vec<Option<rustls::ProtocolVersion>>>,
     seen: Mutex<Vec<Seen>>,
     /// Connections that have ended, whether they were served or their
     /// handshake failed.
@@ -276,6 +300,9 @@ impl Server {
     }
     pub(crate) fn handshakes(&self) -> Vec<(Option<HandshakeKind>, Option<String>)> {
         self.handshakes.lock().unwrap().clone()
+    }
+    pub(crate) fn versions(&self) -> Vec<Option<rustls::ProtocolVersion>> {
+        self.versions.lock().unwrap().clone()
     }
     pub(crate) fn seen(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
@@ -298,8 +325,12 @@ pub(crate) async fn serve(
     handler: Handler,
 ) -> Arc<Server> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let versions: &[&rustls::SupportedProtocolVersion] = match protocols {
+        Protocols::BothOverTls12 => &[&rustls::version::TLS12],
+        Protocols::Both | Protocols::Http1Only => rustls::DEFAULT_VERSIONS,
+    };
     let mut config = ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
+        .with_protocol_versions(versions)
         .unwrap()
         .with_no_client_auth()
         .with_single_cert(
@@ -308,7 +339,7 @@ pub(crate) async fn serve(
         )
         .unwrap();
     config.alpn_protocols = match protocols {
-        Protocols::Both => vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+        Protocols::Both | Protocols::BothOverTls12 => vec![b"h2".to_vec(), b"http/1.1".to_vec()],
         Protocols::Http1Only => vec![b"http/1.1".to_vec()],
     };
     let config = Arc::new(config);
@@ -352,6 +383,11 @@ pub(crate) async fn serve(
                         return;
                     };
                     let session = stream.get_ref().1;
+                    state
+                        .versions
+                        .lock()
+                        .unwrap()
+                        .push(session.protocol_version());
                     state.handshakes.lock().unwrap().push((
                         session.handshake_kind(),
                         session

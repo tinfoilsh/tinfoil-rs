@@ -16,7 +16,7 @@ use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
 use hpke::{Deserializable, Kem as _, OpModeR, Serializable, setup_receiver};
 use reqwest::header::{HeaderName, HeaderValue};
-use reqwest::{Method, Request, Response, Url};
+use reqwest::{Method, Request, Response, StatusCode, Url};
 use tinfoil_ehbp::Code;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -174,6 +174,10 @@ pub(crate) enum Part {
     Cut(Vec<u8>),
     /// Send nothing until the notify is signalled.
     Wait(Arc<Notify>),
+    /// A frame with this plaintext that the enclave sealed and that never
+    /// arrives: whoever carries the response ends it, as a well-formed
+    /// HTTP body, before this frame.
+    Withheld(Vec<u8>),
 }
 
 pub(crate) fn data(text: &str) -> Part {
@@ -434,6 +438,12 @@ async fn write_reply(
             (Part::Wait(gate), _) => {
                 gate.notified().await;
                 continue;
+            }
+            (Part::Withheld(plain), sealer) => {
+                if let Some(sealer) = sealer {
+                    sealer.frame(&plain);
+                }
+                break;
             }
             (Part::Data(plain) | Part::Tampered(plain) | Part::Cut(plain), None) => plain,
             (Part::Data(plain), Some(sealer)) => sealer.frame(&plain),
@@ -1226,6 +1236,62 @@ async fn a_tampered_frame_fails_the_body_and_releases_nothing_after_it() {
     // arrives.
     let after = next_chunk(&mut response).await;
     assert!(!matches!(after, Ok(Some(_))), "{after:?}");
+}
+
+// Limits of the protocol. The frames of a sealed response authenticate
+// their content and their order, and nothing marks the last one. These
+// tests record what follows from that, so that a version of the protocol
+// that authenticates the end of a response has to change them.
+
+#[tokio::test]
+async fn limit_of_the_protocol_a_sealed_response_that_ends_at_a_frame_boundary_is_accepted() {
+    let key = key(1);
+    let server = serve(&key, |_| {
+        Reply::parts(vec![
+            data("part one, "),
+            Part::Withheld(b"part two".to_vec()),
+            data("never sent either"),
+        ])
+    })
+    .await;
+    let response = bound(&key)
+        .round_trip(post(server.url("/v1/chat"), "{}"))
+        .await
+        .expect("a response");
+    assert_eq!(response.status(), StatusCode::OK);
+    // The read ends without an error: the body looks complete.
+    let body = tokio::time::timeout(PATIENCE, response.bytes())
+        .await
+        .expect("the body ends")
+        .expect("no error at the early end");
+    assert_eq!(&body[..], b"part one, ");
+}
+
+#[tokio::test]
+async fn limit_of_the_protocol_a_sealed_success_without_any_frame_is_accepted_as_empty() {
+    let key = key(1);
+    // Nothing was sealed, or everything that was sealed is withheld: the
+    // client cannot tell the two apart.
+    for withheld in [false, true] {
+        let server = serve(&key, move |_| {
+            Reply::parts(if withheld {
+                vec![Part::Withheld(b"the whole answer".to_vec())]
+            } else {
+                Vec::new()
+            })
+        })
+        .await;
+        let response = bound(&key)
+            .round_trip(post(server.url("/v1/chat"), "{}"))
+            .await
+            .expect("a response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = tokio::time::timeout(PATIENCE, response.bytes())
+            .await
+            .expect("the body ends")
+            .expect("no error for an empty body");
+        assert!(body.is_empty());
+    }
 }
 
 #[tokio::test]
