@@ -178,5 +178,11 @@ pub use options::TransportMode;
 pub use request::RequestBuilder;
 pub use router_client::{RouterHttpClient, RouterHttpClientBuilder};
 
+// Compiles the examples of the repository's README as documentation tests,
+// so that they cannot drift from the API.
+#[cfg(all(doctest, feature = "openai"))]
+#[doc = include_str!("../../../README.md")]
+struct ReadmeExamples;
+
 /// The version of this SDK.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
