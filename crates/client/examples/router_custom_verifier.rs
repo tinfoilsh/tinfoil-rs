@@ -37,16 +37,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         })
-        .user_cache_secret(std::env::var("APP_CACHE_SCOPE")?)
         .timeout(Duration::from_secs(120))
         .connect()
         .await?;
 
     println!("router: {}", client.enclave());
 
+    let api_key = std::env::var("TINFOIL_API_KEY")?;
+
     let response = client
         .post(client.base_url().join("v1/chat/completions")?)
-        .bearer_auth(std::env::var("TINFOIL_API_KEY")?)
+        .bearer_auth(api_key)
         .json(&serde_json::json!({
             "model": "gpt-oss-120b",
             "messages": [{"role": "user", "content": "Hello!"}],

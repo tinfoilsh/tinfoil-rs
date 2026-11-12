@@ -2,7 +2,7 @@
 //! configured to send sealed bodies through a proxy.
 //!
 //! ```sh
-//! cargo run -p tinfoil-next --example enclave_http
+//! TINFOIL_API_KEY=... cargo run -p tinfoil-next --example enclave_http
 //! ```
 
 use std::time::Duration;
@@ -14,6 +14,8 @@ const REPO: &str = "tinfoilsh/confidential-model-router";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("TINFOIL_API_KEY")?;
+
     // The enclave is verified before `connect` returns.
     let client = EnclaveHttpClient::connect(ENCLAVE, REPO).await?;
 
@@ -25,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Requests use reqwest's types and go only to the verified enclave.
     let models = client
         .get(client.base_url().join("v1/models")?)
-        .bearer_auth(std::env::var("TINFOIL_API_KEY")?)
+        .bearer_auth(&api_key)
         .send()
         .await?;
     println!("{}", models.text().await?);
@@ -47,6 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let response = proxied
         .post(proxied.base_url().join("v1/chat/completions")?)
+        // Headers are not sealed: the proxy sees this one.
+        .bearer_auth(&api_key)
         .json(&serde_json::json!({
             "model": "gpt-oss-120b",
             "messages": [{"role": "user", "content": "Hello!"}],
