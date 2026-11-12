@@ -20,7 +20,7 @@ use crate::verifier::{BoxError, Verification, Verifier};
 #[cfg(feature = "unstable-gateway")]
 mod gateway;
 pub(crate) mod relaxed;
-mod service;
+pub(crate) mod service;
 
 #[cfg(feature = "unstable-gateway")]
 pub use gateway::{GatewayOpenAIClient, GatewayOpenAIClientBuilder};
@@ -33,7 +33,8 @@ type OpenAI = async_openai::Client<OpenAIConfig>;
 
 /// The methods that every OpenAI client of this crate has in addition to
 /// `async_openai`'s. The type has the fields `openai` (the `async_openai`
-/// client), `http` (the attested HTTP client) and `api_base`.
+/// client), `sender` (the service under it), `http` (the attested HTTP
+/// client) and `api_base`.
 macro_rules! openai_client_methods {
     ($client:ident) => {
         impl Deref for $client {
@@ -53,6 +54,7 @@ macro_rules! openai_client_methods {
             pub fn chat_relaxed(&self) -> RelaxedChat<'_> {
                 let http: Arc<dyn crate::request::Execute> = self.http.inner.clone();
                 RelaxedChat {
+                    sender: self.sender.clone(),
                     http,
                     api_base: &self.api_base,
                     config: self.openai.config(),
@@ -70,6 +72,10 @@ macro_rules! openai_client_methods {
 
             /// Embeds a batch of strings with `model` and returns one
             /// vector for each input, in the order of the inputs.
+            ///
+            /// A response that does not hold exactly one embedding for
+            /// each input is an `OpenAIError::InvalidArgument`: its
+            /// vectors could not be matched to the inputs.
             pub async fn embed_batch<I, S>(
                 &self,
                 model: impl Into<String>,
@@ -79,22 +85,45 @@ macro_rules! openai_client_methods {
                 I: IntoIterator<Item = S>,
                 S: Into<String>,
             {
-                use async_openai::types::embeddings::{CreateEmbeddingRequestArgs, EmbeddingInput};
-                let inputs: Vec<String> = inputs.into_iter().map(Into::into).collect();
-                let request = CreateEmbeddingRequestArgs::default()
-                    .model(model.into())
-                    .input(EmbeddingInput::StringArray(inputs))
-                    .build()?;
-                let mut response = self.openai.embeddings().create(request).await?;
-                response.data.sort_by_key(|embedding| embedding.index);
-                Ok(response
-                    .data
-                    .into_iter()
-                    .map(|embedding| embedding.embedding)
-                    .collect())
+                let inputs = inputs.into_iter().map(Into::into).collect();
+                $crate::openai::embed_batch(&self.openai, model.into(), inputs).await
             }
         }
     };
+}
+
+/// Embeds `inputs` with `model` and returns the vectors in the order of
+/// the inputs, whatever the order of the response. The response must hold
+/// one embedding for each input, with the indexes `0..n`.
+pub(crate) async fn embed_batch(
+    openai: &OpenAI,
+    model: String,
+    inputs: Vec<String>,
+) -> Result<Vec<Vec<f32>>, OpenAIError> {
+    use async_openai::types::embeddings::{CreateEmbeddingRequestArgs, EmbeddingInput};
+    let expected = inputs.len();
+    let request = CreateEmbeddingRequestArgs::default()
+        .model(model)
+        .input(EmbeddingInput::StringArray(inputs))
+        .build()?;
+    let mut response = openai.embeddings().create(request).await?;
+    response.data.sort_by_key(|embedding| embedding.index);
+    let complete = response.data.len() == expected
+        && response
+            .data
+            .iter()
+            .enumerate()
+            .all(|(position, embedding)| usize::try_from(embedding.index) == Ok(position));
+    if !complete {
+        return Err(OpenAIError::InvalidArgument(format!(
+            "the response does not hold one embedding for each of the {expected} inputs"
+        )));
+    }
+    Ok(response
+        .data
+        .into_iter()
+        .map(|embedding| embedding.embedding)
+        .collect())
 }
 
 #[cfg(feature = "unstable-gateway")]
@@ -153,6 +182,7 @@ pub(crate) use openai_client_methods;
 #[derive(Clone)]
 pub struct Client {
     openai: OpenAI,
+    sender: service::Sender,
     http: RouterHttpClient,
     api_base: Url,
 }
@@ -175,11 +205,13 @@ impl Client {
     pub async fn connect(config: OpenAIConfig) -> Result<Self, Error> {
         let RouterOpenAIClient {
             openai,
+            sender,
             http,
             api_base,
         } = RouterOpenAIClient::connect(config).await?;
         Ok(Self {
             openai,
+            sender,
             http,
             api_base,
         })
@@ -217,6 +249,7 @@ impl fmt::Debug for Client {
 #[derive(Clone)]
 pub struct EnclaveOpenAIClient {
     openai: OpenAI,
+    sender: service::Sender,
     http: EnclaveHttpClient,
     api_base: Url,
 }
@@ -271,6 +304,7 @@ impl fmt::Debug for EnclaveOpenAIClient {
 #[derive(Clone)]
 pub struct RouterOpenAIClient {
     openai: OpenAI,
+    sender: service::Sender,
     http: RouterHttpClient,
     api_base: Url,
 }
@@ -388,10 +422,11 @@ impl EnclaveOpenAIClientBuilder {
         let http = self.http.connect().await?;
         let api_base = http.inner.openai_url().clone();
         let executor: Arc<dyn crate::request::Execute> = http.inner.clone();
-        let openai =
+        let (openai, sender) =
             service::openai_client(self.config, &api_base, executor, http.transport_mode())?;
         Ok(EnclaveOpenAIClient {
             openai,
+            sender,
             http,
             api_base,
         })
@@ -417,10 +452,11 @@ impl RouterOpenAIClientBuilder {
         let http = self.http.connect().await?;
         let api_base = http.inner.openai_url().clone();
         let executor: Arc<dyn crate::request::Execute> = http.inner.clone();
-        let openai =
+        let (openai, sender) =
             service::openai_client(self.config, &api_base, executor, http.transport_mode())?;
         Ok(RouterOpenAIClient {
             openai,
+            sender,
             http,
             api_base,
         })

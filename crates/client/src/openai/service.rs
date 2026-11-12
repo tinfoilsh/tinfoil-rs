@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 use async_openai::config::OpenAIConfig;
 use async_openai::error::OpenAIError;
 use async_openai::middleware::HttpRequestFactory;
-use async_openai::middleware::retry::OpenAIRetryLayer;
+use async_openai::middleware::retry::{OpenAIRetry, OpenAIRetryLayer};
 use reqwest::header::CONTENT_LENGTH;
 use reqwest::{Request, Response, Url};
 use tower_layer::Layer;
@@ -24,7 +24,8 @@ mod tests;
 /// How often `async_openai` sends a call again after the first attempt.
 pub(crate) const MAX_RETRIES: usize = 2;
 
-/// An `async_openai` client that sends through `http`.
+/// An `async_openai` client that sends through `http`, and the service
+/// that it sends through.
 ///
 /// - **Configuration.** `config` is taken as the caller built it (the API
 ///   key, the organization, the project and any extra headers), and then
@@ -65,14 +66,34 @@ pub(crate) fn openai_client(
     api_base: &Url,
     http: Arc<dyn Execute>,
     mode: TransportMode,
-) -> Result<async_openai::Client<OpenAIConfig>, Error> {
+) -> Result<(async_openai::Client<OpenAIConfig>, Sender), Error> {
     let config = config.with_api_base(api_base.as_str().trim_end_matches('/'));
     // Only collects the parts of each request.
     let parts = fetch::tls_builder()?
         .build()
         .map_err(|error| Error::wrap(ErrorKind::Configuration, error))?;
     let service = OpenAIRetryLayer::new(MAX_RETRIES).layer(Attested { http, mode });
-    Ok(async_openai::Client::build(parts, config).with_http_service(service))
+    let sender = Sender {
+        service: service.clone(),
+    };
+    let openai = async_openai::Client::build(parts, config).with_http_service(service);
+    Ok((openai, sender))
+}
+
+/// What `async_openai` sends through, for the calls that this crate makes
+/// by itself: the same service, with the same retries.
+#[derive(Clone)]
+pub(crate) struct Sender {
+    service: OpenAIRetry<Attested>,
+}
+
+impl Sender {
+    /// Sends the request that `factory` builds, as a call of
+    /// `async_openai` is sent, and returns the response whatever its
+    /// status once no retry is due.
+    pub(crate) async fn send(&self, factory: HttpRequestFactory) -> Result<Response, OpenAIError> {
+        self.service.clone().call(factory).await
+    }
 }
 
 /// The service that sends `async_openai`'s requests through the attested

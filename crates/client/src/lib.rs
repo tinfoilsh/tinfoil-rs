@@ -11,14 +11,13 @@
 //!
 //! # Status
 //!
-//! The HTTP clients and the OpenAI clients are complete. The relaxed chat
-//! calls, `parse_event_stream` and the gateway route (feature
-//! `unstable-gateway`) are their API without the machinery behind it:
-//! their signatures and documented contracts are in place, and each of
-//! their functions that would perform network I/O fails with an error
-//! whose message says that the function is not implemented yet. That
-//! error has the kind [`ErrorKind::Configuration`], since retrying cannot
-//! help; it does not mean that an option is wrong.
+//! Everything but the gateway route is complete. The gateway route
+//! (feature `unstable-gateway`) is its API without the machinery behind
+//! it: its signatures and documented contracts are in place, and each of
+//! its functions that would perform network I/O fails with an error whose
+//! message says that the function is not implemented yet. That error has
+//! the kind [`ErrorKind::Configuration`], since retrying cannot help; it
+//! does not mean that an option is wrong.
 //!
 //! # Choosing a client
 //!

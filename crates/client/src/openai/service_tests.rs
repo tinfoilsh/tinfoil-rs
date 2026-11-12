@@ -19,14 +19,16 @@ use futures_util::StreamExt;
 use reqwest::header::HeaderMap;
 use reqwest::{Request, Response, Url};
 
-use super::openai_client;
+use super::{Sender, openai_client};
 use crate::error::{Error, ErrorKind};
 use crate::internal::BoxFuture;
 use crate::internal::attested::{AttestedClient, Settings};
 use crate::internal::enclave::Enclave;
 use crate::internal::testing::{Record, Script, Step, record, tokio_clock};
 use crate::internal::transport::{Failure, Mode, RoundTrip, Transport};
+use crate::openai::relaxed::RelaxedChat;
 use crate::options::{Secret, TransportMode};
+use crate::request::Execute;
 
 type OpenAI = async_openai::Client<OpenAIConfig>;
 
@@ -48,6 +50,48 @@ async fn soon<T>(future: impl Future<Output = T>) -> T {
     tokio::time::timeout(PATIENCE, future)
         .await
         .expect("the operation neither succeeded nor failed in time")
+}
+
+/// An `async_openai` client over an attested client, with what a relaxed
+/// chat handle is made from.
+struct Kit {
+    openai: OpenAI,
+    sender: Sender,
+    http: Arc<dyn Execute>,
+    api_base: Url,
+    config: OpenAIConfig,
+}
+
+impl Kit {
+    fn new(client: AttestedClient<Record>, mode: TransportMode) -> Self {
+        let api_base = client.openai_url().clone();
+        let http: Arc<dyn Execute> = Arc::new(client);
+        let (openai, sender) = openai_client(config(), &api_base, Arc::clone(&http), mode).unwrap();
+        Self {
+            openai,
+            sender,
+            http,
+            api_base,
+            config: config(),
+        }
+    }
+
+    fn relaxed(&self) -> RelaxedChat<'_> {
+        RelaxedChat {
+            sender: self.sender.clone(),
+            http: Arc::clone(&self.http),
+            api_base: &self.api_base,
+            config: &self.config,
+        }
+    }
+}
+
+impl std::ops::Deref for Kit {
+    type Target = OpenAI;
+
+    fn deref(&self) -> &OpenAI {
+        &self.openai
+    }
 }
 
 /// A configuration as a caller would write one. It names no API base, and
@@ -82,6 +126,9 @@ fn streaming_chat_request() -> CreateChatCompletionRequest {
 
 const CHAT_RESPONSE: &str = r#"{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}"#;
 
+const TRANSCRIPTION_RESPONSE: &str =
+    r#"{"text":"hello","usage":{"type":"duration","seconds":1.5}}"#;
+
 const EMBEDDING_RESPONSE: &str = r#"{"object":"list","model":"m","data":[{"index":0,"object":"embedding","embedding":[0.5,0.25]}],"usage":{"prompt_tokens":1,"total_tokens":1}}"#;
 
 fn chunk(text: &str) -> String {
@@ -114,6 +161,8 @@ enum Answer {
     RespondWith(u16, &'static str, &'static str, &'static str),
     LacksKey,
     Fail(Error),
+    /// A response whose body delivers this text and then breaks.
+    Broken(&'static str),
 }
 
 type Answers = Arc<dyn Fn(&Sent, usize) -> Answer + Send + Sync>;
@@ -176,6 +225,15 @@ impl RoundTrip for Binding {
                     "the peer does not hold the attested key",
                 ))),
                 Answer::Fail(error) => Err(error.into()),
+                Answer::Broken(text) => {
+                    let body = futures_util::stream::iter([
+                        Ok(text),
+                        Err(std::io::Error::other("connection reset")),
+                    ]);
+                    Ok(Response::from(http::Response::new(
+                        reqwest::Body::wrap_stream(body),
+                    )))
+                }
             }
         })
     }
@@ -183,7 +241,7 @@ impl RoundTrip for Binding {
 
 struct Fake {
     script: Arc<Script>,
-    openai: OpenAI,
+    openai: Kit,
     sent: Arc<Mutex<Vec<Sent>>>,
 }
 
@@ -224,8 +282,7 @@ async fn fake(
         },
     )
     .unwrap();
-    let api_base = client.openai_url().clone();
-    let openai = openai_client(config(), &api_base, Arc::new(client), TransportMode::Tls).unwrap();
+    let openai = Kit::new(client, TransportMode::Tls);
     Fake {
         script,
         openai,
@@ -451,8 +508,9 @@ async fn an_api_base_on_another_origin_is_refused_by_the_client_underneath() {
         )
         .unwrap();
         let elsewhere = Url::parse("https://evil.example.com/v1/").unwrap();
-        let openai =
-            openai_client(config(), &elsewhere, Arc::new(client), TransportMode::Tls).unwrap();
+        let openai = openai_client(config(), &elsewhere, Arc::new(client), TransportMode::Tls)
+            .unwrap()
+            .0;
         let error = openai.chat().create(chat_request()).await.unwrap_err();
         let found = client_error(&error);
         assert_eq!(found.kind(), ErrorKind::Configuration);
@@ -494,7 +552,7 @@ async fn an_upload_is_built_again_once_after_a_key_rejection() {
             None,
             |sent, _| match sent.binding {
                 "before" => Answer::LacksKey,
-                _ => Answer::Respond(200, r#"{"text":"hello"}"#),
+                _ => Answer::Respond(200, TRANSCRIPTION_RESPONSE),
             },
         )
         .await;
@@ -505,7 +563,7 @@ async fn an_upload_is_built_again_once_after_a_key_rejection() {
             .create_raw(transcription())
             .await
             .unwrap();
-        assert_eq!(raw.as_ref(), br#"{"text":"hello"}"#);
+        assert_eq!(raw.as_ref(), TRANSCRIPTION_RESPONSE.as_bytes());
         let sent = f.sent();
         assert_eq!(f.bindings(), ["before", "after"]);
         assert_eq!(f.script.calls(), 2);
@@ -592,9 +650,7 @@ async fn a_body_that_fails_while_it_is_read_carries_the_clients_error() {
             },
         )
         .unwrap();
-        let api_base = client.openai_url().clone();
-        let openai =
-            openai_client(config(), &api_base, Arc::new(client), TransportMode::Tls).unwrap();
+        let openai = Kit::new(client, TransportMode::Tls);
 
         // Read whole: the call fails at the deadline.
         let started = tokio::time::Instant::now();
@@ -617,6 +673,397 @@ async fn a_body_that_fails_while_it_is_read_carries_the_clients_error() {
     .await
 }
 
+// The relaxed chat handle.
+
+const BROKEN: &str = r#"{"error":{"message":"broken","type":"server_error"}}"#;
+
+#[tokio::test(start_paused = true)]
+async fn a_relaxed_request_goes_the_way_of_a_typed_one_and_never_asks_for_a_stream() {
+    unstuck(async {
+        let f = fake(vec![ready("first")], Some("scope"), |_, _| {
+            Answer::Respond(200, CHAT_RESPONSE)
+        })
+        .await;
+        let body = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+            "web_search_options": {},
+            "structured_outputs": {"regex": "a+"},
+            "seed": 12345678901234567890u64,
+        });
+        let response = f.openai.relaxed().create(body).await.unwrap();
+        assert_eq!(response.content(), Some("hello"));
+        let sent = f.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].url.as_str(),
+            "https://enclave.example.com/v1/chat/completions"
+        );
+        assert_eq!(sent[0].headers["authorization"], "Bearer test-key");
+        assert_eq!(sent[0].headers["openai-organization"], "org-1");
+        assert_eq!(sent[0].headers["content-type"], "application/json");
+        let body: serde_json::Value =
+            serde_json::from_str(sent[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["user_cache_secret"], "scope");
+        // What the typed request has no member for is sent as it is.
+        assert_eq!(body["structured_outputs"]["regex"], "a+");
+        assert_eq!(body["web_search_options"], serde_json::json!({}));
+        assert!(
+            sent[0]
+                .body
+                .as_deref()
+                .unwrap()
+                .contains("12345678901234567890")
+        );
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_relaxed_response_may_be_anything_that_is_json() {
+    unstuck(async {
+        // What a typed response refuses: a finish reason outside the known
+        // set, members that it does not know, and members that are missing.
+        const ODD: &str = r#"{"choices":[{"message":{"content":null,"reasoning_content":"thinking","tool_calls":[{"id":"t1","function":{"name":"f","arguments":"{\"a\":1}"}}]},"finish_reason":"tool_use_pending"}],"usage":{"prompt_tokens":1},"vendor":{"x":1}}"#;
+        let f = fake(vec![ready("first")], None, |_, _| Answer::Respond(200, ODD)).await;
+        let typed = f.openai.chat().create(chat_request()).await;
+        assert!(matches!(typed, Err(OpenAIError::JSONDeserialize(..))), "{typed:?}");
+
+        let response = f.openai.relaxed().create(serde_json::json!({})).await.unwrap();
+        assert_eq!(response.finish_reason(), Some("tool_use_pending"));
+        assert_eq!(response.content(), None);
+        assert_eq!(response.id(), None);
+        assert_eq!(response.model(), None);
+        assert_eq!(response.typed_tool_calls().len(), 1);
+        assert_eq!(
+            response.raw()["choices"][0]["message"]["reasoning_content"],
+            "thinking"
+        );
+        assert_eq!(response.raw()["vendor"]["x"], 1);
+
+        for body in ["{}", "[]", "null", "7"] {
+            let f = fake(vec![ready("first")], None, move |_, _| {
+                Answer::Respond(200, body)
+            })
+            .await;
+            let response = f.openai.relaxed().create(serde_json::json!({})).await.unwrap();
+            assert_eq!(response.content(), None, "{body}");
+            assert_eq!(response.choices_len(), 0, "{body}");
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_relaxed_request_is_retried_and_its_errors_are_read_as_those_of_a_typed_one() {
+    unstuck(async {
+        // Retried like a typed call.
+        let f = fake(vec![ready("first")], None, |_, before| {
+            if before < 2 {
+                Answer::Respond(503, BROKEN)
+            } else {
+                Answer::Respond(200, CHAT_RESPONSE)
+            }
+        })
+        .await;
+        f.openai.relaxed().create(serde_json::json!({})).await.unwrap();
+        assert_eq!(f.sent().len(), 3);
+
+        // The API's error object.
+        const REFUSED: &str = r#"{"error":{"message":"no such model","type":"invalid_request_error","param":null,"code":"model_unavailable"}}"#;
+        let f = fake(vec![ready("first")], None, |_, _| {
+            Answer::Respond(404, REFUSED)
+        })
+        .await;
+        match f.openai.relaxed().create(serde_json::json!({})).await {
+            Err(OpenAIError::ApiError(error)) => {
+                assert_eq!(error.status_code, 404);
+                assert_eq!(error.api_error.message, "no such model");
+                assert_eq!(error.api_error.code.as_deref(), Some("model_unavailable"));
+                assert_eq!(error.api_error.param, None);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(f.sent().len(), 1);
+
+        // A server error need not be JSON: its text is the message.
+        let f = fake(vec![ready("first")], None, |_, _| {
+            Answer::Respond(502, "bad gateway")
+        })
+        .await;
+        match f.openai.relaxed().create(serde_json::json!({})).await {
+            Err(OpenAIError::ApiError(error)) => {
+                assert_eq!(error.status_code, 502);
+                assert_eq!(error.api_error.message, "bad gateway");
+                assert_eq!(error.api_error.code, None);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(f.sent().len(), 3);
+
+        // Any other error status must carry the error object, and a
+        // success must be JSON.
+        for (status, body) in [(400, "plain text"), (200, "not json")] {
+            let f = fake(vec![ready("first")], None, move |_, _| {
+                Answer::Respond(status, body)
+            })
+            .await;
+            match f.openai.relaxed().create(serde_json::json!({})).await {
+                Err(OpenAIError::JSONDeserialize(_, text)) => assert_eq!(text, body),
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(f.sent().len(), 1);
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_relaxed_request_reports_a_failure_of_the_client_once_and_is_replayed_after_a_rotation() {
+    unstuck(async {
+        let f = fake(vec![ready("first")], None, |_, _| {
+            Answer::Fail(Error::attestation("unsealed response"))
+        })
+        .await;
+        for stream in [false, true] {
+            let relaxed = f.openai.relaxed();
+            let error = if stream {
+                relaxed.create_stream(serde_json::json!({})).await.err()
+            } else {
+                relaxed.create(serde_json::json!({})).await.err()
+            }
+            .expect("failed");
+            assert_eq!(client_error(&error).kind(), ErrorKind::Attestation);
+        }
+        assert_eq!(f.sent().len(), 2);
+
+        let f = fake(
+            vec![ready("before"), later("after")],
+            None,
+            |sent, _| match sent.binding {
+                "before" => Answer::LacksKey,
+                _ => Answer::Respond(200, CHAT_RESPONSE),
+            },
+        )
+        .await;
+        f.openai
+            .relaxed()
+            .create(serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(f.bindings(), ["before", "after"]);
+    })
+    .await
+}
+
+/// The chunks of a relaxed stream, and the error that ended it.
+async fn collected(
+    mut stream: crate::openai::relaxed::RelaxedStream,
+) -> (
+    Vec<crate::openai::relaxed::RelaxedStreamChunk>,
+    Option<OpenAIError>,
+) {
+    let mut chunks = Vec::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(chunk) => chunks.push(chunk),
+            Err(error) => {
+                assert!(stream.next().await.is_none(), "an item after the error");
+                return (chunks, Some(error));
+            }
+        }
+    }
+    (chunks, None)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_relaxed_stream_passes_on_every_event_and_ends_at_done() {
+    unstuck(async {
+        const EVENTS: &str = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hm\"}}]}\n\n\
+            data: {\"type\":\"web_search_call\",\"status\":\"in_progress\"}\n\n\
+            : keep-alive\n\n\
+            data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\r\n\r\n\
+            data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"odd_reason\"}]}\n\n\
+            data: {\"choices\":[],\"usage\":{\"total_tokens\":3}}\n\n\
+            data: [DONE]\n\n\
+            data: {\"after\":true}\n\n";
+        let f = fake(vec![ready("first")], Some("scope"), |_, _| {
+            Answer::Respond(200, EVENTS)
+        })
+        .await;
+        let stream = f
+            .openai
+            .relaxed()
+            .create_stream(serde_json::json!({"model": "m", "stream": false}))
+            .await
+            .unwrap();
+        let (chunks, error) = collected(stream).await;
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(chunks.len(), 5);
+        assert_eq!(
+            chunks[0].raw()["choices"][0]["delta"]["reasoning_content"],
+            "hm"
+        );
+        assert!(chunks[1].is_vendor_event());
+        assert_eq!(chunks[1].event_type(), Some("web_search_call"));
+        assert_eq!(chunks[2].delta_content(), Some("hel"));
+        assert_eq!(chunks[3].finish_reason(), Some("odd_reason"));
+        assert_eq!(chunks[4].raw()["usage"]["total_tokens"], 3);
+        assert_eq!(chunks[4].delta_content(), None);
+
+        let sent = f.sent();
+        let body: serde_json::Value =
+            serde_json::from_str(sent[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["user_cache_secret"], "scope");
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_relaxed_stream_without_done_ends_after_a_complete_event_and_fails_inside_one() {
+    unstuck(async {
+        let f = fake(vec![ready("first")], None, |_, _| {
+            Answer::Respond(200, "data: {\"n\":1}\n\ndata: {\"n\":2}\n\n")
+        })
+        .await;
+        let stream = f
+            .openai
+            .relaxed()
+            .create_stream(serde_json::json!({}))
+            .await;
+        let (chunks, error) = collected(stream.unwrap()).await;
+        assert_eq!(chunks.len(), 2);
+        assert!(error.is_none(), "{error:?}");
+
+        let f = fake(vec![ready("first")], None, |_, _| {
+            Answer::Respond(200, "data: {\"n\":1}\n\ndata: {\"n\":2}")
+        })
+        .await;
+        let stream = f
+            .openai
+            .relaxed()
+            .create_stream(serde_json::json!({}))
+            .await;
+        let (chunks, error) = collected(stream.unwrap()).await;
+        assert_eq!(chunks.len(), 1);
+        assert!(
+            matches!(error, Some(OpenAIError::StreamError(_))),
+            "{error:?}"
+        );
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_relaxed_stream_is_retried_before_it_starts_and_never_after() {
+    unstuck(async {
+        // An error status is retried like any call, and then reported.
+        let f = fake(vec![ready("first")], None, |_, before| {
+            if before < 2 {
+                Answer::Respond(500, BROKEN)
+            } else {
+                Answer::Respond(200, "data: {\"n\":1}\n\ndata: [DONE]\n\n")
+            }
+        })
+        .await;
+        let stream = f
+            .openai
+            .relaxed()
+            .create_stream(serde_json::json!({}))
+            .await;
+        assert_eq!(collected(stream.unwrap()).await.0.len(), 1);
+        assert_eq!(f.sent().len(), 3);
+
+        let f = fake(vec![ready("first")], None, |_, _| {
+            Answer::Respond(401, r#"{"error":{"message":"no key","type":"auth"}}"#)
+        })
+        .await;
+        let refused = f
+            .openai
+            .relaxed()
+            .create_stream(serde_json::json!({}))
+            .await;
+        assert!(matches!(refused.err(), Some(OpenAIError::ApiError(_))));
+        assert_eq!(f.sent().len(), 1);
+
+        // A stream that breaks after it started is not sent again, and the
+        // failure carries the client's error.
+        let f = fake(vec![ready("first"), later("second")], None, |_, _| {
+            Answer::Broken("data: {\"n\":1}\n\ndata: {\"n\":")
+        })
+        .await;
+        let stream = f
+            .openai
+            .relaxed()
+            .create_stream(serde_json::json!({}))
+            .await;
+        let (chunks, error) = collected(stream.unwrap()).await;
+        assert_eq!(chunks.len(), 1);
+        let error = error.expect("the stream broke");
+        assert_eq!(client_error(&error).kind(), ErrorKind::Network);
+        assert_eq!(f.sent().len(), 1);
+    })
+    .await
+}
+
+// The helpers.
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_of_embeddings_comes_back_in_the_order_of_the_inputs() {
+    unstuck(async {
+        const SHUFFLED: &str = r#"{"object":"list","model":"m","data":[{"index":2,"object":"embedding","embedding":[2.0]},{"index":0,"object":"embedding","embedding":[0.0]},{"index":1,"object":"embedding","embedding":[1.0]}],"usage":{"prompt_tokens":1,"total_tokens":1}}"#;
+        let f = fake(vec![ready("first")], Some("scope"), |_, _| {
+            Answer::Respond(200, SHUFFLED)
+        })
+        .await;
+        let inputs = ["a", "b", "c"].map(str::to_owned).to_vec();
+        let vectors = crate::openai::embed_batch(&f.openai, "m".to_owned(), inputs)
+            .await
+            .unwrap();
+        assert_eq!(vectors, [[0.0], [1.0], [2.0]]);
+        let sent = f.sent();
+        assert_eq!(
+            sent[0].url.as_str(),
+            "https://enclave.example.com/v1/embeddings"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(sent[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["input"], serde_json::json!(["a", "b", "c"]));
+        assert_eq!(body["model"], "m");
+        assert!(body.get("user_cache_secret").is_none());
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn embeddings_that_do_not_match_the_inputs_one_to_one_are_refused() {
+    unstuck(async {
+        const TWO: &str = r#"{"object":"list","model":"m","data":[{"index":0,"object":"embedding","embedding":[0.0]},{"index":1,"object":"embedding","embedding":[1.0]}],"usage":{"prompt_tokens":1,"total_tokens":1}}"#;
+        const REPEATED: &str = r#"{"object":"list","model":"m","data":[{"index":0,"object":"embedding","embedding":[0.0]},{"index":0,"object":"embedding","embedding":[1.0]}],"usage":{"prompt_tokens":1,"total_tokens":1}}"#;
+        const OFFSET: &str = r#"{"object":"list","model":"m","data":[{"index":1,"object":"embedding","embedding":[0.0]},{"index":2,"object":"embedding","embedding":[1.0]}],"usage":{"prompt_tokens":1,"total_tokens":1}}"#;
+        for (body, inputs) in [(TWO, 3), (TWO, 1), (REPEATED, 2), (OFFSET, 2)] {
+            let f = fake(vec![ready("first")], None, move |_, _| {
+                Answer::Respond(200, body)
+            })
+            .await;
+            let inputs = vec!["x".to_owned(); inputs];
+            let error = crate::openai::embed_batch(&f.openai, "m".to_owned(), inputs)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, OpenAIError::InvalidArgument(_)), "{error:?}");
+        }
+        let f = fake(vec![ready("first")], None, |_, _| Answer::Respond(200, TWO)).await;
+        let inputs = vec!["x".to_owned(); 2];
+        crate::openai::embed_batch(&f.openai, "m".to_owned(), inputs)
+            .await
+            .unwrap();
+    })
+    .await
+}
+
 // On the real modes.
 
 mod over_ehbp {
@@ -625,7 +1072,7 @@ mod over_ehbp {
 
     /// An `async_openai` client that reaches its enclave through a local
     /// server, as through a proxy, in the EHBP mode.
-    async fn client(server: &ehbp::Server, hpke: &str) -> OpenAI {
+    async fn client(server: &ehbp::Server, hpke: &str) -> Kit {
         let clock = tokio_clock();
         let mut evidence = ehbp::evidence("e", Some(hpke));
         evidence.expires = Some(clock() + HOUR);
@@ -644,8 +1091,7 @@ mod over_ehbp {
             },
         )
         .unwrap();
-        let api_base = client.openai_url().clone();
-        openai_client(config(), &api_base, Arc::new(client), TransportMode::Ehbp).unwrap()
+        Kit::new(client, TransportMode::Ehbp)
     }
 
     /// What every request of the attested chain shows on the wire: a
@@ -675,7 +1121,7 @@ mod over_ehbp {
             }
             "/v1/chat/completions" => Reply::ok(CHAT_RESPONSE),
             "/v1/embeddings" => Reply::ok(EMBEDDING_RESPONSE),
-            "/v1/audio/transcriptions" => Reply::ok(r#"{"text":"hello"}"#),
+            "/v1/audio/transcriptions" => Reply::ok(TRANSCRIPTION_RESPONSE),
             _ => Reply::ok("{}"),
         }
     }
@@ -746,7 +1192,7 @@ mod over_ehbp {
         let raw = soon(openai.audio().transcription().create_raw(transcription()))
             .await
             .unwrap();
-        assert_eq!(raw.as_ref(), br#"{"text":"hello"}"#);
+        assert_eq!(raw.as_ref(), TRANSCRIPTION_RESPONSE.as_bytes());
         let seen = server.seen();
         assert_eq!(seen.len(), 1);
         assert_attested(&seen[0], "/v1/audio/transcriptions");
@@ -777,6 +1223,116 @@ mod over_ehbp {
     }
 
     #[tokio::test]
+    async fn a_relaxed_request_and_a_relaxed_stream_are_sealed_and_carry_the_cache_secret() {
+        let held = key(1);
+        let server = serve(&held, app).await;
+        let kit = client(&server, &held.public_hex).await;
+        let body = || serde_json::json!({"model": "m", "private": "relaxed prompt"});
+
+        let response = soon(kit.relaxed().create(body())).await.unwrap();
+        assert_eq!(response.content(), Some("hello"));
+
+        let stream = soon(kit.relaxed().create_stream(body())).await.unwrap();
+        let (chunks, error) = soon(collected(stream)).await;
+        assert!(error.is_none(), "{error:?}");
+        let text: String = chunks.iter().filter_map(|c| c.delta_content()).collect();
+        assert_eq!(text, "onetwo");
+
+        let seen = server.seen();
+        assert_eq!(seen.len(), 2);
+        for (seen, stream) in seen.iter().zip([false, true]) {
+            assert_attested(seen, "/v1/chat/completions");
+            let body: serde_json::Value = serde_json::from_slice(&seen.body).unwrap();
+            assert_eq!(body["stream"], stream);
+            assert_eq!(body["user_cache_secret"], "s3cret-scope");
+            assert!(!String::from_utf8_lossy(&seen.wire).contains("relaxed prompt"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_typed_transcription_and_a_batch_of_embeddings_are_sealed() {
+        let held = key(1);
+        let server = serve(&held, app).await;
+        let kit = client(&server, &held.public_hex).await;
+
+        // What `transcribe` does.
+        let transcript = soon(kit.audio().transcription().create(transcription()))
+            .await
+            .unwrap();
+        assert_eq!(transcript.text, "hello");
+
+        let vectors = soon(crate::openai::embed_batch(
+            &kit,
+            "m".to_owned(),
+            vec!["private text".to_owned()],
+        ))
+        .await
+        .unwrap();
+        assert_eq!(vectors, [[0.5, 0.25]]);
+
+        let seen = server.seen();
+        assert_attested(&seen[0], "/v1/audio/transcriptions");
+        assert!(String::from_utf8_lossy(&seen[0].body).contains("RIFF-private-audio"));
+        assert!(!String::from_utf8_lossy(&seen[0].wire).contains("RIFF-private-audio"));
+        assert_attested(&seen[1], "/v1/embeddings");
+        assert!(!String::from_utf8_lossy(&seen[1].wire).contains("private text"));
+    }
+
+    #[tokio::test]
+    async fn an_image_and_an_audio_clip_from_the_helpers_are_sealed_in_a_chat_request() {
+        use crate::multimodal::{ImageUrlExt, InputAudioExt};
+        use async_openai::types::chat::{
+            ChatCompletionRequestMessageContentPartAudio,
+            ChatCompletionRequestMessageContentPartImage,
+            ChatCompletionRequestUserMessageContentPart, ImageUrl, InputAudio, InputAudioFormat,
+        };
+
+        let held = key(1);
+        let server = serve(&held, app).await;
+        let kit = client(&server, &held.public_hex).await;
+        let image = ImageUrl::from_bytes(b"private-pixels", "image/png");
+        let audio = InputAudio::from_bytes(b"private-samples", InputAudioFormat::Wav);
+        let parts = vec![
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                ChatCompletionRequestMessageContentPartImage {
+                    image_url: image,
+                    prompt_cache_breakpoint: None,
+                },
+            ),
+            ChatCompletionRequestUserMessageContentPart::InputAudio(
+                ChatCompletionRequestMessageContentPartAudio {
+                    input_audio: audio,
+                    prompt_cache_breakpoint: None,
+                },
+            ),
+        ];
+        let request = CreateChatCompletionRequestArgs::default()
+            .model("m")
+            .messages([ChatCompletionRequestUserMessageArgs::default()
+                .content(parts)
+                .build()
+                .unwrap()
+                .into()])
+            .build()
+            .unwrap();
+        soon(kit.chat().create(request)).await.unwrap();
+
+        let seen = server.seen();
+        assert_attested(&seen[0], "/v1/chat/completions");
+        let body: serde_json::Value = serde_json::from_slice(&seen[0].body).unwrap();
+        let content = &body["messages"][0]["content"];
+        // base64 of the bytes that were given.
+        assert_eq!(
+            content[0]["image_url"]["url"],
+            "data:image/png;base64,cHJpdmF0ZS1waXhlbHM="
+        );
+        assert_eq!(content[1]["input_audio"]["data"], "cHJpdmF0ZS1zYW1wbGVz");
+        assert_eq!(content[1]["input_audio"]["format"], "wav");
+        let wire = String::from_utf8_lossy(&seen[0].wire);
+        assert!(!wire.contains("cHJpdmF0ZS1waXhlbHM") && !wire.contains("cHJpdmF0ZS1zYW1wbGVz"));
+    }
+
+    #[tokio::test]
     async fn an_upload_is_sent_again_under_the_new_key_after_a_rotation() {
         // The enclave holds key 2; the first verification endorsed key 1.
         let (stale, held) = (key(1), key(2));
@@ -802,14 +1358,12 @@ mod over_ehbp {
             },
         )
         .unwrap();
-        let api_base = client.openai_url().clone();
-        let openai =
-            openai_client(config(), &api_base, Arc::new(client), TransportMode::Ehbp).unwrap();
+        let openai = Kit::new(client, TransportMode::Ehbp);
 
         let raw = soon(openai.audio().transcription().create_raw(transcription()))
             .await
             .expect("sent again");
-        assert_eq!(raw.as_ref(), br#"{"text":"hello"}"#);
+        assert_eq!(raw.as_ref(), TRANSCRIPTION_RESPONSE.as_bytes());
         assert_eq!(script.calls(), 2);
         let seen = server.seen();
         assert_eq!(seen.len(), 2);
@@ -839,7 +1393,7 @@ mod over_tls {
                     }
                     "/v1/chat/completions" => CHAT_RESPONSE.to_owned(),
                     "/v1/embeddings" => EMBEDDING_RESPONSE.to_owned(),
-                    _ => r#"{"text":"hello"}"#.to_owned(),
+                    _ => TRANSCRIPTION_RESPONSE.to_owned(),
                 };
                 let content_type = if streaming {
                     "text/event-stream"
@@ -855,7 +1409,7 @@ mod over_tls {
         serve(&LEAF_A, &KEY_A, Protocols::Both, handler).await
     }
 
-    async fn client(server: &Server) -> OpenAI {
+    async fn client(server: &Server) -> Kit {
         let evidence = Record {
             name: "e",
             tls: Some(leaf_fingerprint(&certificate(&LEAF_A)).unwrap()),
@@ -879,8 +1433,7 @@ mod over_tls {
             },
         )
         .unwrap();
-        let api_base = client.openai_url().clone();
-        openai_client(config(), &api_base, Arc::new(client), TransportMode::Tls).unwrap()
+        Kit::new(client, TransportMode::Tls)
     }
 
     #[tokio::test]
@@ -933,5 +1486,34 @@ mod over_tls {
         assert!(String::from_utf8_lossy(&seen[3].body).contains("RIFF-private-audio"));
         // One pinned connection carried them all.
         assert_eq!(server.accepted(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_relaxed_request_and_a_relaxed_stream_reach_the_pinned_server() {
+        let server = server().await;
+        let kit = client(&server).await;
+        let response = soon(kit.relaxed().create(serde_json::json!({"model": "m"})))
+            .await
+            .unwrap();
+        assert_eq!(response.id(), Some("c1"));
+        let stream = soon(
+            kit.relaxed()
+                .create_stream(serde_json::json!({"model": "m"})),
+        )
+        .await
+        .unwrap();
+        let (chunks, error) = soon(collected(stream)).await;
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(chunks.len(), 2);
+
+        let seen = server.seen();
+        assert_eq!(seen.len(), 2);
+        for (seen, stream) in seen.iter().zip([false, true]) {
+            assert_eq!(seen.target, "/v1/chat/completions");
+            assert_eq!(seen.headers["authorization"], "Bearer test-key");
+            let body: serde_json::Value = serde_json::from_slice(&seen.body).unwrap();
+            assert_eq!(body["stream"], stream);
+            assert_eq!(body["user_cache_secret"], "s3cret-scope");
+        }
     }
 }
