@@ -270,12 +270,6 @@ impl RouterHttpClientBuilder {
         })
     }
 
-    /// The checks that `connect` makes before any network I/O, in the
-    /// order that it documents.
-    pub(crate) fn check(&self) -> Result<(), Error> {
-        self.clone().prepare().map(drop)
-    }
-
     /// Checks the options, in the order that `connect` documents, and
     /// returns the checked description of the fallback router, which holds
     /// the verifier for every router, and what the client is made from. It

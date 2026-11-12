@@ -9,15 +9,16 @@
 //! verification expires or the enclave's key changes, and refuses a
 //! request to any origin other than the one that it is bound to.
 //!
-//! # Status
+//! # The gateway route is not implemented
 //!
-//! Everything but the gateway route is complete. The gateway route
-//! (feature `unstable-gateway`) is its API without the machinery behind
-//! it: its signatures and documented contracts are in place, and each of
-//! its functions that would perform network I/O fails with an error whose
+//! The feature `unstable-gateway`, which is off by default, is
+//! experimental and **not implemented**. It adds the types and signatures
+//! of the gateway route without the machinery behind them: each of its
+//! functions that would perform network I/O fails with an error whose
 //! message says that the function is not implemented yet. That error has
 //! the kind [`ErrorKind::Configuration`], since retrying cannot help; it
-//! does not mean that an option is wrong.
+//! does not mean that an option is wrong. Do not enable the feature to use
+//! the gateway; everything else in the crate is complete without it.
 //!
 //! # Choosing a client
 //!
@@ -25,17 +26,17 @@
 //! |---|---|---|
 //! | Tinfoil's router, discovered (recommended) | [`RouterHttpClient`] | `Client`, or `RouterOpenAIClient` to configure it |
 //! | an enclave that the caller names | [`EnclaveHttpClient`] | `EnclaveOpenAIClient` |
-//! | Tinfoil's gateway (experimental, feature `unstable-gateway`) | `GatewayHttpClient` | `GatewayOpenAIClient` |
+//! | Tinfoil's gateway (feature `unstable-gateway`: experimental, not implemented) | `GatewayHttpClient` | `GatewayOpenAIClient` |
 //!
 //! The OpenAI clients need the `openai` feature, which is on by default.
 //!
 #![cfg_attr(feature = "openai", doc = "```no_run")]
 #![cfg_attr(not(feature = "openai"), doc = "```ignore")]
-//! use tinfoil_next::async_openai::config::OpenAIConfig;
-//! use tinfoil_next::chat::{ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs};
+//! use tinfoil::async_openai::config::OpenAIConfig;
+//! use tinfoil::chat::{ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let client = tinfoil_next::Client::connect(OpenAIConfig::new().with_api_key("...")).await?;
+//! let client = tinfoil::Client::connect(OpenAIConfig::new().with_api_key("...")).await?;
 //! let request = CreateChatCompletionRequestArgs::default()
 //!     .model("gpt-oss-120b")
 //!     .messages([ChatCompletionRequestUserMessageArgs::default()
@@ -83,7 +84,7 @@
 //! | feature | what it adds |
 //! |---|---|
 //! | `openai` (default) | the OpenAI clients over `async_openai`, with its chat completion, embedding, audio and responses APIs; the relaxed chat helper; the `sse` and `multimodal` modules |
-//! | `unstable-gateway` | the gateway route. Experimental; anything behind it may change or be removed in any release |
+//! | `unstable-gateway` | the types of the gateway route. Experimental and not implemented: its calls fail, and anything behind it may change or be removed in any release |
 //!
 //! The other API families of `async_openai` are opt-in. Each feature below
 //! implies `openai` and adds the family's calls to the OpenAI clients,
@@ -116,9 +117,6 @@
 //! are not offered either, and neither is its videos API, which
 //! `async_openai` has deprecated.
 
-// The bodies of this crate are placeholders, which leave their arguments
-// and most internal items unused.
-#![allow(dead_code, unused_variables)]
 // Clippy has no test exemption for this lint, unlike the other denied
 // lints (see clippy.toml). Overflow in a test is a test failure.
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
@@ -179,6 +177,12 @@ pub use openai::{GatewayOpenAIClient, GatewayOpenAIClientBuilder};
 pub use options::TransportMode;
 pub use request::RequestBuilder;
 pub use router_client::{RouterHttpClient, RouterHttpClientBuilder};
+
+// Compiles the examples of the repository's README as documentation tests,
+// so that they cannot drift from the API.
+#[cfg(all(doctest, feature = "openai"))]
+#[doc = include_str!("../../../README.md")]
+struct ReadmeExamples;
 
 /// The version of this SDK.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

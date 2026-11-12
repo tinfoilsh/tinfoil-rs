@@ -138,11 +138,11 @@ pub(crate) use openai_client_methods;
 /// whole `async_openai` API is available on it through `Deref`:
 ///
 /// ```no_run
-/// use tinfoil_next::async_openai::config::OpenAIConfig;
-/// use tinfoil_next::embeddings::CreateEmbeddingRequestArgs;
+/// use tinfoil::async_openai::config::OpenAIConfig;
+/// use tinfoil::embeddings::CreateEmbeddingRequestArgs;
 ///
 /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = tinfoil_next::Client::connect(OpenAIConfig::new().with_api_key("...")).await?;
+/// let client = tinfoil::Client::connect(OpenAIConfig::new().with_api_key("...")).await?;
 /// let request = CreateEmbeddingRequestArgs::default()
 ///     .model("nomic-embed-text")
 ///     .input("hello")

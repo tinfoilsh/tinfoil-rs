@@ -1,8 +1,12 @@
 [package]
-name = "tinfoil-next"
-version = "0.0.0"
+name = "tinfoil"
 description = "Attested HTTP and OpenAI clients for Tinfoil enclaves"
+readme = "../../README.md"
+keywords = ["tinfoil", "attestation", "enclave", "openai", "confidential-computing"]
+categories = ["api-bindings", "cryptography", "web-programming::http-client"]
+# Releases are git tags of the repository; nothing is uploaded to a registry.
 publish = false
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -47,12 +51,36 @@ openai-safety = ["openai", "async-openai/safety"]
 openai-skills = ["openai", "async-openai/skill"]
 openai-uploads = ["openai", "async-openai/upload"]
 openai-vector-stores = ["openai", "async-openai/vectorstore"]
-# The gateway route. Experimental: everything behind this feature may change
-# or be removed in any release.
+# The gateway route. Experimental and not implemented: the feature adds the
+# route's types, whose calls fail, and everything behind it may change or be
+# removed in any release.
 unstable-gateway = ["dep:base64", "dep:hkdf", "dep:hmac"]
 
+# Documentation is built with every feature but `unstable-gateway`, whose
+# route is not implemented.
+[package.metadata.docs.rs]
+features = [
+    "openai-administration",
+    "openai-batches",
+    "openai-byot",
+    "openai-chatkit",
+    "openai-completions",
+    "openai-containers",
+    "openai-content-provenance-checks",
+    "openai-evals",
+    "openai-files",
+    "openai-fine-tuning",
+    "openai-images",
+    "openai-models",
+    "openai-moderations",
+    "openai-safety",
+    "openai-skills",
+    "openai-uploads",
+    "openai-vector-stores",
+]
+
 [dependencies]
-tinfoil-verifier = { path = "../verifier", version = "=0.1.0" }
+tinfoil-verifier = { workspace = true }
 
 # HTTP. `rustls-no-provider` keeps reqwest from selecting a rustls crypto
 # provider: the clients hand it a TLS configuration built on `ring`, and

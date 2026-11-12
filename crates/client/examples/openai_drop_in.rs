@@ -2,16 +2,16 @@
 //! to Tinfoil's router, verified before the first request.
 //!
 //! ```sh
-//! TINFOIL_API_KEY=... cargo run -p tinfoil-next --example openai_drop_in
+//! TINFOIL_API_KEY=... cargo run -p tinfoil --example openai_drop_in
 //! ```
 
-use tinfoil_next::async_openai::config::OpenAIConfig;
-use tinfoil_next::chat::{ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs};
-use tinfoil_next::{Client, Error, ErrorKind};
+use tinfoil::async_openai::config::OpenAIConfig;
+use tinfoil::chat::{ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs};
+use tinfoil::{Client, Error, ErrorKind};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("TINFOIL_API_KEY")?;
+    let api_key = api_key()?;
     let client = Client::connect(OpenAIConfig::new().with_api_key(api_key)).await?;
 
     // What the client verified, and where it sends.
@@ -50,4 +50,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// The API key from the environment, or an error that says what to set.
+fn api_key() -> Result<String, Box<dyn std::error::Error>> {
+    match std::env::var("TINFOIL_API_KEY") {
+        Ok(key) if !key.is_empty() => Ok(key),
+        _ => Err("set the TINFOIL_API_KEY environment variable to a Tinfoil API key".into()),
+    }
 }

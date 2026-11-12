@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::error::{Error, ErrorKind};
 use crate::internal::transport::base_url::authority_url;
-use crate::internal::{BoxFuture, Clock, fetch, system_clock};
+use crate::internal::{BoxFuture, Clock, fetch};
 use crate::options::{Check, VerificationCheck};
 use crate::verifier::{
     BoxError, CRYPTO_MATERIAL_ID_HPKE, CRYPTO_MATERIAL_ID_TLS, CryptoMaterialItem,
@@ -92,6 +92,7 @@ pub(crate) struct Config {
 pub(crate) struct Enclave<V = Verification> {
     host: String,
     repo: Option<String>,
+    #[cfg(test)]
     verifier: Option<Arc<Verifier>>,
     source: Source<V>,
     check: Option<Check<V>>,
@@ -166,15 +167,9 @@ pub(crate) fn network_fetch() -> Fetch {
 }
 
 impl Enclave<Verification> {
-    /// An enclave that is verified by fetching its attestation document
-    /// and judged by the system clock. See [`Config::check`] for the
-    /// checks.
-    pub(crate) fn new(config: Config) -> Result<Self, Error> {
-        Self::with_fetch(config, system_clock(), network_fetch())
-    }
-
     /// An enclave whose documents come from `fetch`. It does no I/O; the
     /// failures are those of [`Config::check`].
+    #[cfg(test)]
     pub(crate) fn with_fetch(config: Config, clock: Clock, fetch: Fetch) -> Result<Self, Error> {
         Ok(Self::from_checked(config.check()?, clock, fetch))
     }
@@ -210,6 +205,7 @@ impl Enclave<Verification> {
         Self {
             host: checked.host,
             repo: checked.repo,
+            #[cfg(test)]
             verifier: Some(verifier),
             source,
             check: checked.verification_check,
@@ -218,6 +214,7 @@ impl Enclave<Verification> {
     }
 
     /// The verification policy, which several enclaves can share.
+    #[cfg(test)]
     pub(crate) fn verifier(&self) -> Option<&Arc<Verifier>> {
         self.verifier.as_ref()
     }
@@ -236,6 +233,7 @@ impl<V: Evidence> Enclave<V> {
         Self {
             host: host.to_owned(),
             repo: None,
+            #[cfg(test)]
             verifier: None,
             source,
             check,

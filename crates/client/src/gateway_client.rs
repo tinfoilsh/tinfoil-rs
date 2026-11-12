@@ -1,5 +1,9 @@
 //! The client for Tinfoil's inference gateway. Experimental.
 
+// The gateway route is not implemented: its bodies are placeholders, which
+// leave their arguments and the state that they would use unused.
+#![allow(dead_code, unused_variables)]
+
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;

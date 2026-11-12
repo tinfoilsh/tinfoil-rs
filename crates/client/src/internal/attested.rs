@@ -46,6 +46,7 @@ pub(crate) struct AttestedClient<V = Verification> {
     base_url: Url,
     /// Where an OpenAI client sends: the `base_url` option, or the
     /// enclave's origin with the path `/v1/`.
+    #[cfg_attr(not(any(test, feature = "openai")), allow(dead_code))]
     openai_url: Url,
     /// The `timeout` option.
     timeout: Option<Duration>,
@@ -159,6 +160,7 @@ impl<V: Evidence> AttestedClient<V> {
         &self.base_url
     }
 
+    #[cfg(any(test, feature = "openai"))]
     pub(crate) fn openai_url(&self) -> &Url {
         &self.openai_url
     }

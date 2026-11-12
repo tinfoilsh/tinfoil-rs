@@ -12,6 +12,7 @@ use crate::internal::transport::{Failure, RoundTrip};
 
 /// The header that tells a proxy which enclave to forward a sealed request
 /// to, so that the request reaches the enclave that the client verified.
+#[cfg(test)]
 pub(crate) const ENCLAVE_URL_HEADER: &str = "X-Tinfoil-Enclave-Url";
 
 /// `next` behind a layer that sets [`ENCLAVE_URL_HEADER`] to the enclave's

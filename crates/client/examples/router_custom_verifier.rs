@@ -3,14 +3,14 @@
 //! verification that the client relies on.
 //!
 //! ```sh
-//! TINFOIL_API_KEY=... cargo run -p tinfoil-next --example router_custom_verifier
+//! TINFOIL_API_KEY=... cargo run -p tinfoil --example router_custom_verifier
 //! ```
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use tinfoil_next::RouterHttpClient;
-use tinfoil_next::verifier::Verifier;
+use tinfoil::RouterHttpClient;
+use tinfoil::verifier::Verifier;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,7 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("router: {}", client.enclave());
 
-    let api_key = std::env::var("TINFOIL_API_KEY")?;
+    // The router is verified without a key; requests to its API need one.
+    let api_key = api_key()?;
 
     let response = client
         .post(client.base_url().join("v1/chat/completions")?)
@@ -62,4 +63,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("valid until {:?}", renewed.freshness_expires_at());
 
     Ok(())
+}
+
+/// The API key from the environment, or an error that says what to set.
+fn api_key() -> Result<String, Box<dyn std::error::Error>> {
+    match std::env::var("TINFOIL_API_KEY") {
+        Ok(key) if !key.is_empty() => Ok(key),
+        _ => Err("set the TINFOIL_API_KEY environment variable to a Tinfoil API key".into()),
+    }
 }
