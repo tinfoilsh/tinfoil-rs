@@ -506,6 +506,25 @@ mod tests {
         .await
     }
 
+    #[tokio::test]
+    async fn a_fetch_offers_http2_then_http1() {
+        use crate::internal::transport::tls::testing::made::{KEY_A, LEAF_A};
+        use crate::internal::transport::tls::testing::{Handler, Protocols, full, serve};
+
+        let handler: Handler = Arc::new(|_| Box::pin(async { hyper::Response::new(full("{}")) }));
+        let server = serve(&LEAF_A, &KEY_A, Protocols::Both, handler).await;
+        let url = Url::parse(&format!("https://127.0.0.1:{}/", server.port)).expect("url");
+        // The client trusts only the compiled-in roots, so the handshake
+        // with the local server fails; what it offered is on record by
+        // then.
+        let client = plain_client_for(&url).expect("client");
+        let error = get_bounded(&client, url, 1024, Duration::from_secs(10), "document")
+            .await
+            .expect_err("an untrusted server");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert_eq!(server.offered(), [["h2", "http/1.1"]]);
+    }
+
     #[test]
     fn hex_is_lowercase_and_two_digits_per_byte() {
         assert_eq!(lower_hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
