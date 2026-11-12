@@ -209,7 +209,7 @@ jobs:
           cargo test --locked -p tinfoil-verifier --doc
 
   deny:
-    name: Banned dependencies
+    name: Dependency policy
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -218,7 +218,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check banned crates
+      # Advisories, banned crates, licences and sources, as deny.toml sets
+      # them, for every feature and against the committed lockfile.
+      - name: Check advisories, bans, licences and sources
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
-          command: check bans
+          command: check
+          arguments: --all-features --locked
