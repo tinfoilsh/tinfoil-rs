@@ -50,6 +50,7 @@ impl RoundTrip for Replay {
                      is a stream, which cannot be replayed",
                 )
                 .after(rejection)
+                .unsent_after_rejection()
                 .into());
             };
             match next.round_trip(again).await {

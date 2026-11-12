@@ -68,6 +68,9 @@ pub struct Error {
 struct Inner {
     kind: ErrorKind,
     timeout: bool,
+    /// Whether a key rejection left the request unsent because its body
+    /// could not be produced again.
+    unsent_after_rejection: bool,
     cause: Cause,
     earlier_attempt: Option<Error>,
 }
@@ -162,6 +165,7 @@ impl Error {
             inner: Arc::new(Inner {
                 kind,
                 timeout: false,
+                unsent_after_rejection: false,
                 cause,
                 earlier_attempt: None,
             }),
@@ -196,6 +200,19 @@ impl Error {
     /// The same error, marked as the expiry of a deadline.
     pub(crate) fn timed_out(self) -> Self {
         self.rebuild(|inner| inner.timeout = true)
+    }
+
+    /// The same error, marked as the one for a request that was not sent
+    /// again after a key rejection because its body is a stream. A caller
+    /// that can build the request anew may send it once more.
+    pub(crate) fn unsent_after_rejection(self) -> Self {
+        self.rebuild(|inner| inner.unsent_after_rejection = true)
+    }
+
+    /// Whether the error carries the mark of
+    /// [`unsent_after_rejection`](Self::unsent_after_rejection).
+    pub(crate) fn is_unsent_after_rejection(&self) -> bool {
+        self.inner.unsent_after_rejection
     }
 
     /// The same error, with the failure of the attempt before it attached.
