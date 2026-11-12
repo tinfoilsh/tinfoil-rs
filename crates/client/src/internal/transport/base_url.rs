@@ -26,7 +26,9 @@ use crate::error::Error;
 /// 5. it contains `?` or `#`: a query string or a fragment, even an empty
 ///    one, which joining a path would drop;
 /// 6. it does not parse as a URL with a host;
-/// 7. it is `http://` to a host other than `localhost` or a loopback IP
+/// 7. its host is an IPv4 address in any spelling other than four decimal
+///    numbers without leading zeros ([`plain_ipv4`]);
+/// 8. it is `http://` to a host other than `localhost` or a loopback IP
 ///    address, as written. Other names are not resolved, so DNS cannot make
 ///    a remote host pass. Headers are not sealed in any transport mode, so
 ///    plaintext is accepted only where the traffic never leaves the machine.
@@ -69,6 +71,11 @@ pub(crate) fn validate(base_url: &str) -> Result<Url, Error> {
     let Some(host) = url.host() else {
         return Err(invalid("it has no host"));
     };
+    if !plain_ipv4(authority, &host) {
+        return Err(invalid(
+            "an IPv4 address must be written as four decimal numbers",
+        ));
+    }
     if url.scheme() == "http" && !is_loopback_host(&host) {
         return Err(invalid(
             "HTTP is allowed only for localhost or a loopback IP address; use HTTPS to protect request headers",
@@ -120,7 +127,8 @@ pub(crate) fn enclave_origin(host: &str) -> Result<String, Error> {
 /// room for a scheme, a path, a query, a fragment, user information,
 /// whitespace or an escape; characters outside ASCII are accepted for an
 /// internationalized name. The value must then parse as the authority of a
-/// URL.
+/// URL, and an IPv4 address must be in its plain spelling
+/// ([`plain_ipv4`]).
 pub(crate) fn authority_url(authority: &str) -> Result<Url, Error> {
     let refused = || Error::configuration("an enclave host must be a host with an optional port");
     let allowed = |c: char| {
@@ -132,7 +140,8 @@ pub(crate) fn authority_url(authority: &str) -> Result<Url, Error> {
         return Err(refused());
     }
     let url = Url::parse(&format!("https://{authority}/")).map_err(|_| refused())?;
-    if url.host().is_none() || url.path() != "/" {
+    let plain = url.host().is_some_and(|host| plain_ipv4(authority, &host));
+    if !plain || url.path() != "/" {
         return Err(refused());
     }
     Ok(url)
@@ -148,6 +157,27 @@ pub(crate) fn is_loopback(host: &str) -> bool {
         || bare
             .parse::<std::net::IpAddr>()
             .is_ok_and(|address| address.is_loopback())
+}
+
+/// Whether the host of `authority` (a host with an optional port, as the
+/// caller wrote it) is written the way that `host`, its parsed form, is
+/// printed, when that form is an IPv4 address.
+///
+/// URL parsing reads several spellings as IPv4: fewer than four parts
+/// (`127.1`), one number (`2130706433`), octal (`0177.0.0.1`), hexadecimal
+/// (`0x7f.0.0.1`) and a trailing dot (`127.0.0.1.`). Only four decimal
+/// numbers without leading zeros are accepted, so that the address that a
+/// caller reads is the address that is used. Names and IPv6 addresses
+/// pass.
+fn plain_ipv4(authority: &str, host: &url::Host<&str>) -> bool {
+    let url::Host::Ipv4(address) = host else {
+        return true;
+    };
+    let written = match authority.rsplit_once(':') {
+        Some((host, _port)) => host,
+        None => authority,
+    };
+    written == address.to_string()
 }
 
 fn is_loopback_host(host: &url::Host<&str>) -> bool {
@@ -224,6 +254,35 @@ mod tests {
             ("https://proxy.example.com:99999/", "not a valid URL"),
             ("https://proxy.example.com:port/", "not a valid URL"),
             ("https://xn--/", "not a valid URL"),
+            // An IPv4 address in a spelling that parsing would rewrite,
+            // loopback or not, over either scheme.
+            ("http://127.1/", "four decimal numbers"),
+            ("http://127.0.1/", "four decimal numbers"),
+            ("http://2130706433/", "four decimal numbers"),
+            ("http://0177.0.0.1/", "four decimal numbers"),
+            ("http://0x7f.0.0.1/", "four decimal numbers"),
+            ("http://0x7f000001/", "four decimal numbers"),
+            ("http://0X7F.0.0.1:8080/", "four decimal numbers"),
+            ("http://127.000.000.001/", "four decimal numbers"),
+            ("http://127.0.0.1./", "four decimal numbers"),
+            ("http://127.0.0.01:8080/", "four decimal numbers"),
+            ("https://127.1/", "four decimal numbers"),
+            ("https://2130706433/", "four decimal numbers"),
+            ("https://0177.0.0.1/", "four decimal numbers"),
+            ("https://0x7f.0.0.1/", "four decimal numbers"),
+            ("https://0x7f000001/", "four decimal numbers"),
+            ("https://192.0.2.7./", "four decimal numbers"),
+            ("https://192.0.2.007/", "four decimal numbers"),
+            ("https://3221225991:8443/v1", "four decimal numbers"),
+            ("https://192.0x00.2.7/", "four decimal numbers"),
+            // A number that is too large for an address, and a name whose
+            // last label is a number.
+            ("https://4294967296/", "not a valid URL"),
+            ("https://example.1/", "not a valid URL"),
+            // An IPv6 zone identifier.
+            ("http://[::1%25lo0]/", "percent-encoded"),
+            ("https://[fe80::1%25eth0]/", "percent-encoded"),
+            ("https://[fe80::1%eth0]/", "percent-encoded"),
             // Plaintext to a host that is not this machine.
             ("http://proxy.example.com/", "HTTP is allowed only"),
             ("http://localhost.example.com/", "HTTP is allowed only"),
@@ -232,6 +291,10 @@ mod tests {
             ("http://0.0.0.0/", "HTTP is allowed only"),
             ("http://[::2]/", "HTTP is allowed only"),
             ("http://[::ffff:127.0.0.1]/", "HTTP is allowed only"),
+            ("http://[::ffff:7f00:1]/", "HTTP is allowed only"),
+            ("http://[::127.0.0.1]/", "HTTP is allowed only"),
+            ("http://[::]/", "HTTP is allowed only"),
+            ("http://localhost.:8080/", "HTTP is allowed only"),
             ("http://128.0.0.1/", "HTTP is allowed only"),
         ];
         for (input, reason) in refused {
@@ -322,9 +385,21 @@ mod tests {
             ("http://127.0.0.1:8080", "http://127.0.0.1:8080/"),
             ("http://127.8.9.10/", "http://127.8.9.10/"),
             ("http://[::1]:8080/", "http://[::1]:8080/"),
-            // Other spellings of an IPv4 loopback address parse to it.
-            ("http://127.1/", "http://127.0.0.1/"),
-            ("http://2130706433/", "http://127.0.0.1/"),
+            // IPv6 has several standard spellings of one address; each is
+            // unambiguous and is printed in the shortest.
+            ("http://[0:0:0:0:0:0:0:1]/", "http://[::1]/"),
+            ("http://[::0001]:8080/", "http://[::1]:8080/"),
+            (
+                "http://[0000:0000:0000:0000:0000:0000:0000:0001]/",
+                "http://[::1]/",
+            ),
+            ("https://[2001:DB8::0:1]/", "https://[2001:db8::1]/"),
+            // An IPv4 address inside an IPv6 one is still an IPv6 address.
+            ("https://[::ffff:192.0.2.7]/", "https://[::ffff:c000:207]/"),
+            // Plain IPv4, with and without a port.
+            ("https://192.0.2.7:8443/", "https://192.0.2.7:8443/"),
+            ("https://0.0.0.0/", "https://0.0.0.0/"),
+            ("https://255.255.255.255/", "https://255.255.255.255/"),
         ];
         for (input, expected) in accepted {
             let url = validate(input).unwrap_or_else(|error| panic!("{input:?}: {error}"));
@@ -406,6 +481,10 @@ mod tests {
             ("192.0.2.7:8443", "https://192.0.2.7:8443"),
             ("[2001:db8::1]:8443", "https://[2001:db8::1]:8443"),
             ("localhost", "https://localhost"),
+            ("localhost.", "https://localhost."),
+            ("192.0.2.7", "https://192.0.2.7"),
+            ("[0:0:0:0:0:0:0:1]:8443", "https://[::1]:8443"),
+            ("[::ffff:192.0.2.7]", "https://[::ffff:c000:207]"),
             ("my_enclave.example.com", "https://my_enclave.example.com"),
             ("bücher.example", "https://xn--bcher-kva.example"),
         ];
@@ -431,6 +510,17 @@ mod tests {
             "enclave.example.com:port",
             "enclave.example.com\n",
             "enclave.example.com&enclave=evil.example",
+            "127.1",
+            "2130706433",
+            "0177.0.0.1",
+            "0x7f.0.0.1",
+            "0x7f000001",
+            "192.0.2.7.",
+            "192.0.2.007:8443",
+            "3221225991:8443",
+            "example.1",
+            "[fe80::1%25eth0]",
+            "[fe80::1%eth0]",
             "enclave.example.com=x",
             "enclave.example.com;x",
             "enclave.example.com,evil.example",
