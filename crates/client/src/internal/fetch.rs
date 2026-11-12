@@ -337,6 +337,8 @@ mod tests {
         Send(Vec<u8>),
         /// Send these bytes after this much of Tokio's time.
         SendAfter(Duration, Vec<u8>),
+        /// Send these bytes, then keep the connection open and send no more.
+        SendThenStall(Vec<u8>),
         /// Never answer.
         Hang,
     }
@@ -394,6 +396,10 @@ mod tests {
                         Reply::SendAfter(delay, response) => {
                             tokio::time::sleep(delay).await;
                             response
+                        }
+                        Reply::SendThenStall(response) => {
+                            let _ = socket.write_all(&response).await;
+                            std::future::pending().await
                         }
                         Reply::Hang => std::future::pending().await,
                     };
@@ -727,7 +733,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_body_that_stalls_is_a_timeout_too() {
-        let server = serve(b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nabc".to_vec()).await;
+        // The connection stays open: a server that closed it would end the
+        // body early, which is a different failure.
+        let server = serve_with(|_| {
+            Reply::SendThenStall(b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nabc".to_vec())
+        })
+        .await;
         let error = get(&server, 1024).await.expect_err("a stalled body");
         assert!(error.is_timeout(), "{error}");
     }
