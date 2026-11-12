@@ -2427,6 +2427,7 @@ dependencies = [
 name = "tinfoil-next"
 version = "0.0.0"
 dependencies = [
+ "aes-gcm",
  "async-openai 0.42.2",
  "async-stream",
  "base64 0.22.1",
@@ -2436,6 +2437,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hkdf",
  "hmac",
+ "hpke",
  "http",
  "libc",
  "reqwest",
