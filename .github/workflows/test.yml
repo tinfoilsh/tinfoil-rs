@@ -156,6 +156,13 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --no-deps -p tinfoil-next --all-features
 
+      # Without the OpenAI feature, links to its items must not be left
+      # dangling.
+      - name: Build the client's documentation without its default features
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps -p tinfoil-next --no-default-features
+
       # The conformance adapter's stages, and the verifier modules that they
       # reach, are compiled only with this flag.
       - name: Run clippy with the conformance stages

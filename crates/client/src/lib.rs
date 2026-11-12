@@ -9,13 +9,25 @@
 //! verification expires or the enclave's key changes, and refuses a
 //! request to any origin other than the one that it is bound to.
 //!
+//! # Status
+//!
+//! This version of the crate is its API without the machinery behind it:
+//! the types, the signatures and their documented contracts are in place,
+//! and every function that would perform network I/O (each `connect`,
+//! `fetch_catalog`, the relaxed chat calls and `parse_event_stream`) fails
+//! with an error whose message says that the function is not implemented
+//! yet. That error has the kind [`ErrorKind::Configuration`], since
+//! retrying cannot help; it does not mean that an option is wrong.
+//!
 //! # Choosing a client
 //!
 //! | route | HTTP client | OpenAI client |
 //! |---|---|---|
-//! | Tinfoil's router, discovered (recommended) | [`RouterHttpClient`] | [`Client`], or [`RouterOpenAIClient`] to configure it |
-//! | an enclave that the caller names | [`EnclaveHttpClient`] | [`EnclaveOpenAIClient`] |
+//! | Tinfoil's router, discovered (recommended) | [`RouterHttpClient`] | `Client`, or `RouterOpenAIClient` to configure it |
+//! | an enclave that the caller names | [`EnclaveHttpClient`] | `EnclaveOpenAIClient` |
 //! | Tinfoil's gateway (experimental, feature `unstable-gateway`) | `GatewayHttpClient` | `GatewayOpenAIClient` |
+//!
+//! The OpenAI clients need the `openai` feature, which is on by default.
 //!
 #![cfg_attr(feature = "openai", doc = "```no_run")]
 #![cfg_attr(not(feature = "openai"), doc = "```ignore")]
@@ -46,7 +58,7 @@
 //!   state, with methods on `&self`. There is no `close`; dropping the
 //!   last clone releases the connections, and no background task runs.
 //! - **Requests use `reqwest`'s types.** The crate re-exports [`reqwest`]
-//!   and, with the `openai` feature, [`async_openai`], so that the types in
+//!   and, with the `openai` feature, `async_openai`, so that the types in
 //!   its API are the ones that it was built with.
 //! - **Cancellation is dropping the future.** Every async method says
 //!   what a drop leaves behind. Deadlines are the builders' `timeout`
@@ -67,7 +79,7 @@
 //! # Features
 //!
 //! - `openai` (default): the OpenAI clients over `async_openai`, the
-//!   relaxed chat helper, [`sse`] and [`multimodal`].
+//!   relaxed chat helper, and the `sse` and `multimodal` modules.
 //! - `unstable-gateway`: the gateway route. Experimental; anything behind
 //!   it may change or be removed in any release.
 
