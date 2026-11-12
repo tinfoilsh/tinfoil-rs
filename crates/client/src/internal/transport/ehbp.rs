@@ -31,7 +31,7 @@ use crate::internal::transport::{Mode, RoundTrip};
 /// - **Rejection.** The enclave answers a body sealed to a key that it no
 ///   longer holds with the protocol's key-configuration problem. That is
 ///   reported as an attestation error marked
-///   [`PeerLacksKey`](crate::internal::transport::PeerLacksKey).
+///   [`Failure::peer_lacks_key`](crate::internal::transport::Failure::peer_lacks_key).
 /// - **Redirects** are not followed; a `3xx` is returned to the caller.
 /// - **Network.** The carrier is one shared `reqwest::Client` with the
 ///   standard certificate checks; it is not pinned, since the sealing is

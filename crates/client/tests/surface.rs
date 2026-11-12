@@ -7,8 +7,8 @@
 //! that the clients promise and the few values that need no network.
 
 // The signatures are spelled out in full because they are what the test
-// pins.
-#![allow(clippy::type_complexity)]
+// pins, and a helper outside a test function fails its test by panicking.
+#![allow(clippy::expect_used, clippy::type_complexity)]
 
 use std::error::Error as StdError;
 use std::sync::Arc;
@@ -188,6 +188,178 @@ async fn router_client() -> Result<(), Error> {
         Ok(_) => {}
     }
     Ok(())
+}
+
+/// The message of the error that `connect` returns for a builder. Every
+/// host here ends in `.invalid`, which never resolves, so a refusal cannot
+/// be a failed connection.
+async fn enclave_refusal(builder: EnclaveHttpClientBuilder) -> String {
+    let error = builder.connect().await.expect_err("no client");
+    assert_eq!(error.kind(), ErrorKind::Configuration, "{error}");
+    error.to_string()
+}
+
+async fn router_refusal(builder: RouterHttpClientBuilder) -> String {
+    let error = builder.connect().await.expect_err("no client");
+    assert_eq!(error.kind(), ErrorKind::Configuration, "{error}");
+    error.to_string()
+}
+
+#[tokio::test]
+async fn an_enclave_client_checks_its_options_before_any_io() {
+    let builder = || EnclaveHttpClient::builder("enclave.invalid", Some("owner/name"));
+    let ehbp = || builder().transport_mode(TransportMode::Ehbp);
+    let cases: Vec<(EnclaveHttpClientBuilder, &str)> = vec![
+        (
+            EnclaveHttpClient::builder("", Some("owner/name")),
+            "enclave host",
+        ),
+        (
+            EnclaveHttpClient::builder("https://enclave.invalid", Some("owner/name")),
+            "enclave host",
+        ),
+        (
+            EnclaveHttpClient::builder("enclave.invalid/v1", Some("owner/name")),
+            "enclave host",
+        ),
+        (ehbp().base_url(""), "invalid base URL"),
+        (ehbp().base_url("proxy.invalid"), "invalid base URL"),
+        (
+            ehbp().base_url("http://proxy.invalid/"),
+            "HTTP is allowed only",
+        ),
+        (
+            ehbp().base_url("https://user:hunter2@proxy.invalid/"),
+            "user name",
+        ),
+        (
+            ehbp().base_url("https://proxy.invalid/?key=1"),
+            "query string",
+        ),
+        (
+            builder().user_cache_secret(""),
+            "user cache secret is empty",
+        ),
+        (builder().timeout(Duration::ZERO), "timeout is zero"),
+        (
+            EnclaveHttpClient::builder("enclave.invalid", Some("")),
+            "repository pin is empty",
+        ),
+        (
+            EnclaveHttpClient::builder("enclave.invalid", Some("not a reference")),
+            "",
+        ),
+        // A proxy needs sealed bodies: the default mode pins connections.
+        (
+            builder().base_url("https://proxy.invalid/"),
+            "requires TransportMode::Ehbp",
+        ),
+        (
+            builder()
+                .transport_mode(TransportMode::Tls)
+                .base_url("https://enclave.invalid:8443/"),
+            "requires TransportMode::Ehbp",
+        ),
+    ];
+    for (builder, reason) in cases {
+        let message = enclave_refusal(builder).await;
+        assert!(message.contains(reason), "{message}");
+        assert!(!message.contains("not implemented"), "{message}");
+        assert!(!message.contains("hunter2"), "{message}");
+    }
+}
+
+#[tokio::test]
+async fn an_enclave_client_reports_its_options_in_the_documented_order() {
+    // Each builder is wrong in two ways; the earlier check answers.
+    let message =
+        enclave_refusal(EnclaveHttpClient::builder("", Some("")).base_url("ftp://proxy.invalid/"))
+            .await;
+    assert!(message.contains("enclave host"), "{message}");
+
+    let message = enclave_refusal(
+        EnclaveHttpClient::builder("enclave.invalid", Some(""))
+            .base_url("ftp://proxy.invalid/")
+            .timeout(Duration::ZERO),
+    )
+    .await;
+    assert!(message.contains("invalid base URL"), "{message}");
+
+    let message = enclave_refusal(
+        EnclaveHttpClient::builder("enclave.invalid", Some("")).timeout(Duration::ZERO),
+    )
+    .await;
+    assert!(message.contains("timeout is zero"), "{message}");
+
+    let message = enclave_refusal(
+        EnclaveHttpClient::builder("enclave.invalid", Some("")).base_url("https://proxy.invalid/"),
+    )
+    .await;
+    assert!(message.contains("repository pin is empty"), "{message}");
+}
+
+#[tokio::test]
+async fn options_that_pass_every_check_reach_the_placeholder() {
+    let accepted = [
+        EnclaveHttpClient::builder("enclave.invalid", Some("owner/name")),
+        EnclaveHttpClient::builder("enclave.invalid:8443", None),
+        EnclaveHttpClient::builder("enclave.invalid", Some("owner/name@v1.2.3"))
+            .base_url("https://enclave.invalid/api/"),
+        EnclaveHttpClient::builder("enclave.invalid", Some("owner/name"))
+            .transport_mode(TransportMode::Ehbp)
+            .base_url("https://proxy.invalid/tinfoil")
+            .user_cache_secret("opaque")
+            .timeout(Duration::from_secs(1)),
+        EnclaveHttpClient::builder("enclave.invalid", Some("owner/name"))
+            .transport_mode(TransportMode::Ehbp)
+            .base_url("http://localhost:8080/"),
+    ];
+    for builder in accepted {
+        let message = enclave_refusal(builder).await;
+        assert!(message.contains("not implemented yet"), "{message}");
+    }
+    let message = router_refusal(
+        RouterHttpClient::builder()
+            .transport_mode(TransportMode::Ehbp)
+            .base_url("https://proxy.invalid/"),
+    )
+    .await;
+    assert!(message.contains("not implemented yet"), "{message}");
+}
+
+#[tokio::test]
+async fn a_router_client_checks_its_options_before_any_io() {
+    let ehbp = || RouterHttpClient::builder().transport_mode(TransportMode::Ehbp);
+    let cases: Vec<(RouterHttpClientBuilder, &str)> = vec![
+        (ehbp().base_url(""), "invalid base URL"),
+        (
+            ehbp().base_url("http://proxy.invalid/"),
+            "HTTP is allowed only",
+        ),
+        (
+            ehbp().base_url("https://user:hunter2@proxy.invalid/"),
+            "user name",
+        ),
+        // The router is not known before discovery, so any base URL is a
+        // proxy, and the default mode cannot go through one.
+        (
+            RouterHttpClient::builder().base_url("https://proxy.invalid/"),
+            "requires TransportMode::Ehbp",
+        ),
+        (
+            RouterHttpClient::builder().user_cache_secret(""),
+            "user cache secret is empty",
+        ),
+        (
+            RouterHttpClient::builder().timeout(Duration::ZERO),
+            "timeout is zero",
+        ),
+    ];
+    for (builder, reason) in cases {
+        let message = router_refusal(builder).await;
+        assert!(message.contains(reason), "{message}");
+        assert!(!message.contains("hunter2"), "{message}");
+    }
 }
 
 #[tokio::test]

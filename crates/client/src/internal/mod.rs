@@ -29,6 +29,8 @@ pub(crate) mod fetch;
 pub(crate) mod gateway;
 pub(crate) mod router;
 pub(crate) mod sdkinfo;
+#[cfg(test)]
+pub(crate) mod testing;
 pub(crate) mod transport;
 
 /// A boxed future that can move between threads.

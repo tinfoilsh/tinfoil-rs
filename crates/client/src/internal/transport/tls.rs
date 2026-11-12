@@ -25,7 +25,7 @@ use crate::internal::transport::{Mode, RoundTrip};
 /// - **Rejection.** A handshake that fails a certificate check, the pin
 ///   included, never reached the enclave's application. It is reported as
 ///   an attestation error marked
-///   [`PeerLacksKey`](crate::internal::transport::PeerLacksKey), which
+///   [`Failure::peer_lacks_key`](crate::internal::transport::Failure::peer_lacks_key), which
 ///   makes the transport verify again.
 /// - **Retirement.** A new binding is a new `reqwest::Client`. The old one
 ///   is dropped by the transport; requests in flight on it finish, and its

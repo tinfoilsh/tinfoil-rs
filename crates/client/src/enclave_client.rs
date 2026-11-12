@@ -8,6 +8,8 @@ use reqwest::Url;
 
 use crate::error::Error;
 use crate::internal::attested::AttestedClient;
+use crate::internal::enclave;
+use crate::internal::transport::base_url;
 use crate::options::{RouteOptions, Secret, TransportMode};
 use crate::request::http_request_methods;
 use crate::verifier::{BoxError, Verification, Verifier};
@@ -304,16 +306,35 @@ impl EnclaveHttpClientBuilder {
     /// Dropping the future stops the verification and closes its
     /// connection. No client exists and nothing is left behind.
     ///
-    /// **Not implemented yet.** In this version of the crate the call always
-    /// fails with an error that says so; the text above is the contract
-    /// that it will meet.
+    /// **Not implemented yet.** In this version of the crate the call makes the
+    /// checks that need no network and then fails with an error that says so;
+    /// the text above is the contract that it will meet.
     pub async fn connect(self) -> Result<EnclaveHttpClient, Error> {
         self.check()?;
         Err(Error::not_implemented("EnclaveHttpClient::connect"))
     }
 
-    /// The checks of the options that are written so far. No I/O.
+    /// The checks that `connect` makes before any network I/O, in the
+    /// order that it documents.
     pub(crate) fn check(&self) -> Result<(), Error> {
-        crate::internal::enclave::check_pin(self.repo.as_deref())
+        base_url::authority_url(&self.host)?;
+        let base = self.options.checked_base_url()?;
+        self.options.common.check()?;
+        enclave::check_pin(self.repo.as_deref())?;
+        let default_verifier;
+        let verifier = match &self.options.common.verifier {
+            Some(verifier) => verifier.as_ref(),
+            None => {
+                default_verifier = Verifier::new();
+                &default_verifier
+            }
+        };
+        verifier
+            .check_repo_verifiability(self.repo.as_deref())
+            .map_err(enclave::from_verifier)?;
+        if let (TransportMode::Tls, Some(base)) = (self.options.mode(), &base) {
+            base_url::validate_for_tls(base, &self.host)?;
+        }
+        Ok(())
     }
 }
