@@ -308,6 +308,11 @@ mod tests {
             ["{\n \"a\": 1\n}"]
         );
         assert_eq!(events("data: a\ndata:\ndata: b\n\n"), ["a\n\nb"]);
+        // A carriage return and the line feed after it are one line end,
+        // also when two chunks part them.
+        assert_eq!(events("data: a\r\ndata: b\r\n\r\n"), ["a\nb"]);
+        let (split, ended) = decode(&[b"data: a\r", b"\ndata: b\r", b"\n\r", b"\n"]);
+        assert_eq!((split, ended), (vec!["a\nb".to_owned()], Ok(false)));
     }
 
     #[test]
