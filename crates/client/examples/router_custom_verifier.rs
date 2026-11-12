@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One verifier can serve any number of clients.
     let verifier = Arc::new(
         Verifier::builder()
-            .freshness_max_age(Duration::from_secs(6 * 60 * 60))
+            .freshness_max_age(Duration::from_secs(3 * 24 * 60 * 60))
             .build()?,
     );
 
