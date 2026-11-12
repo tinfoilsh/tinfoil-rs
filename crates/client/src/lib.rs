@@ -78,10 +78,39 @@
 //!
 //! # Features
 //!
-//! - `openai` (default): the OpenAI clients over `async_openai`, the
-//!   relaxed chat helper, and the `sse` and `multimodal` modules.
-//! - `unstable-gateway`: the gateway route. Experimental; anything behind
-//!   it may change or be removed in any release.
+//! | feature | what it adds |
+//! |---|---|
+//! | `openai` (default) | the OpenAI clients over `async_openai`, with its chat completion, embedding, audio and responses APIs; the relaxed chat helper; the `sse` and `multimodal` modules |
+//! | `unstable-gateway` | the gateway route. Experimental; anything behind it may change or be removed in any release |
+//!
+//! The other API families of `async_openai` are opt-in. Each feature below
+//! implies `openai` and adds the family's calls to the OpenAI clients,
+//! where they go through the attested HTTP client like every other call.
+//! Whether an enclave serves a family is up to the enclave.
+//!
+//! | feature | API family |
+//! |---|---|
+//! | `openai-administration` | organization administration: users, projects, API keys, audit logs |
+//! | `openai-batches` | batches |
+//! | `openai-byot` | the `_byot` variants of every call, which take and return the caller's own types |
+//! | `openai-chatkit` | ChatKit sessions and threads |
+//! | `openai-completions` | legacy text completions |
+//! | `openai-containers` | containers and their files |
+//! | `openai-evals` | evals and their runs |
+//! | `openai-files` | files |
+//! | `openai-fine-tuning` | fine-tuning jobs |
+//! | `openai-images` | image generation and editing |
+//! | `openai-models` | listing and retrieving models |
+//! | `openai-moderations` | moderations |
+//! | `openai-skills` | skills |
+//! | `openai-uploads` | multipart uploads |
+//! | `openai-vector-stores` | vector stores |
+//! | `openai-videos` | video generation |
+//!
+//! `async_openai`'s realtime API is not offered: it opens WebSocket
+//! connections of its own, which the attested client cannot protect. Its
+//! webhook verification makes no request and is not offered either, and
+//! neither is its assistants API, which `async_openai` has deprecated.
 
 // The bodies of this crate are placeholders, which leave their arguments
 // and most internal items unused.

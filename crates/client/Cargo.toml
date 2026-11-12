@@ -11,7 +11,9 @@ repository.workspace = true
 [features]
 default = ["openai"]
 # The OpenAI clients over `async-openai`, the relaxed chat helper, the
-# server-sent-event parser and the multimodal helpers.
+# server-sent-event parser and the multimodal helpers. Of async-openai's API
+# families it enables chat completions, embeddings, audio and responses
+# (see the dependency below); the `openai-*` features add the others.
 openai = [
     "dep:async-openai",
     "dep:async-stream",
@@ -21,6 +23,29 @@ openai = [
     "dep:tower-layer",
     "dep:tower-service",
 ]
+# Further API families of async-openai. Each implies `openai` and enables
+# the async-openai feature of the same family, whose calls then exist on
+# the OpenAI clients and go through the attested HTTP client like the
+# rest. Three async-openai features have no counterpart: `realtime` opens
+# WebSocket connections of its own, which the attested client cannot
+# protect; `webhook` verification makes no request; and `assistant` is
+# deprecated by async-openai.
+openai-administration = ["openai", "async-openai/administration"]
+openai-batches = ["openai", "async-openai/batch"]
+openai-byot = ["openai", "async-openai/byot"]
+openai-chatkit = ["openai", "async-openai/chatkit"]
+openai-completions = ["openai", "async-openai/completions"]
+openai-containers = ["openai", "async-openai/container"]
+openai-evals = ["openai", "async-openai/evals"]
+openai-files = ["openai", "async-openai/file"]
+openai-fine-tuning = ["openai", "async-openai/finetuning"]
+openai-images = ["openai", "async-openai/image"]
+openai-models = ["openai", "async-openai/model"]
+openai-moderations = ["openai", "async-openai/moderation"]
+openai-skills = ["openai", "async-openai/skill"]
+openai-uploads = ["openai", "async-openai/upload"]
+openai-vector-stores = ["openai", "async-openai/vectorstore"]
+openai-videos = ["openai", "async-openai/video"]
 # The gateway route. Experimental: everything behind this feature may change
 # or be removed in any release.
 unstable-gateway = ["dep:base64", "dep:hkdf", "dep:hmac"]

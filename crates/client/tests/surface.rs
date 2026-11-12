@@ -424,9 +424,49 @@ mod openai {
         Ok(())
     }
 
+    /// Each `openai-*` feature adds its API family to the OpenAI clients.
+    fn api_families(client: &Client) {
+        // In the `openai` feature itself.
+        let _ = client.chat();
+        let _ = client.embeddings();
+        let _ = client.audio();
+        let _ = client.responses();
+        #[cfg(feature = "openai-administration")]
+        let _ = client.admin();
+        #[cfg(feature = "openai-batches")]
+        let _ = client.batches();
+        #[cfg(feature = "openai-chatkit")]
+        let _ = client.chatkit();
+        #[cfg(feature = "openai-completions")]
+        let _ = client.completions();
+        #[cfg(feature = "openai-containers")]
+        let _ = client.containers();
+        #[cfg(feature = "openai-evals")]
+        let _ = client.evals();
+        #[cfg(feature = "openai-files")]
+        let _ = client.files();
+        #[cfg(feature = "openai-fine-tuning")]
+        let _ = client.fine_tuning();
+        #[cfg(feature = "openai-images")]
+        let _ = client.images();
+        #[cfg(feature = "openai-models")]
+        let _ = client.models();
+        #[cfg(feature = "openai-moderations")]
+        let _ = client.moderations();
+        #[cfg(feature = "openai-skills")]
+        let _ = client.skills();
+        #[cfg(feature = "openai-uploads")]
+        let _ = client.uploads();
+        #[cfg(feature = "openai-vector-stores")]
+        let _ = client.vector_stores();
+        #[cfg(feature = "openai-videos")]
+        let _ = client.videos();
+    }
+
     #[test]
     fn the_callers_of_the_openai_surface_compile() {
         let _ = openai_clients;
+        let _ = api_families;
     }
 }
 
