@@ -157,7 +157,10 @@ pub(crate) async fn embed_batch(
 /// [`Error::from_openai`].
 ///
 /// A call is sent again, at most twice, when the response has status
-/// `429` or `5xx`; a `429` whose error is `insufficient_quota` is not. A
+/// `429` or `5xx`; a `429` whose error is `insufficient_quota` is not. The
+/// status decides: a `429` whose body is not the API's error object, is
+/// larger than 1 MiB or cannot be read is tried again as well, and is the
+/// call's error if the last attempt ends that way. A
 /// failure of this crate's client (a refused verification, a refused
 /// request, a failed connection, a deadline) is reported once and not
 /// tried again. Below that, the client itself sends a request once more
@@ -166,7 +169,8 @@ pub(crate) async fn embed_batch(
 /// The wait before the first retry is half a second and before the second
 /// a second, each shortened at random by up to a quarter. A response can
 /// name its own wait, in `Retry-After-Ms` (milliseconds) or `Retry-After`
-/// (seconds or an HTTP date), and is obeyed up to two minutes, or up to
+/// (seconds, or a date in the form `Sun, 06 Nov 1994 08:49:37 GMT`; a
+/// date in another form is ignored), and is obeyed up to two minutes, or up to
 /// the `timeout` option if that is shorter. A response that asks for a
 /// longer wait is not tried again: the call returns it at once, as the
 /// error that it is. A value that cannot be read is ignored. In

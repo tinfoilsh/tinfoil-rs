@@ -27,10 +27,15 @@ pub enum ErrorKind {
     ///
     /// - **Not delivered.** A verification failed (in `connect`,
     ///   `ensure_verified`, `reverify`, or before a request that needed
-    ///   one): nothing was sent. In
-    ///   [`TransportMode::Tls`](crate::TransportMode::Tls) every
-    ///   attestation error is of this kind, because the certificate check
-    ///   fails in the handshake, before the request is written.
+    ///   one): the evidence or the policy was rejected, the
+    ///   `verification_check` refused it, or the document endorses no key
+    ///   for the transport mode. No connection for the request was
+    ///   opened, and nothing was sent. In
+    ///   [`TransportMode::Tls`](crate::TransportMode::Tls) the one other
+    ///   attestation error is the pin: the server's certificate fails the
+    ///   standard checks or does not carry the attested key. That fails
+    ///   the handshake, before the request is written. So in that mode no
+    ///   attestation error leaves a request delivered.
     /// - **Possibly delivered.** In
     ///   [`TransportMode::Ehbp`](crate::TransportMode::Ehbp) the body is
     ///   sealed to the attested key, so nobody else can read it, but the

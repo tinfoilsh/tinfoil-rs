@@ -87,8 +87,15 @@
 //!   nor authenticated. An error response to a sealed request that is not
 //!   sealed itself is passed through as received, since a proxy may
 //!   refuse a request before it reaches the enclave; nothing of it is
-//!   authenticated. A `2xx` response to a sealed request that is not
-//!   sealed is refused.
+//!   authenticated. The exceptions return no response. A `2xx` response
+//!   to a sealed request that is not sealed is refused. The enclave's key
+//!   rejection, a `422` with the protocol's key-configuration problem, is
+//!   an attestation error, after which the client verifies again and
+//!   sends the request once more if its body can be sent again. A request
+//!   whose streamed body turns out to be empty goes out unsealed and is
+//!   held to the rules of a sealed one: a `2xx` response, a response that
+//!   claims to be sealed and the key-configuration problem are
+//!   attestation errors, the last without a replay.
 //! - **A request without a cache secret uses the prompt-cache namespace
 //!   that all such requests share.** No secret is added by an enclave
 //!   client whose `user_cache_secret` option is unset; to a request that

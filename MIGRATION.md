@@ -354,6 +354,8 @@ the `tinfoil-verifier` crate:
 - **Limits:** a line or an event of more than 16 MiB is an error.
 - **Relaxed calls are tried again** on `429` and `5xx`, at most twice, as
   typed calls are; a `429` whose error is `insufficient_quota` is not.
+  `create` reads a response of at most 64 MiB and an error body of at most
+  1 MiB.
   Nothing is tried again once a stream has started.
 - **Error types:** `create` and `create_stream` return `OpenAIError` (0.2:
   `tinfoil::Error`); a `4xx` response whose body is not an API error object is
@@ -376,7 +378,7 @@ the `tinfoil-verifier` crate:
   attested client (verification, connection, deadline) is reported once.
 - The wait is 0.5 s before the first retry and 1 s before the second, each
   shortened at random by up to a quarter. `Retry-After-Ms` and `Retry-After`
-  (seconds or an HTTP date) are obeyed up to 2 minutes, or up to the `timeout`
+  (seconds, or a date in the form `Sun, 06 Nov 1994 08:49:37 GMT`) are obeyed up to 2 minutes, or up to the `timeout`
   option if that is shorter; a response that asks for more is not tried again
   and is reported at once.
 - `timeout` bounds each attempt and each wait between attempts, not the call

@@ -196,8 +196,10 @@ impl RouterHttpClientBuilder {
     /// access to the group or to others. The client then uses a random
     /// secret that lasts for the process, so its requests are still
     /// scoped, but share no cache with other processes; `connect` does
-    /// not fail. Restore the modes `0700` and `0600`, or remove the file,
-    /// to get a stored secret again.
+    /// not fail. To get a stored secret again, make the directory and the
+    /// file belong to the user that runs the program, with the modes
+    /// `0700` and `0600`; or remove the file, and the directory too if it
+    /// belongs to another user, so that the client creates them anew.
     pub fn user_cache_secret(mut self, secret: impl Into<String>) -> Self {
         self.options.common.user_cache_secret = Some(Secret::new(secret));
         self
