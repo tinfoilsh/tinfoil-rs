@@ -115,17 +115,20 @@ pub(crate) fn enclave_origin(host: &str) -> Result<String, Error> {
 
 /// `https://<authority>/` for a host with an optional port.
 ///
-/// A value that is not exactly that is a configuration error: an empty
-/// value; one with whitespace or a control character; one that carries a
-/// scheme, a path, a query, a fragment, user information, a backslash or a
-/// percent sign; and one that does not parse as the authority of a URL.
+/// A value that is not exactly that is a configuration error. Its ASCII
+/// characters must be letters, digits or one of `.-_:[]`, which leaves no
+/// room for a scheme, a path, a query, a fragment, user information,
+/// whitespace or an escape; characters outside ASCII are accepted for an
+/// internationalized name. The value must then parse as the authority of a
+/// URL.
 pub(crate) fn authority_url(authority: &str) -> Result<Url, Error> {
     let refused = || Error::configuration("an enclave host must be a host with an optional port");
-    if authority.is_empty()
-        || authority.chars().any(|c| {
-            c.is_whitespace() || c.is_control() || matches!(c, '/' | '?' | '#' | '@' | '\\' | '%')
-        })
-    {
+    let allowed = |c: char| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '.' | '-' | '_' | ':' | '[' | ']')
+            || (!c.is_ascii() && !c.is_whitespace() && !c.is_control())
+    };
+    if authority.is_empty() || !authority.chars().all(allowed) {
         return Err(refused());
     }
     let url = Url::parse(&format!("https://{authority}/")).map_err(|_| refused())?;
@@ -403,6 +406,8 @@ mod tests {
             ("192.0.2.7:8443", "https://192.0.2.7:8443"),
             ("[2001:db8::1]:8443", "https://[2001:db8::1]:8443"),
             ("localhost", "https://localhost"),
+            ("my_enclave.example.com", "https://my_enclave.example.com"),
+            ("bücher.example", "https://xn--bcher-kva.example"),
         ];
         for (host, origin) in accepted {
             assert_eq!(enclave_origin(host).expect(host), origin, "{host:?}");
@@ -425,6 +430,12 @@ mod tests {
             "enclave.example.com:99999",
             "enclave.example.com:port",
             "enclave.example.com\n",
+            "enclave.example.com&enclave=evil.example",
+            "enclave.example.com=x",
+            "enclave.example.com;x",
+            "enclave.example.com,evil.example",
+            "enclave.example.com\u{a0}",
+            "*.example.com",
         ] {
             let error = enclave_origin(host).expect_err(host);
             assert_eq!(error.kind(), ErrorKind::Configuration, "{host:?}");
