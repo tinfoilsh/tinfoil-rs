@@ -64,7 +64,10 @@ reqwest = { version = "0.13.5", default-features = false, features = ["http2", "
 http = "1"
 # The host type of the URLs that reqwest takes.
 url = "2"
-# Observes whether a streamed request body produces any data.
+# The trait of the guard on response bodies: their deadline and errors.
+http-body = "1"
+# Observes whether a streamed request body produces any data, and reads one
+# that gets the user cache secret.
 http-body-util = "0.1"
 
 # TLS, on the `ring` provider only. `default-features = false` keeps

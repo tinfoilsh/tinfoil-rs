@@ -12,6 +12,7 @@
 
 use std::error::Error as StdError;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tinfoil_next::reqwest::header::{HeaderMap, HeaderValue};
@@ -60,6 +61,7 @@ fn the_error_has_a_kind_a_timeout_flag_and_a_source() {
     let _: fn(&Error) -> ErrorKind = Error::kind;
     let _: fn(&Error) -> bool = Error::is_timeout;
     let _: for<'a> fn(&'a Error) -> Option<&'a Error> = Error::earlier_attempt;
+    let _: for<'a> fn(&'a tinfoil_next::reqwest::Error) -> Option<&'a Error> = Error::from_reqwest;
     let _: for<'a> fn(&'a Error) -> Option<&'a (dyn StdError + 'static)> = StdError::source;
     fn shared<T: StdError + Clone + Send + Sync + 'static>() {}
     shared::<Error>();
@@ -299,25 +301,7 @@ async fn an_enclave_client_reports_its_options_in_the_documented_order() {
 }
 
 #[tokio::test]
-async fn options_that_pass_every_check_reach_the_placeholder() {
-    let accepted = [
-        EnclaveHttpClient::builder("enclave.invalid", Some("owner/name")),
-        EnclaveHttpClient::builder("enclave.invalid:8443", None),
-        EnclaveHttpClient::builder("enclave.invalid", Some("owner/name@v1.2.3"))
-            .base_url("https://enclave.invalid/api/"),
-        EnclaveHttpClient::builder("enclave.invalid", Some("owner/name"))
-            .transport_mode(TransportMode::Ehbp)
-            .base_url("https://proxy.invalid/tinfoil")
-            .user_cache_secret("opaque")
-            .timeout(Duration::from_secs(1)),
-        EnclaveHttpClient::builder("enclave.invalid", Some("owner/name"))
-            .transport_mode(TransportMode::Ehbp)
-            .base_url("http://localhost:8080/"),
-    ];
-    for builder in accepted {
-        let message = enclave_refusal(builder).await;
-        assert!(message.contains("not implemented yet"), "{message}");
-    }
+async fn router_options_that_pass_every_check_reach_the_placeholder() {
     let message = router_refusal(
         RouterHttpClient::builder()
             .transport_mode(TransportMode::Ehbp)
@@ -325,6 +309,78 @@ async fn options_that_pass_every_check_reach_the_placeholder() {
     )
     .await;
     assert!(message.contains("not implemented yet"), "{message}");
+}
+
+/// A local server that accepts connections, counts them, and answers each
+/// with `answer` (nothing, if it is empty) without ever speaking TLS. It
+/// keeps every connection open.
+async fn plain_server(answer: &'static [u8]) -> (String, Arc<AtomicUsize>) {
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a local port");
+    let host = format!(
+        "127.0.0.1:{}",
+        listener.local_addr().expect("an address").port()
+    );
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&accepted);
+    tokio::spawn(async move {
+        let mut open = Vec::new();
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            count.fetch_add(1, Ordering::SeqCst);
+            let _ = socket.write_all(answer).await;
+            open.push(socket);
+        }
+    });
+    (host, accepted)
+}
+
+/// Bounds a wait on the local server, so that a hang fails the test.
+const PATIENCE: Duration = Duration::from_secs(20);
+
+#[tokio::test]
+async fn an_enclave_that_serves_no_attestation_document_is_a_network_error_after_one_retry() {
+    // The retry comes one second after the first failure, on real time:
+    // the public constructor has no other clock.
+    let (host, accepted) = plain_server(b"HTTP/1.1 200 OK\r\n\r\nnot a TLS server").await;
+    for mode in [TransportMode::Tls, TransportMode::Ehbp] {
+        let before = accepted.load(Ordering::SeqCst);
+        let connect = EnclaveHttpClient::builder(host.as_str(), Some("owner/name"))
+            .transport_mode(mode)
+            .connect();
+        let error = tokio::time::timeout(PATIENCE, connect)
+            .await
+            .expect("connect neither succeeded nor failed in time")
+            .expect_err("no client");
+        assert_eq!(error.kind(), ErrorKind::Network, "{error}");
+        assert!(!error.is_timeout(), "{error}");
+        assert!(error.source().is_some());
+        let first = error.earlier_attempt().expect("the first attempt");
+        assert_eq!(first.kind(), ErrorKind::Network);
+        assert_eq!(accepted.load(Ordering::SeqCst) - before, 2, "{mode}");
+    }
+}
+
+#[tokio::test]
+async fn connecting_to_an_enclave_that_never_answers_ends_at_the_timeout() {
+    let (host, accepted) = plain_server(b"").await;
+    let started = std::time::Instant::now();
+    let connect = EnclaveHttpClient::builder(host.as_str(), None)
+        .timeout(Duration::from_millis(300))
+        .connect();
+    let error = tokio::time::timeout(PATIENCE, connect)
+        .await
+        .expect("connect neither succeeded nor failed in time")
+        .expect_err("no client");
+    assert_eq!(error.kind(), ErrorKind::Network, "{error}");
+    assert!(error.is_timeout(), "{error}");
+    // Well before the bound on fetching a document, and before any retry.
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

@@ -98,19 +98,34 @@ pub(crate) struct Enclave<V = Verification> {
     clock: Clock,
 }
 
-impl Enclave<Verification> {
-    /// An enclave that is verified by fetching its attestation document
-    /// and judged by the system clock. See [`with_fetch`](Self::with_fetch)
-    /// for the checks.
-    pub(crate) fn new(config: Config) -> Result<Self, Error> {
-        let fetch: Fetch = Arc::new(|host, relay, nonce| {
-            Box::pin(async move { fetch::document(&host, relay.as_deref(), &nonce).await })
-        });
-        Self::with_fetch(config, system_clock(), fetch)
+/// A [`Config`] that passed its checks, with the verifier that it selects.
+pub(crate) struct Checked {
+    host: String,
+    relay: Option<String>,
+    repo: Option<String>,
+    verifier: Arc<Verifier>,
+    verification_check: Option<VerificationCheck>,
+}
+
+impl Checked {
+    /// The enclave's host.
+    pub(crate) fn host(&self) -> &str {
+        &self.host
     }
 
-    /// An enclave whose documents come from `fetch`. It does no I/O. Each
-    /// failure is a configuration error, in this order:
+    /// The verification policy: the configured one, or the default
+    /// verifier, which was built for the checks and is the one that the
+    /// enclave then verifies with.
+    pub(crate) fn verifier(&self) -> &Arc<Verifier> {
+        &self.verifier
+    }
+}
+
+impl Config {
+    /// The checks of an enclave's description. They do no I/O, and they are
+    /// the only such checks: a client builder and [`Enclave::with_fetch`]
+    /// both go through here. Each failure is a configuration error, in this
+    /// order:
     ///
     /// 1. the host, or the relay, is not a host with an optional port;
     /// 2. the repository pin is `Some("")` ([`check_pin`]);
@@ -118,26 +133,59 @@ impl Enclave<Verification> {
     ///    (`Verifier::check_repo_verifiability`): the pin is not a
     ///    repository reference, or the verifier's own configuration rules
     ///    it out. The verifier's usage error is the source.
+    pub(crate) fn check(self) -> Result<Checked, Error> {
+        authority_url(&self.host)?;
+        if let Some(relay) = &self.relay {
+            authority_url(relay)?;
+        }
+        check_pin(self.repo.as_deref())?;
+        let verifier = self.verifier.unwrap_or_else(|| Arc::new(Verifier::new()));
+        verifier
+            .check_repo_verifiability(self.repo.as_deref())
+            .map_err(from_verifier)?;
+        Ok(Checked {
+            host: self.host,
+            relay: self.relay,
+            repo: self.repo,
+            verifier,
+            verification_check: self.verification_check,
+        })
+    }
+}
+
+/// Fetches attestation documents over the network ([`fetch::document`]).
+pub(crate) fn network_fetch() -> Fetch {
+    Arc::new(|host, relay, nonce| {
+        Box::pin(async move { fetch::document(&host, relay.as_deref(), &nonce).await })
+    })
+}
+
+impl Enclave<Verification> {
+    /// An enclave that is verified by fetching its attestation document
+    /// and judged by the system clock. See [`Config::check`] for the
+    /// checks.
+    pub(crate) fn new(config: Config) -> Result<Self, Error> {
+        Self::with_fetch(config, system_clock(), network_fetch())
+    }
+
+    /// An enclave whose documents come from `fetch`. It does no I/O; the
+    /// failures are those of [`Config::check`].
+    pub(crate) fn with_fetch(config: Config, clock: Clock, fetch: Fetch) -> Result<Self, Error> {
+        Ok(Self::from_checked(config.check()?, clock, fetch))
+    }
+
+    /// The enclave of a description that was checked already.
     ///
-    /// One attempt to obtain a verification is then, in order: a fresh
-    /// random nonce; `fetch` for the host, the relay and the nonce;
+    /// One attempt to obtain a verification is, in order: a fresh random
+    /// nonce; `fetch` for the host, the relay and the nonce;
     /// `Verifier::verify_v3` on the document with the nonce and the pin
     /// (a usage error is a configuration error, any other rejection is an
     /// attestation error, and the verifier's error is the source either
     /// way); and [`validate_transport_keys`].
-    pub(crate) fn with_fetch(config: Config, clock: Clock, fetch: Fetch) -> Result<Self, Error> {
-        authority_url(&config.host)?;
-        if let Some(relay) = &config.relay {
-            authority_url(relay)?;
-        }
-        check_pin(config.repo.as_deref())?;
-        let verifier = config.verifier.unwrap_or_else(|| Arc::new(Verifier::new()));
-        verifier
-            .check_repo_verifiability(config.repo.as_deref())
-            .map_err(from_verifier)?;
-
+    pub(crate) fn from_checked(checked: Checked, clock: Clock, fetch: Fetch) -> Self {
+        let verifier = checked.verifier;
         let source: Source<Verification> = {
-            let (host, relay, repo) = (config.host.clone(), config.relay, config.repo.clone());
+            let (host, relay, repo) = (checked.host.clone(), checked.relay, checked.repo.clone());
             let verifier = Arc::clone(&verifier);
             Arc::new(move || {
                 let (host, relay, repo) = (host.clone(), relay.clone(), repo.clone());
@@ -154,14 +202,14 @@ impl Enclave<Verification> {
                 })
             })
         };
-        Ok(Self {
-            host: config.host,
-            repo: config.repo,
+        Self {
+            host: checked.host,
+            repo: checked.repo,
             verifier: Some(verifier),
             source,
-            check: config.verification_check,
+            check: checked.verification_check,
             clock,
-        })
+        }
     }
 
     /// The verification policy, which several enclaves can share.

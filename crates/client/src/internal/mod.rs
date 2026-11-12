@@ -9,6 +9,7 @@
 //! | [`router`] | discovers Tinfoil's router |
 //! | [`cachesecret`] | resolves and stores the user cache secret |
 //! | [`attested`] | what the enclave and router clients share |
+//! | [`body`] | the guard on a response body: its deadline and its errors |
 //! | `gateway` | the gateway route (feature `unstable-gateway`) |
 //!
 //! Internal functions return [`Error`](crate::Error) values that are
@@ -22,6 +23,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 pub(crate) mod attested;
+pub(crate) mod body;
 pub(crate) mod cachesecret;
 pub(crate) mod enclave;
 pub(crate) mod fetch;
