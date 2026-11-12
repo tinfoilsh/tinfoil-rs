@@ -211,6 +211,7 @@ impl Error {
 
     /// Whether the error carries the mark of
     /// [`unsent_after_rejection`](Self::unsent_after_rejection).
+    #[cfg(feature = "openai")]
     pub(crate) fn is_unsent_after_rejection(&self) -> bool {
         self.inner.unsent_after_rejection
     }
@@ -249,6 +250,7 @@ impl Error {
     /// message says that `what` is not implemented yet in this version of
     /// the crate, so that it cannot be read as a problem with the caller's
     /// options.
+    #[cfg(any(test, feature = "unstable-gateway"))]
     pub(crate) fn not_implemented(what: &'static str) -> Self {
         Self::configuration(format!(
             "{what} is not implemented yet in this version of the crate"

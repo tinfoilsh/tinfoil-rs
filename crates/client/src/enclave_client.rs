@@ -327,12 +327,6 @@ impl EnclaveHttpClientBuilder {
         })
     }
 
-    /// The checks that `connect` makes before any network I/O, in the
-    /// order that it documents.
-    pub(crate) fn check(&self) -> Result<(), Error> {
-        self.clone().prepare().map(drop)
-    }
-
     /// Checks the options, in the order that `connect` documents, and
     /// returns what a client is made from. It does no I/O. The host, the
     /// pin and the verifier are checked by [`enclave::Config::check`], which

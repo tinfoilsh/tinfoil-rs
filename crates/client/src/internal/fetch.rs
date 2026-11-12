@@ -119,6 +119,7 @@ async fn document_through(
 /// does not name, a loopback host included. A request whose URL is known
 /// takes its client from [`plain_client_for`], which keeps a loopback host
 /// away from the proxy.
+#[cfg(test)]
 pub(crate) fn plain_client() -> Result<Client, Error> {
     client_builder(true)?
         .https_only(true)

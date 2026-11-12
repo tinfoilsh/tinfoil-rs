@@ -9,9 +9,9 @@ use crate::internal::BoxFuture;
 use crate::internal::transport::base_url::{enclave_origin, origin_of};
 use crate::internal::transport::{Failure, RoundTrip};
 
-/// `next` behind a guard that refuses a request to any origin other than
-/// the enclave's (`https://<enclave_host>`) and the base URL's. Either may
-/// be absent; the gateway passes only its base URL.
+/// The origins that a client's requests may go to: `https://<enclave_host>`
+/// and the base URL's. Either may be absent. [`AllowedOrigins::guard`]
+/// puts a layer behind them that refuses a request to any other origin.
 ///
 /// The guard is the outermost layer: a refused request is a configuration
 /// error, reaches no other layer, and starts no verification. It protects
@@ -27,19 +27,9 @@ use crate::internal::transport::{Failure, RoundTrip};
 /// refused.
 ///
 /// An enclave host that is not a host with an optional port is a
-/// configuration error here, before any I/O.
-pub(crate) fn with_origin_restriction(
-    next: Arc<dyn RoundTrip>,
-    enclave_host: Option<&str>,
-    base_url: Option<&Url>,
-) -> Result<Arc<dyn RoundTrip>, Error> {
-    Ok(allowed_origins(enclave_host, base_url)?.guard(next))
-}
-
-/// The origins that a client's requests may go to: everything of
-/// [`with_origin_restriction`] that can fail, so that a caller can do it
-/// before the steps that must not happen for a client that cannot be
-/// made.
+/// configuration error here, before any I/O: this function does
+/// everything that can fail, so that a caller can do it before the steps
+/// that must not happen for a client that cannot be made.
 pub(crate) fn allowed_origins(
     enclave_host: Option<&str>,
     base_url: Option<&Url>,
@@ -74,7 +64,7 @@ impl AllowedOrigins {
     }
 }
 
-/// The guard of [`with_origin_restriction`].
+/// The guard of [`AllowedOrigins::guard`].
 struct OriginGuard {
     allowed: Vec<String>,
     /// The enclave's host, for the refusal's message.

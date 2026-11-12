@@ -1,5 +1,9 @@
 //! The OpenAI client for the gateway route. Experimental.
 
+// The gateway route is not implemented: its bodies are placeholders, which
+// leave their arguments and the state that they would use unused.
+#![allow(dead_code, unused_variables)]
+
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;

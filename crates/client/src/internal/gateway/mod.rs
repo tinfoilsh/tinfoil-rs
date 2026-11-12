@@ -6,6 +6,13 @@
 //! | [`catalog`] | fetches, bounds, filters and caches the catalog |
 //! | [`policy`] | model pins, and which reference and verifier a model's replicas get |
 //! | [`prepare`] | reads the model from a request and scopes its prompt cache |
+//!
+//! Not implemented: the bodies of this module and its submodules are
+//! placeholders.
+
+// Placeholder bodies leave their arguments and the items that they would
+// use unused.
+#![allow(dead_code, unused_variables)]
 
 use std::sync::Arc;
 
