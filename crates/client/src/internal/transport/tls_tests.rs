@@ -14,13 +14,14 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
 use super::{TlsMode, leaf_fingerprint};
-use crate::error::ErrorKind;
+use crate::error::{Error, ErrorKind};
 use crate::internal::enclave::Enclave;
 use crate::internal::testing::{Record, Script, Step, tokio_clock};
 use crate::internal::transport::{Failure, KeyFailure, Mode, RoundTrip, Transport};
 
 use crate::internal::transport::tls::testing::made::{
-    CA, KEY_A, KEY_B, LEAF_A, LEAF_A_EXPIRED, LEAF_A_OTHER_CA, LEAF_A_WRONG_NAME, LEAF_B,
+    CA, KEY_A, KEY_B, LEAF_A, LEAF_A_ADDRESS_ONLY, LEAF_A_EXPIRED, LEAF_A_NAMES_ONLY,
+    LEAF_A_OTHER_ADDRESS, LEAF_A_OTHER_CA, LEAF_A_WRONG_NAME, LEAF_B,
 };
 use crate::internal::transport::tls::testing::{
     Handler, Protocols, Seen, Server, certificate, full, roots,
@@ -330,6 +331,111 @@ async fn the_attested_key_does_not_excuse_a_certificate_that_fails_the_standard_
 }
 
 #[tokio::test]
+async fn a_server_that_speaks_tls_1_2_only_is_pinned_like_any_other() {
+    // The server holds key A and offers nothing later than TLS 1.2.
+    let server = serve_on(Protocols::BothOverTls12, &LEAF_A, &KEY_A, ok()).await;
+    let response = bound_to(&LEAF_A)
+        .send(get(&server, "/v1/models"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.body().await.unwrap(), "/v1/models");
+    assert_eq!(server.versions(), [Some(rustls::ProtocolVersion::TLSv1_2)]);
+
+    // Another key under the same version: refused in the handshake, as a
+    // key failure, before any request.
+    let server = serve_on(Protocols::BothOverTls12, &LEAF_B, &KEY_B, ok()).await;
+    let failure = bound_to(&LEAF_A)
+        .send(get(&server, "/secret"))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.key, KeyFailure::PeerLacksKey);
+    assert_eq!(failure.error.kind(), ErrorKind::Attestation);
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("does not carry the attested key"),
+        "{}",
+        failure.error
+    );
+    assert!(server.requests().is_empty());
+
+    // And the standard checks still come first under that version.
+    let server = serve_on(Protocols::BothOverTls12, &LEAF_A_EXPIRED, &KEY_A, ok()).await;
+    let failure = bound_to(&LEAF_A_EXPIRED)
+        .send(get(&server, "/secret"))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.key, KeyFailure::PeerLacksKey);
+    assert!(
+        failure.error.to_string().contains("Expired"),
+        "{}",
+        failure.error
+    );
+    assert!(server.requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_host_that_is_an_ip_address_is_checked_against_the_addresses_of_the_certificate() {
+    // The requests of these tests name the server by its address.
+    // A certificate for that address and for no name: reached.
+    let server = serve(&LEAF_A_ADDRESS_ONLY, &KEY_A, ok()).await;
+    let bound = bound_to(&LEAF_A_ADDRESS_ONLY);
+    let response = bound.send(get(&server, "/by-address")).await.unwrap();
+    assert_eq!(response.body().await.unwrap(), "/by-address");
+    // The same server by a name that the certificate does not carry.
+    let by_name = Request::new(
+        Method::GET,
+        Url::parse(&format!("https://localhost:{}/by-name", server.port)).unwrap(),
+    );
+    let failure = bound.send(by_name).await.unwrap_err();
+    assert_eq!(failure.key, KeyFailure::PeerLacksKey);
+    assert!(
+        failure.error.to_string().contains("NotValidForName"),
+        "{}",
+        failure.error
+    );
+    assert_eq!(server.requests(), ["GET /by-address"]);
+
+    // The pin matches in each case below: the server does hold key A. The
+    // certificate is for another address, or carries the address only as
+    // the text of a DNS name, which is not an address.
+    for leaf in [&LEAF_A_OTHER_ADDRESS, &LEAF_A_NAMES_ONLY] {
+        let server = serve(leaf, &KEY_A, ok()).await;
+        let failure = bound_to(leaf)
+            .send(get(&server, "/secret"))
+            .await
+            .unwrap_err();
+        assert_eq!(failure.key, KeyFailure::PeerLacksKey);
+        assert_eq!(failure.error.kind(), ErrorKind::Attestation);
+        assert!(
+            failure.error.to_string().contains("NotValidForName"),
+            "{}",
+            failure.error
+        );
+        assert!(server.requests().is_empty());
+    }
+
+    // A pin to another key refuses the address-only certificate too.
+    let server = serve(&LEAF_A_ADDRESS_ONLY, &KEY_A, ok()).await;
+    let failure = bound_to(&LEAF_B)
+        .send(get(&server, "/secret"))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.key, KeyFailure::PeerLacksKey);
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("does not carry the attested key"),
+        "{}",
+        failure.error
+    );
+    assert!(server.requests().is_empty());
+}
+
+#[tokio::test]
 async fn a_fingerprint_that_is_not_a_digest_matches_no_server() {
     let server = serve(&LEAF_A, &KEY_A, ok()).await;
     for fingerprint in [
@@ -357,6 +463,69 @@ async fn a_connection_failure_is_a_network_error_and_not_a_key_failure() {
     let failure = bound_to(&LEAF_A).send(request).await.unwrap_err();
     assert_eq!(failure.error.kind(), ErrorKind::Network);
     assert_eq!(failure.key, KeyFailure::None);
+}
+
+/// What `error` and every error behind it show, as text and in `Debug`.
+fn everything_shown(error: &Error) -> String {
+    let mut shown = format!("{error} {error:?}");
+    let mut source = std::error::Error::source(error);
+    while let Some(error) = source {
+        shown.push_str(&format!(" {error} {error:?}"));
+        source = error.source();
+    }
+    shown
+}
+
+#[tokio::test]
+async fn no_failure_repeats_the_url_of_the_request() {
+    const TARGET: &str = "/v1/models?key=hunter2";
+    let named = |error: &Error| {
+        let shown = everything_shown(error);
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(!shown.contains("/v1/models"), "{shown}");
+    };
+
+    // A connection that fails.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let closed = Url::parse(&format!("https://127.0.0.1:{port}{TARGET}")).unwrap();
+    let failure = bound_to(&LEAF_A)
+        .send(Request::new(Method::GET, closed))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.error.kind(), ErrorKind::Network);
+    named(&failure.error);
+
+    // A certificate that is refused, by the pin and by a standard check.
+    for (served, key) in [(&LEAF_B, &KEY_B), (&LEAF_A_EXPIRED, &KEY_A)] {
+        let server = serve(served, key, ok()).await;
+        let failure = bound_to(&LEAF_A)
+            .send(get(&server, TARGET))
+            .await
+            .unwrap_err();
+        assert_eq!(failure.key, KeyFailure::PeerLacksKey);
+        named(&failure.error);
+    }
+
+    // A deadline: the listener accepts and then says nothing.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let silent = Url::parse(&format!("https://127.0.0.1:{port}{TARGET}")).unwrap();
+    let mut request = Request::new(Method::GET, silent);
+    *request.timeout_mut() = Some(Duration::from_millis(100));
+    let failure = bound_to(&LEAF_A).send(request).await.unwrap_err();
+    assert!(failure.error.is_timeout());
+    named(&failure.error);
+    drop(listener);
+
+    // A plaintext request, which the binding refuses by itself.
+    let plain = Url::parse(&format!("http://127.0.0.1:{port}{TARGET}")).unwrap();
+    let failure = bound_to(&LEAF_A)
+        .send(Request::new(Method::GET, plain))
+        .await
+        .unwrap_err();
+    named(&failure.error);
 }
 
 #[tokio::test]
@@ -788,6 +957,45 @@ async fn a_connection_through_a_proxys_tunnel_is_pinned_like_a_direct_one() {
     assert_eq!(*lines.lock().unwrap(), [connect.clone(), connect]);
     // Nothing was sent to the server by the refused client.
     assert_eq!(server.requests(), ["GET /tunnelled"]);
+}
+
+#[tokio::test]
+async fn a_forward_proxy_that_is_reached_over_tls_is_held_to_the_pin_and_fails_closed() {
+    // The enclave holds key A. The proxy is an HTTPS server of its own,
+    // with a certificate that passes every standard check and another key.
+    let server = serve(&LEAF_A, &KEY_A, ok()).await;
+    let proxy = serve(&LEAF_B, &KEY_B, ok()).await;
+    let through = reqwest::Proxy::all(format!("https://127.0.0.1:{}", proxy.port)).unwrap();
+    let mode = TlsMode::for_test(roots(), Some(through));
+    let pinned = mode.bind(&evidence("pinned", &LEAF_A)).unwrap();
+
+    // Every TLS connection of a binding is pinned, the one to the proxy
+    // included, and the proxy does not hold the attested key: the request
+    // fails as a key failure, and the proxy is told nothing, not even the
+    // name of the host.
+    let failure = pinned
+        .send(get_by_name(&server, "/v1/models?key=hunter2"))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.key, KeyFailure::PeerLacksKey);
+    assert_eq!(failure.error.kind(), ErrorKind::Attestation);
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("does not carry the attested key"),
+        "{}",
+        failure.error
+    );
+    assert!(!everything_shown(&failure.error).contains("hunter2"));
+    assert_eq!(proxy.accepted(), 1);
+    assert!(proxy.requests().is_empty());
+    assert_eq!(server.accepted(), 0);
+
+    // A loopback request does not use the proxy, and arrives.
+    let response = pinned.send(get(&server, "/direct")).await.unwrap();
+    assert_eq!(response.body().await.unwrap(), "/direct");
+    assert_eq!(proxy.accepted(), 1);
 }
 
 #[tokio::test]

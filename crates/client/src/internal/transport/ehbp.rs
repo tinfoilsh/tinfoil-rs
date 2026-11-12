@@ -84,7 +84,8 @@ const MAX_PROBLEM_BYTES: usize = 64 * 1024;
 ///   address ([`never_proxied`]), which always connects directly: such a
 ///   request may travel over plain `http`, and a proxy would read its URL
 ///   and headers. A binding therefore has two carriers, and each request
-///   takes the one for its host.
+///   takes the one for its host. The carrier for the other hosts sends
+///   over HTTPS only.
 pub(crate) struct EhbpMode {
     /// A proxy in place of the environment's proxy settings. Only tests
     /// set one.
@@ -105,11 +106,19 @@ impl EhbpMode {
 
     /// A carrier client of one binding: `direct` for the hosts that are
     /// never proxied, and otherwise for all others.
+    ///
+    /// The carrier for all others sends over HTTPS only. The request
+    /// checks already refuse plain `http` to such a host; the carrier
+    /// refuses it again by itself, so that a request that reached a
+    /// binding without those checks still cannot put its URL and headers
+    /// on the network, or before a proxy, in the clear. Plain `http` is
+    /// for loopback hosts, which take the direct carrier.
     fn carrier(&self, direct: bool) -> Result<reqwest::Client, Error> {
         let builder = match &self.roots {
             Some(roots) => tls_builder_with(roots.clone())?,
             None => tls_builder()?,
         }
+        .https_only(!direct)
         .redirect(reqwest::redirect::Policy::none());
         route(builder, direct, self.proxy.clone())
             .build()
@@ -146,8 +155,7 @@ impl<V: Evidence> Mode<V> for EhbpMode {
     }
 }
 
-/// The request checks of the EHBP mode. The gateway runs them before it
-/// reads its catalog or verifies a replica. Each refusal is a configuration
+/// The request checks of the EHBP mode. Each refusal is a configuration
 /// error, and none repeats the URL, which may hold a credential.
 ///
 /// 1. A request with the `CONNECT` method or an `Upgrade` header: its

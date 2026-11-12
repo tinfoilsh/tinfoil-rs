@@ -24,7 +24,6 @@ openai = [
     "dep:base64",
     "dep:bytes",
     "dep:futures-core",
-    "dep:tower-layer",
     "dep:tower-service",
 ]
 # Further API families of async-openai. Each implies `openai` and enables
@@ -51,13 +50,8 @@ openai-safety = ["openai", "async-openai/safety"]
 openai-skills = ["openai", "async-openai/skill"]
 openai-uploads = ["openai", "async-openai/upload"]
 openai-vector-stores = ["openai", "async-openai/vectorstore"]
-# The gateway route. Experimental and not implemented: the feature adds the
-# route's types, whose calls fail, and everything behind it may change or be
-# removed in any release.
-unstable-gateway = ["dep:base64", "dep:hkdf", "dep:hmac"]
 
-# Documentation is built with every feature but `unstable-gateway`, whose
-# route is not implemented.
+# Documentation is built with every feature.
 [package.metadata.docs.rs]
 features = [
     "openai-administration",
@@ -130,13 +124,8 @@ async-stream = { version = "0.3", optional = true }
 base64 = { version = "0.22", optional = true }
 bytes = { version = "1", optional = true }
 futures-core = { version = "0.3", optional = true }
-# The traits of the service that is installed under async-openai.
-tower-layer = { version = "0.3", optional = true }
+# The trait of the service that is installed under async-openai.
 tower-service = { version = "0.3", optional = true }
-
-# Gateway (feature `unstable-gateway`): the cache salt and the cache prefix.
-hkdf = { version = "0.12", optional = true }
-hmac = { version = "0.12", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # `O_NOFOLLOW` for the cache-secret file.

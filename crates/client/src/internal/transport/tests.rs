@@ -495,6 +495,63 @@ async fn every_waiter_receives_the_failure_of_the_shared_verification() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_check_that_panics_fails_the_shared_verification_for_every_waiter_and_nothing_else() {
+    let clock = tokio_clock();
+    let gate = Arc::new(Notify::new());
+    let script = Script::new([
+        Step::Ready(Ok(record("a", &clock, HOUR))),
+        Step::Gated(Arc::clone(&gate), Ok(record("b", &clock, 3 * HOUR))),
+        Step::Ready(Ok(record("c", &clock, 3 * HOUR))),
+    ]);
+    let check: crate::options::Check<Record> = Arc::new(|evidence: &Record| {
+        if evidence.name == "b" {
+            panic!("the check went wrong");
+        }
+        Ok(())
+    });
+    let enclave = Enclave::from_source(
+        "enclave.example.com",
+        script.source(),
+        Some(check),
+        Arc::clone(&clock),
+    );
+    let mode = Arc::new(FakeMode::default());
+    let transport = Transport::connect(enclave, mode.clone(), true)
+        .await
+        .expect("connected");
+    tokio::time::advance(HOUR).await;
+
+    // Two callers wait for one verification, whose check panics.
+    let waiters: Vec<_> = (0..2)
+        .map(|_| {
+            let transport = transport.clone();
+            tokio::spawn(async move { transport.ensure_verified().await })
+        })
+        .collect();
+    settle().await;
+    assert_eq!(script.calls(), 2);
+    gate.notify_one();
+    for waiter in waiters {
+        // Neither task panicked: each got the verification's error.
+        let error = waiter.await.expect("no panic").expect_err("rejected");
+        assert_eq!(error.kind(), ErrorKind::Attestation);
+        assert!(error.to_string().contains("the check panicked"), "{error}");
+    }
+    // A rejection is not tried again, and nothing was bound to it.
+    assert_eq!(script.calls(), 2);
+    assert_eq!(transport.current().name, "a");
+    assert_eq!(mode.bound(), ["a"]);
+
+    // The transport is as usable as after any failed verification.
+    assert_eq!(
+        transport.ensure_verified().await.expect("verified").name,
+        "c"
+    );
+    assert_eq!(served_by(&transport).await, "c");
+    assert_eq!(script.calls(), 3);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_verification_that_finished_is_not_handed_to_a_later_caller() {
     let f = connected(|clock| vec![ok("b", clock, HOUR), ok("c", clock, HOUR)]).await;
     assert_eq!(f.transport.reverify().await.expect("verified").name, "b");

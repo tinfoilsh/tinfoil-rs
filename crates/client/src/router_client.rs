@@ -158,6 +158,13 @@ impl RouterHttpClientBuilder {
     /// with an attestation error that has the returned error as its
     /// source, and it is not tried again. Requests wait while the check
     /// runs, and it may be called from several threads at once.
+    ///
+    /// A check that panics rejects the router in the same way: the panic
+    /// is caught, and the verification fails with an attestation error
+    /// for every caller that waited for it. The client stays usable, and
+    /// the next verification calls the check again, with whatever state
+    /// the panic left in what the check captured. (A program built with
+    /// `panic = "abort"` aborts instead.)
     pub fn verification_check<F>(mut self, check: F) -> Self
     where
         F: Fn(&Verification) -> Result<(), BoxError> + Send + Sync + 'static,
@@ -180,6 +187,19 @@ impl RouterHttpClientBuilder {
     /// `0700`) and which the other Tinfoil SDKs on the machine share. This
     /// is the only place where a client reads the environment or the file
     /// system.
+    ///
+    /// A stored secret is used only if the file system shows that it is
+    /// the user's own. The file or its directory is left untouched and
+    /// not used when it is a symbolic link or not a regular file or
+    /// directory, when the file is larger than 4 KiB or holds no secret,
+    /// and, on Unix, when either belongs to another user or grants any
+    /// access to the group or to others. The client then uses a random
+    /// secret that lasts for the process, so its requests are still
+    /// scoped, but share no cache with other processes; `connect` does
+    /// not fail. To get a stored secret again, make the directory and the
+    /// file belong to the user that runs the program, with the modes
+    /// `0700` and `0600`; or remove the file, and the directory too if it
+    /// belongs to another user, so that the client creates them anew.
     pub fn user_cache_secret(mut self, secret: impl Into<String>) -> Self {
         self.options.common.user_cache_secret = Some(Secret::new(secret));
         self
@@ -245,7 +265,6 @@ impl RouterHttpClientBuilder {
         let enclave_for = move |host: &str| {
             let checked = enclave::Config {
                 host: host.to_owned(),
-                relay: None,
                 repo: Some(router::ROUTER_REPO.to_owned()),
                 verifier: Some(Arc::clone(&verifier)),
                 verification_check: check.clone(),
@@ -295,7 +314,6 @@ impl RouterHttpClientBuilder {
         }
         let fallback = enclave::Config {
             host: router::FALLBACK_ROUTER.to_owned(),
-            relay: None,
             repo: Some(router::ROUTER_REPO.to_owned()),
             verifier: common.verifier,
             verification_check: common.verification_check,

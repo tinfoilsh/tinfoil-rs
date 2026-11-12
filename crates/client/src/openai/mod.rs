@@ -17,13 +17,9 @@ use crate::options::TransportMode;
 use crate::router_client::{RouterHttpClient, RouterHttpClientBuilder};
 use crate::verifier::{BoxError, Verification, Verifier};
 
-#[cfg(feature = "unstable-gateway")]
-mod gateway;
 pub(crate) mod relaxed;
+pub(crate) mod retry;
 pub(crate) mod service;
-
-#[cfg(feature = "unstable-gateway")]
-pub use gateway::{GatewayOpenAIClient, GatewayOpenAIClientBuilder};
 
 use relaxed::RelaxedChat;
 
@@ -126,9 +122,6 @@ pub(crate) async fn embed_batch(
         .collect())
 }
 
-#[cfg(feature = "unstable-gateway")]
-pub(crate) use openai_client_methods;
-
 /// An OpenAI client for Tinfoil's recommended route: the drop-in.
 ///
 /// It is an `async_openai::Client` whose requests go through a
@@ -158,14 +151,36 @@ pub(crate) use openai_client_methods;
 ///
 /// A failed call returns `async_openai`'s `OpenAIError`. When the cause is
 /// this crate's (the router no longer passes verification, for example),
-/// [`Error::from_openai`] returns it.
+/// [`Error::from_openai`] returns it. The exception is a stream of a typed
+/// call that fails after it started: it ends with an
+/// `OpenAIError::StreamError`, which holds a message and no cause. See
+/// [`Error::from_openai`].
 ///
-/// `async_openai` sends a call again, at most twice and after a backoff,
-/// when the response has status `429` or `5xx`. A failure of this crate's
-/// client (a refused verification, a refused request, a failed connection,
-/// a deadline) is reported once and not tried again. Below that, the
-/// client itself sends a request once more after the enclave rejected its
-/// keys, an upload included.
+/// A call is sent again, at most twice, when the response has status
+/// `429` or `5xx`; a `429` whose error is `insufficient_quota` is not. The
+/// status decides: a `429` whose body is not the API's error object, is
+/// larger than 1 MiB or cannot be read is tried again as well, and is the
+/// call's error if the last attempt ends that way. A
+/// failure of this crate's client (a refused verification, a refused
+/// request, a failed connection, a deadline) is reported once and not
+/// tried again. Below that, the client itself sends a request once more
+/// after the enclave rejected its keys, an upload included.
+///
+/// The wait before the first retry is half a second and before the second
+/// a second, each shortened at random by up to a quarter. A response can
+/// name its own wait, in `Retry-After-Ms` (milliseconds) or `Retry-After`
+/// (seconds, or a date in the form `Sun, 06 Nov 1994 08:49:37 GMT`; a
+/// date in another form is ignored), and is obeyed up to two minutes, or up to
+/// the `timeout` option if that is shorter. A response that asks for a
+/// longer wait is not tried again: the call returns it at once, as the
+/// error that it is. A value that cannot be read is ignored. In
+/// [`TransportMode::Ehbp`] these headers are not authenticated, which is
+/// why they are bounded.
+///
+/// The `timeout` option bounds each request that a call sends and each
+/// wait between two attempts; it is not one deadline for the whole call,
+/// which has up to three attempts and two waits and so can take several
+/// times the `timeout`.
 ///
 /// Every call of the `async_openai` API goes through the attested client,
 /// streaming and multipart calls included. The API base of the
@@ -383,8 +398,10 @@ macro_rules! forward_route_setters {
                 self
             }
 
-            #[doc = concat!("See [`", stringify!($http), "::timeout`]. It also bounds each")]
-            /// attempt of an OpenAI call.
+            #[doc = concat!("See [`", stringify!($http), "::timeout`]. Of an OpenAI call it")]
+            /// bounds each request that the call sends and each wait
+            /// between two attempts, not the call as a whole. See
+            /// [`Client`] for the retries.
             pub fn timeout(mut self, timeout: Duration) -> Self {
                 self.http = self.http.timeout(timeout);
                 self
@@ -422,8 +439,17 @@ impl EnclaveOpenAIClientBuilder {
         let http = self.http.connect().await?;
         let api_base = http.inner.openai_url().clone();
         let executor: Arc<dyn crate::request::Execute> = http.inner.clone();
-        let (openai, sender) =
-            service::openai_client(self.config, &api_base, executor, http.transport_mode())?;
+        let waits = retry::Waits {
+            timeout: http.inner.timeout(),
+            clock: crate::internal::system_clock(),
+        };
+        let (openai, sender) = service::openai_client(
+            self.config,
+            &api_base,
+            executor,
+            http.transport_mode(),
+            waits,
+        )?;
         Ok(EnclaveOpenAIClient {
             openai,
             sender,
@@ -452,8 +478,17 @@ impl RouterOpenAIClientBuilder {
         let http = self.http.connect().await?;
         let api_base = http.inner.openai_url().clone();
         let executor: Arc<dyn crate::request::Execute> = http.inner.clone();
-        let (openai, sender) =
-            service::openai_client(self.config, &api_base, executor, http.transport_mode())?;
+        let waits = retry::Waits {
+            timeout: http.inner.timeout(),
+            clock: crate::internal::system_clock(),
+        };
+        let (openai, sender) = service::openai_client(
+            self.config,
+            &api_base,
+            executor,
+            http.transport_mode(),
+            waits,
+        )?;
         Ok(RouterOpenAIClient {
             openai,
             sender,

@@ -144,6 +144,13 @@ async fn through_a_proxy(api_key: &str) -> Result<RouterOpenAIClient, tinfoil::E
 
 The base URL must be absolute and use HTTPS (`http://` is accepted for `localhost` and loopback addresses only), without credentials, a query string or a fragment. The mode is the option and nothing else: a client never falls back from one mode to the other.
 
+## Limits of the protection
+
+- **EHBP mode does not authenticate the end of a response.** Each part of a sealed response body is authenticated, and so is the order of the parts, so the content cannot be forged, altered or reordered. Nothing marks the last part, though: whoever controls the connection (a proxy, for example) can end a sealed response early between two parts, or return one with no parts at all, and the read ends without an error. A response that is cut inside a part is an error. If you need to know that a response is complete, check its own terminator: that the JSON document is whole, or that the final event of a stream arrived. The SSE parser (`chat_relaxed().create_stream`, `sse::parse_event_stream`) reports a stream that is cut inside an event, and a stream that ends after a complete event without `[DONE]` ends without an error.
+- **In EHBP mode a request without a body is sent as it is**, and its response is returned as it arrives: neither is encrypted or authenticated. An error response (a status outside `2xx`) to a sealed request that is not sealed itself is passed through as received, because a proxy may refuse a request before it reaches the enclave; its status, headers and body are not authenticated either. There are exceptions, none of which returns a response. A `2xx` response to a sealed request that is not sealed is refused. The enclave's key rejection (a `422` with the protocol's key-configuration problem) is not returned either: it is an attestation error, and after a new verification the client sends the request once more if its body can be sent again. A request whose streamed body turns out to be empty goes out unsealed but is held to the rules of a sealed one: a `2xx` response, any response that claims to be sealed, and the key-configuration problem are attestation errors (the last without a replay).
+- **Requests without a cache secret share one prompt-cache namespace** with every other request that carries none. No secret is added by an enclave client whose `user_cache_secret` option is unset; to a request that is not a `POST` with a body to a path ending in `/chat/completions`, `/completions` or `/responses`; to a body that is not a single JSON object; to a body in which `user_cache_secret` appears more than once or with a value that is not a string, which is sent as it is; or, on a router client without the option, the environment variable or a stored secret, when the operating system supplies no random bytes for a new one. A non-empty `user_cache_secret` string in the body is kept.
+- **The router list is not trusted.** The list that `RouterHttpClient` discovers routers from is fetched over ordinary HTTPS and is only a list of candidates: every router is verified like any other enclave before it is used. A wrong list can cause failed attempts within the 30 seconds that discovery may take, after which `inference.tinfoil.sh` is verified; it cannot make the client use an enclave that does not pass verification.
+
 ## What verification covers
 
 A verification passes only if all of the following hold. They are checked offline. The roots of trust are compiled into the verifier and cannot be replaced: the Sigstore trusted root, and the AMD and Intel roots for the hardware evidence. The rest of the policy has defaults that a `Verifier` of your own can replace: Tinfoil's public keys for config endorsements and for freshness approvals, the public registry as the only accepted config registry, the freshness window, and how a config is authorized (see [Custom verification policy](#custom-verification-policy)).
@@ -204,7 +211,9 @@ Errors of the SDK are `tinfoil::Error` values. `kind()` says what to do about on
 |---|---|---|
 | `Configuration` | Invalid options, or a request that the client cannot protect (another origin, a reserved header). | Fix the caller; retrying will not help. |
 | `Network` | The client could not reach what it needed, or a deadline passed (`is_timeout()`). | Retry later with the same client. |
-| `Attestation` | The enclave could not be trusted. Nothing was sent to it. | The client verifies again on the next request. A failure that persists deserves an investigation. |
+| `Attestation` | The enclave could not be trusted, or its answer could not be authenticated. | The client verifies again on the next request. A failure that persists deserves an investigation. |
+
+An attestation error from a verification (`connect`, `ensure_verified`, `reverify`, or the verification before a request: rejected evidence, a refusal by `verification_check`, no key for the transport mode) means that nothing was sent. In TLS mode the only other attestation error is a server certificate that fails the standard checks or lacks the attested key, which fails the handshake before the request is written; so in TLS mode no attestation error leaves a request delivered. In EHBP mode an attestation error can also arise after the sealed request has left: the answer says that the enclave does not hold the key, a success response carries no valid proof that the enclave sent it, or a part of the response body does not authenticate while it is read. Nobody else could read the request, but the enclave may have received it and acted on it. Send requests that must not take effect twice with an idempotency key, or check what became of them before sending them again.
 
 The message starts with the kind, as in `attestation error: ...`, and `source()` returns the underlying error.
 
@@ -243,11 +252,13 @@ async fn read(response: tinfoil::reqwest::Response) -> Option<String> {
 }
 ```
 
+`Error::from_openai` finds the SDK's error in every call that fails before its response arrives, in calls whose response is read whole, and at any point in `chat_relaxed()` calls and streams. It does not find it in a stream of a typed call (`chat().create_stream(..)` and the like) that fails after it started: such a stream still ends with an error and delivers nothing after it, but async-openai keeps only a message (`OpenAIError::StreamError`), so an attestation failure, a broken connection and a deadline cannot be told apart there. Use `chat_relaxed().create_stream(..)` where that matters.
+
 See also the [error handling guide](https://docs.tinfoil.sh/sdk/error-handling).
 
 ## Timeouts and retries
 
-**Deadlines.** By default a client sets no overall deadline. The builders' `timeout(duration)` bounds each operation of the client: `connect`, each `ensure_verified` and `reverify`, and each request from the call until the response body has been read, including the wait for a verification that the request needs. A request's own `timeout` replaces it for that request. On the OpenAI clients it bounds each attempt of a call, not the backoff between attempts. Dropping a future cancels its operation.
+**Deadlines.** By default a client sets no overall deadline. The builders' `timeout(duration)` bounds each operation of the client: `connect`, each `ensure_verified` and `reverify`, and each request from the call until the response body has been read, including the wait for a verification that the request needs. A request's own `timeout` replaces it for that request. On the OpenAI clients it bounds each request that a call sends and each wait between two attempts, not the call as a whole: a call has up to three attempts and two waits, so it can take several times the timeout. Dropping a future cancels its operation.
 
 These bounds are fixed:
 
@@ -261,7 +272,7 @@ These bounds are fixed:
 
 - A verification that fails with a network or attestation error is tried once more after one second. A configuration error and a rejection by `verification_check` are not tried again. During discovery, each listed router gets a single verification.
 - A request that the enclave rejects because its keys changed is sent once more after a new verification, if its body can be sent again. A streamed body cannot; the OpenAI clients rebuild an upload once.
-- The OpenAI clients send a call again at most twice (three attempts) when the response has status `429` or `5xx`, after a backoff or the response's `Retry-After`. A `429` whose error is `insufficient_quota` is not tried again. An error of the SDK itself (a refused verification, a refused request, a failed connection, a deadline) is reported once. Nothing is tried again once a stream has started.
+- The OpenAI clients send a call again at most twice (three attempts) when the response has status `429` or `5xx`. The wait is half a second before the first retry and one second before the second, each shortened at random by up to a quarter. A response can name the wait itself, in `Retry-After-Ms` (milliseconds) or `Retry-After` (seconds, or a date in the form `Sun, 06 Nov 1994 08:49:37 GMT`; a date in another form is ignored, and the backoff applies); it is obeyed up to two minutes, or up to the `timeout` option if that is shorter. A response that asks for a longer wait is not tried again, and the call returns its error at once. A `429` whose error is `insufficient_quota` is not tried again; any other `429` is, also one whose body is not the API's error object, is larger than 1 MiB or cannot be read. An error of the SDK itself (a refused verification, a refused request, a failed connection, a deadline) is reported once. Nothing is tried again once a stream has started.
 - The HTTP clients do not retry on a status code.
 
 ## More on the OpenAI clients
@@ -271,7 +282,7 @@ These bounds are fixed:
 - `tinfoil::multimodal` builds image and audio content parts from files and bytes.
 - `tinfoil::sse::parse_event_stream` is the bounded server-sent-event parser, for streaming endpoints that you call through an HTTP client.
 
-**Prompt caching.** Multi-user services must scope prompt caches to each end user: set `user_cache_secret(..)` on the builder, or a `user_cache_secret` member in a request's JSON body, which wins. When the option is unset, the router clients take the secret from `TINFOIL_USER_CACHE_SECRET` or from `~/.tinfoil/user_cache_secret`, which they create on first use; the enclave clients add nothing. See [Prompt caching](https://docs.tinfoil.sh/sdk/prompt-caching).
+**Prompt caching.** Multi-user services must scope prompt caches to each end user: set `user_cache_secret(..)` on the builder, or a `user_cache_secret` member in a request's JSON body, which wins. When the option is unset, the router clients take the secret from `TINFOIL_USER_CACHE_SECRET` or from `~/.tinfoil/user_cache_secret`, which they create on first use (mode `0600`, in a directory of mode `0700`); the enclave clients add nothing. A stored secret that is not the user's own is not used: a file or directory that is a symbolic link, a file larger than 4 KiB, and on Unix a file or directory that belongs to another user or that the group or others can access. The client leaves it as it is and uses a random secret for the life of the process instead. See [Prompt caching](https://docs.tinfoil.sh/sdk/prompt-caching).
 
 ## Cargo features
 
@@ -279,7 +290,6 @@ These bounds are fixed:
 |---|---|---|
 | `openai` | yes | The OpenAI clients over async-openai, with its chat completion, embedding, audio and responses APIs; `chat_relaxed`; the `sse` and `multimodal` modules. Without it the crate is the HTTP clients and the verifier. |
 | `openai-<family>` | no | One further API family of async-openai on the OpenAI clients; each implies `openai`. The families: `administration`, `batches`, `byot`, `chatkit`, `completions`, `containers`, `content-provenance-checks`, `evals`, `files`, `fine-tuning`, `images`, `models`, `moderations`, `safety`, `skills`, `uploads`, `vector-stores`. |
-| `unstable-gateway` | no | **Experimental and not implemented.** The types of a gateway route, whose calls fail with an error that says so. Do not enable it; it may change or be removed in any release. |
 
 Every call of an enabled family goes through the attested client. async-openai's realtime API is not offered, because it opens WebSocket connections of its own that the attested client cannot protect. One helper of async-openai makes a request of its own: `ImagesResponse::save` (`openai-images`) downloads with a plain HTTP client, and that download is not attested.
 

@@ -1506,13 +1506,12 @@ mod options {
     use crate::verifier::Verifier;
 
     fn refusing_fetch() -> Fetch {
-        Arc::new(|_, _, _| Box::pin(async { panic!("the checks do no I/O") }))
+        Arc::new(|_, _| Box::pin(async { panic!("the checks do no I/O") }))
     }
 
     fn config(host: &str, repo: Option<&str>, verifier: Option<Arc<Verifier>>) -> Config {
         Config {
             host: host.to_owned(),
-            relay: None,
             repo: repo.map(str::to_owned),
             verifier,
             verification_check: None,
@@ -1661,8 +1660,8 @@ mod options {
         unstuck(async {
             let fetched = Arc::new(Mutex::new(Vec::new()));
             let log = Arc::clone(&fetched);
-            let fetch: Fetch = Arc::new(move |host, relay, nonce| {
-                log.lock().unwrap().push((host, relay, nonce));
+            let fetch: Fetch = Arc::new(move |host, nonce| {
+                log.lock().unwrap().push((host, nonce));
                 Box::pin(async { Ok(b"not an attestation document".to_vec()) })
             });
             let (checked, settings) = checked();
@@ -1680,8 +1679,7 @@ mod options {
             let fetched = fetched.lock().unwrap();
             assert_eq!(fetched.len(), 2);
             assert_eq!(fetched[0].0, "enclave.example.com");
-            assert_eq!(fetched[0].1, None);
-            assert_ne!(fetched[0].2, fetched[1].2);
+            assert_ne!(fetched[0].1, fetched[1].1);
         })
         .await
     }
@@ -1689,7 +1687,7 @@ mod options {
     #[tokio::test(start_paused = true)]
     async fn connecting_ends_at_the_timeout() {
         unstuck(async {
-            let fetch: Fetch = Arc::new(|_, _, _| Box::pin(std::future::pending()));
+            let fetch: Fetch = Arc::new(|_, _| Box::pin(std::future::pending()));
             let (checked, settings) = checked();
             let started = tokio::time::Instant::now();
             let error = AttestedClient::connect(checked, settings, system_clock(), fetch)

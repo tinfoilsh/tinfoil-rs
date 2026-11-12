@@ -27,6 +27,7 @@ use crate::internal::enclave::Enclave;
 use crate::internal::testing::{Record, Script, Step, record, tokio_clock};
 use crate::internal::transport::{Failure, Mode, RoundTrip, Transport};
 use crate::openai::relaxed::RelaxedChat;
+use crate::openai::retry::Waits;
 use crate::options::{Secret, TransportMode};
 use crate::request::Execute;
 
@@ -65,8 +66,13 @@ struct Kit {
 impl Kit {
     fn new(client: AttestedClient<Record>, mode: TransportMode) -> Self {
         let api_base = client.openai_url().clone();
+        let waits = Waits {
+            timeout: client.timeout(),
+            clock: tokio_clock(),
+        };
         let http: Arc<dyn Execute> = Arc::new(client);
-        let (openai, sender) = openai_client(config(), &api_base, Arc::clone(&http), mode).unwrap();
+        let (openai, sender) =
+            openai_client(config(), &api_base, Arc::clone(&http), mode, waits).unwrap();
         Self {
             openai,
             sender,
@@ -159,6 +165,8 @@ struct Sent {
 enum Answer {
     Respond(u16, &'static str),
     RespondWith(u16, &'static str, &'static str, &'static str),
+    /// This response as it is.
+    Whole(Response),
     LacksKey,
     Fail(Error),
     /// A response whose body delivers this text and then breaks.
@@ -221,6 +229,7 @@ impl RoundTrip for Binding {
                         .body(body);
                     Ok(Response::from(response.unwrap()))
                 }
+                Answer::Whole(response) => Ok(response),
                 Answer::LacksKey => Err(Failure::peer_lacks_key(Error::attestation(
                     "the peer does not hold the attested key",
                 ))),
@@ -262,6 +271,16 @@ async fn fake(
     secret: Option<&str>,
     answers: impl Fn(&Sent, usize) -> Answer + Send + Sync + 'static,
 ) -> Fake {
+    fake_within(None, steps, secret, answers).await
+}
+
+/// As [`fake`], with the `timeout` option.
+async fn fake_within(
+    timeout: Option<Duration>,
+    steps: Vec<Step>,
+    secret: Option<&str>,
+    answers: impl Fn(&Sent, usize) -> Answer + Send + Sync + 'static,
+) -> Fake {
     let script = Script::new(steps);
     let sent = Arc::new(Mutex::new(Vec::new()));
     let mode = Scripted {
@@ -278,7 +297,7 @@ async fn fake(
             mode: TransportMode::Tls,
             base_url: None,
             secret: secret.map(Secret::new),
-            timeout: None,
+            timeout,
         },
     )
     .unwrap();
@@ -369,8 +388,39 @@ async fn a_rate_limit_or_a_server_error_is_tried_three_times_in_all() {
     .await
 }
 
+/// A response that fails with `status` and one header, and then, on the
+/// next attempt, a success. Returns how long the call took and how many
+/// requests were sent.
+async fn retried_after(
+    timeout: Option<Duration>,
+    status: u16,
+    header: (&'static str, &'static str),
+) -> (Duration, usize, Result<(), OpenAIError>) {
+    const LIMITED: &str = r#"{"error":{"message":"slow down","type":"rate_limit"}}"#;
+    let f = fake_within(timeout, vec![ready("first")], None, move |_, before| {
+        if before == 0 {
+            Answer::RespondWith(status, header.0, header.1, LIMITED)
+        } else {
+            Answer::Respond(200, CHAT_RESPONSE)
+        }
+    })
+    .await;
+    let started = tokio::time::Instant::now();
+    let result = f.openai.chat().create(chat_request()).await.map(|_| ());
+    (started.elapsed(), f.sent().len(), result)
+}
+
+/// The backoff before the first retry: half a second, less up to a
+/// quarter.
+fn assert_first_backoff(waited: Duration) {
+    assert!(
+        waited > Duration::from_millis(375) && waited <= Duration::from_millis(500),
+        "{waited:?}"
+    );
+}
+
 #[tokio::test(start_paused = true)]
-async fn a_retry_waits_for_its_backoff_or_for_what_the_response_asks() {
+async fn a_retry_waits_for_its_backoff_or_for_what_the_response_asks_within_the_limit() {
     unstuck(async {
         const BROKEN: &str = r#"{"error":{"message":"broken","type":"server_error"}}"#;
         let f = fake(vec![ready("first")], None, |_, _| {
@@ -379,19 +429,259 @@ async fn a_retry_waits_for_its_backoff_or_for_what_the_response_asks() {
         .await;
         let started = tokio::time::Instant::now();
         f.openai.chat().create(chat_request()).await.unwrap_err();
-        assert_eq!(started.elapsed(), Duration::from_millis(100 + 200));
+        let waited = started.elapsed();
+        assert!(
+            waited > Duration::from_millis(375 + 750) && waited <= Duration::from_millis(1500),
+            "{waited:?}"
+        );
 
-        let f = fake(vec![ready("first")], None, |_, before| {
-            if before == 0 {
-                Answer::RespondWith(503, "retry-after", "7", BROKEN)
-            } else {
-                Answer::Respond(200, CHAT_RESPONSE)
+        for status in [429, 503] {
+            // Seconds, with or without a fraction, and milliseconds.
+            let (waited, sent, result) = retried_after(None, status, ("retry-after", "7")).await;
+            assert_eq!((waited, sent), (Duration::from_secs(7), 2));
+            result.unwrap();
+            let (waited, sent, _) = retried_after(None, status, ("retry-after", "1.5")).await;
+            assert_eq!((waited, sent), (Duration::from_millis(1500), 2));
+            let (waited, sent, _) = retried_after(None, status, ("retry-after-ms", "250")).await;
+            assert_eq!((waited, sent), (Duration::from_millis(250), 2));
+            // The longest wait that is obeyed.
+            let (waited, sent, _) = retried_after(None, status, ("retry-after", "120")).await;
+            assert_eq!((waited, sent), (Duration::from_secs(120), 2));
+            // No wait at all.
+            let (waited, sent, _) = retried_after(None, status, ("retry-after", "0")).await;
+            assert_eq!((waited, sent), (Duration::ZERO, 2));
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_response_that_asks_for_too_long_a_wait_ends_the_call_at_once() {
+    unstuck(async {
+        // The clock of the tests starts at this instant, so these are
+        // three minutes and a century ahead.
+        const SOON: &str = "Fri, 15 Jan 2027 08:03:00 GMT";
+        const FAR: &str = "Thu, 15 Jan 2126 08:00:00 GMT";
+        for header in [
+            ("retry-after", "121"),
+            ("retry-after", "120.001"),
+            ("retry-after", "4000000000"),
+            ("retry-after", "18446744073709551616"),
+            ("retry-after", "1e400"),
+            ("retry-after", "inf"),
+            ("retry-after-ms", "120001"),
+            ("retry-after-ms", "99999999999999999999999"),
+            ("retry-after", SOON),
+            ("retry-after", FAR),
+        ] {
+            // A server error is returned as the response that it was.
+            let (waited, sent, result) = retried_after(None, 503, header).await;
+            assert_eq!((waited, sent), (Duration::ZERO, 1), "{header:?}");
+            match result {
+                Err(OpenAIError::ApiError(error)) => assert_eq!(error.status_code, 503),
+                other => panic!("{header:?}: {other:?}"),
             }
+            // A rate limit is the API's error.
+            let (waited, sent, result) = retried_after(None, 429, header).await;
+            assert_eq!((waited, sent), (Duration::ZERO, 1), "{header:?}");
+            match result {
+                Err(OpenAIError::ApiError(error)) => {
+                    assert_eq!(error.status_code, 429);
+                    assert_eq!(error.api_error.message, "slow down");
+                }
+                other => panic!("{header:?}: {other:?}"),
+            }
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wait_never_outlasts_the_timeout_option() {
+    unstuck(async {
+        let five = Some(Duration::from_secs(5));
+        // Within the timeout: obeyed.
+        let (waited, sent, result) = retried_after(five, 503, ("retry-after", "5")).await;
+        assert_eq!((waited, sent), (Duration::from_secs(5), 2));
+        result.unwrap();
+        // Beyond it, though within the fixed limit: the call ends.
+        for header in [
+            ("retry-after", "6"),
+            ("retry-after", "4000000000"),
+            ("retry-after-ms", "5001"),
+            ("retry-after", "Fri, 15 Jan 2027 08:00:06 GMT"),
+        ] {
+            let (waited, sent, result) = retried_after(five, 503, header).await;
+            assert_eq!((waited, sent), (Duration::ZERO, 1), "{header:?}");
+            assert!(
+                matches!(result, Err(OpenAIError::ApiError(_))),
+                "{header:?}"
+            );
+        }
+        // The backoff is cut to the timeout.
+        let brief = Some(Duration::from_millis(100));
+        let (waited, sent, _) = retried_after(brief, 503, ("x-unrelated", "1")).await;
+        assert_eq!(sent, 2);
+        assert!(
+            waited > Duration::from_millis(75) && waited <= Duration::from_millis(100),
+            "{waited:?}"
+        );
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wait_that_cannot_be_read_is_the_backoff() {
+    unstuck(async {
+        for header in [
+            ("retry-after", "-1"),
+            ("retry-after", "-4000000000"),
+            ("retry-after", "-inf"),
+            ("retry-after", "nan"),
+            ("retry-after", "soon"),
+            ("retry-after", "7 seconds"),
+            ("retry-after", "0x10"),
+            ("retry-after", ""),
+            ("retry-after-ms", "-5"),
+            ("retry-after-ms", "Fri, 15 Jan 2027 08:01:00 GMT"),
+            // Not in the preferred format of an HTTP date.
+            ("retry-after", "Friday, 15-Jan-27 08:01:00 GMT"),
+            ("retry-after", "Fri, 15 Jan 2027 08:01:00 PST"),
+        ] {
+            let (waited, sent, result) = retried_after(None, 503, header).await;
+            assert_eq!(sent, 2, "{header:?}");
+            assert_first_backoff(waited);
+            result.unwrap();
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_date_is_waited_for_and_a_date_in_the_past_is_no_wait() {
+    unstuck(async {
+        // The clock of the tests starts at 2027-01-15 08:00:00 UTC.
+        let (waited, sent, result) =
+            retried_after(None, 429, ("retry-after", "Fri, 15 Jan 2027 08:01:30 GMT")).await;
+        assert_eq!((waited, sent), (Duration::from_secs(90), 2));
+        result.unwrap();
+        for past in [
+            "Fri, 15 Jan 2027 08:00:00 GMT",
+            "Fri, 15 Jan 2027 07:59:59 GMT",
+            "Thu, 01 Jan 1970 00:00:00 GMT",
+        ] {
+            let (waited, sent, _) = retried_after(None, 503, ("retry-after", past)).await;
+            assert_eq!((waited, sent), (Duration::ZERO, 2), "{past}");
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn milliseconds_are_preferred_and_a_bad_value_falls_through_to_the_seconds() {
+    unstuck(async {
+        const BROKEN: &str = r#"{"error":{"message":"broken","type":"server_error"}}"#;
+        let both = |ms: &'static str, seconds: &'static str| async move {
+            let f = fake(vec![ready("first")], None, move |_, before| {
+                if before == 0 {
+                    let response = http::Response::builder()
+                        .status(503)
+                        .header("retry-after", seconds)
+                        .header("retry-after-ms", ms)
+                        .body(BROKEN);
+                    Answer::Whole(Response::from(response.unwrap()))
+                } else {
+                    Answer::Respond(200, CHAT_RESPONSE)
+                }
+            })
+            .await;
+            let started = tokio::time::Instant::now();
+            let result = f.openai.chat().create(chat_request()).await.map(|_| ());
+            (started.elapsed(), f.sent().len(), result.is_ok())
+        };
+        assert_eq!(
+            both("300", "9").await,
+            (Duration::from_millis(300), 2, true)
+        );
+        assert_eq!(both("-1", "9").await, (Duration::from_secs(9), 2, true));
+        assert_eq!(both("soon", "9").await, (Duration::from_secs(9), 2, true));
+        // Too long in the preferred header: the other is not consulted.
+        assert_eq!(both("120001", "1").await, (Duration::ZERO, 1, false));
+        assert_eq!(
+            both("1", "4000000000").await,
+            (Duration::from_millis(1), 2, true)
+        );
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_wait_of_a_call_is_bounded_and_the_last_attempt_waits_for_nothing() {
+    unstuck(async {
+        const BROKEN: &str = r#"{"error":{"message":"broken","type":"server_error"}}"#;
+        // Each response asks for the longest wait that is obeyed.
+        let f = fake(vec![ready("first")], None, |_, _| {
+            Answer::RespondWith(503, "retry-after", "120", BROKEN)
         })
         .await;
         let started = tokio::time::Instant::now();
-        f.openai.chat().create(chat_request()).await.unwrap();
-        assert_eq!(started.elapsed(), Duration::from_secs(7));
+        f.openai.chat().create(chat_request()).await.unwrap_err();
+        assert_eq!(started.elapsed(), Duration::from_secs(240));
+        assert_eq!(f.sent().len(), 3);
+
+        // The last response asks for too long a wait, which changes
+        // nothing: no attempt would follow it.
+        let f = fake(vec![ready("first")], None, |_, before| {
+            let wait = if before < 2 { "1" } else { "4000000000" };
+            Answer::RespondWith(503, "retry-after", wait, BROKEN)
+        })
+        .await;
+        let started = tokio::time::Instant::now();
+        f.openai.chat().create(chat_request()).await.unwrap_err();
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        assert_eq!(f.sent().len(), 3);
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_relaxed_request_obeys_the_same_bounds_on_its_waits() {
+    unstuck(async {
+        let relaxed = |timeout: Option<Duration>, wait: &'static str| async move {
+            let f = fake_within(timeout, vec![ready("first")], None, move |_, before| {
+                if before == 0 {
+                    Answer::RespondWith(503, "retry-after", wait, BROKEN)
+                } else {
+                    Answer::Respond(200, CHAT_RESPONSE)
+                }
+            })
+            .await;
+            let started = tokio::time::Instant::now();
+            let result = f.openai.relaxed().create(serde_json::json!({})).await;
+            (started.elapsed(), f.sent().len(), result.is_ok())
+        };
+        assert_eq!(relaxed(None, "7").await, (Duration::from_secs(7), 2, true));
+        assert_eq!(
+            relaxed(None, "4000000000").await,
+            (Duration::ZERO, 1, false)
+        );
+        assert_eq!(relaxed(None, "-3").await.1, 2);
+        let five = Some(Duration::from_secs(5));
+        assert_eq!(relaxed(five, "6").await, (Duration::ZERO, 1, false));
+
+        // And a relaxed stream, before it starts.
+        let f = fake(vec![ready("first")], None, |_, _| {
+            Answer::RespondWith(503, "retry-after", "4000000000", BROKEN)
+        })
+        .await;
+        let started = tokio::time::Instant::now();
+        let result = f
+            .openai
+            .relaxed()
+            .create_stream(serde_json::json!({}))
+            .await;
+        assert!(matches!(result, Err(OpenAIError::ApiError(_))));
+        assert_eq!((started.elapsed(), f.sent().len()), (Duration::ZERO, 1));
     })
     .await
 }
@@ -418,6 +708,208 @@ async fn other_statuses_are_reported_after_one_attempt() {
             assert!(matches!(error, OpenAIError::ApiError(_)), "{error:?}");
             assert_eq!(f.sent().len(), 1, "{status}");
         }
+    })
+    .await
+}
+
+/// A response with `status` whose body never ends.
+fn endless(status: u16) -> Answer {
+    static CHUNK: [u8; 64 * 1024] = [b'x'; 64 * 1024];
+    let body = futures_util::stream::repeat_with(|| {
+        Ok::<_, std::io::Error>(bytes::Bytes::from_static(&CHUNK))
+    });
+    let response = http::Response::builder()
+        .status(status)
+        .body(reqwest::Body::wrap_stream(body));
+    Answer::Whole(Response::from(response.unwrap()))
+}
+
+/// A response with `status` whose body is `size` bytes of text.
+fn sized(status: u16, size: usize) -> Answer {
+    let response = http::Response::builder()
+        .status(status)
+        .body("x".repeat(size));
+    Answer::Whole(Response::from(response.unwrap()))
+}
+
+/// A response with `status` whose body breaks after its first bytes.
+fn broken(status: u16) -> Answer {
+    let body = futures_util::stream::iter([
+        Ok("{\"error\":"),
+        Err(std::io::Error::other("connection reset")),
+    ]);
+    let response = http::Response::builder()
+        .status(status)
+        .body(reqwest::Body::wrap_stream(body));
+    Answer::Whole(Response::from(response.unwrap()))
+}
+
+/// The message of the client's error for a body beyond `limit`.
+fn too_large(limit: usize) -> String {
+    format!("network error: the response body is larger than {limit} bytes")
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rate_limit_is_tried_again_whatever_its_body_holds() {
+    use super::MAX_ERROR_BODY_BYTES;
+    unstuck(async {
+        type Check = fn(&OpenAIError) -> bool;
+        let cases: [(fn() -> Answer, Check); 5] = [
+            // Not the API's error object.
+            (
+                || Answer::Respond(429, "slow down"),
+                |error| matches!(error, OpenAIError::JSONDeserialize(_, text) if text == "slow down"),
+            ),
+            (
+                || Answer::Respond(429, ""),
+                |error| matches!(error, OpenAIError::JSONDeserialize(..)),
+            ),
+            // Too large, by one byte and without an end.
+            (
+                || sized(429, MAX_ERROR_BODY_BYTES + 1),
+                |error| client_error(error).to_string() == too_large(MAX_ERROR_BODY_BYTES),
+            ),
+            (
+                || endless(429),
+                |error| client_error(error).to_string() == too_large(MAX_ERROR_BODY_BYTES),
+            ),
+            // Cut off while it is read.
+            (
+                || broken(429),
+                |error| matches!(error, OpenAIError::Reqwest(_)),
+            ),
+        ];
+        for (index, (answer, expected)) in cases.into_iter().enumerate() {
+            // Always: three attempts, then what was wrong with the body.
+            let f = fake(vec![ready("first")], None, move |_, _| answer()).await;
+            let error = f.openai.chat().create(chat_request()).await.unwrap_err();
+            assert!(expected(&error), "{index}: {error:?}");
+            assert_eq!(f.sent().len(), 3, "{index}");
+
+            // Twice: the third attempt answers.
+            let f = fake(vec![ready("first")], None, move |_, before| {
+                if before < 2 {
+                    answer()
+                } else {
+                    Answer::Respond(200, CHAT_RESPONSE)
+                }
+            })
+            .await;
+            f.openai.chat().create(chat_request()).await.unwrap();
+            assert_eq!(f.sent().len(), 3, "{index}");
+        }
+
+        // The wait that such a response names is obeyed like any other.
+        let f = fake(vec![ready("first")], None, |_, before| {
+            if before == 0 {
+                Answer::RespondWith(429, "retry-after", "7", "slow down")
+            } else {
+                Answer::Respond(200, CHAT_RESPONSE)
+            }
+        })
+        .await;
+        let started = tokio::time::Instant::now();
+        f.openai.chat().create(chat_request()).await.unwrap();
+        assert_eq!(started.elapsed(), Duration::from_secs(7));
+        // And one that asks for too long a wait ends the call.
+        let f = fake(vec![ready("first")], None, |_, _| {
+            Answer::RespondWith(429, "retry-after", "4000000000", "slow down")
+        })
+        .await;
+        let error = f.openai.chat().create(chat_request()).await.unwrap_err();
+        assert!(matches!(error, OpenAIError::JSONDeserialize(..)), "{error:?}");
+        assert_eq!(f.sent().len(), 1);
+
+        // A body of exactly the limit is read, and is what it is.
+        let f = fake(vec![ready("first")], None, |_, _| {
+            sized(429, MAX_ERROR_BODY_BYTES)
+        })
+        .await;
+        let error = f.openai.chat().create(chat_request()).await.unwrap_err();
+        match error {
+            OpenAIError::JSONDeserialize(_, text) => assert_eq!(text.len(), MAX_ERROR_BODY_BYTES),
+            other => panic!("{other:?}"),
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_relaxed_call_reads_no_more_of_a_body_than_its_limit() {
+    use super::MAX_ERROR_BODY_BYTES;
+    use crate::openai::relaxed::MAX_RESPONSE_BYTES;
+    unstuck(async {
+        // An error body without an end: a client error, a server error
+        // (after its retries) and a rate limit.
+        for (status, attempts) in [(400, 1), (404, 1), (502, 3), (429, 3)] {
+            let f = fake(vec![ready("first")], None, move |_, _| endless(status)).await;
+            let error = f
+                .openai
+                .relaxed()
+                .create(serde_json::json!({}))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                client_error(&error).to_string(),
+                too_large(MAX_ERROR_BODY_BYTES),
+                "{status}"
+            );
+            assert_eq!(client_error(&error).kind(), ErrorKind::Network);
+            assert_eq!(f.sent().len(), attempts, "{status}");
+
+            // The same before a stream starts.
+            let f = fake(vec![ready("first")], None, move |_, _| endless(status)).await;
+            let result = f
+                .openai
+                .relaxed()
+                .create_stream(serde_json::json!({}))
+                .await;
+            let error = result.err().expect("an error status");
+            assert_eq!(
+                client_error(&error).to_string(),
+                too_large(MAX_ERROR_BODY_BYTES),
+                "{status}"
+            );
+        }
+        // One byte beyond the limit, and exactly the limit.
+        let f = fake(vec![ready("first")], None, |_, _| {
+            sized(404, MAX_ERROR_BODY_BYTES + 1)
+        })
+        .await;
+        let error = f
+            .openai
+            .relaxed()
+            .create(serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            client_error(&error).to_string(),
+            too_large(MAX_ERROR_BODY_BYTES)
+        );
+        let f = fake(vec![ready("first")], None, |_, _| {
+            sized(502, MAX_ERROR_BODY_BYTES)
+        })
+        .await;
+        match f.openai.relaxed().create(serde_json::json!({})).await {
+            Err(OpenAIError::ApiError(error)) => {
+                assert_eq!(error.api_error.message.len(), MAX_ERROR_BODY_BYTES);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // A successful response without an end.
+        let f = fake(vec![ready("first")], None, |_, _| endless(200)).await;
+        let error = f
+            .openai
+            .relaxed()
+            .create(serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            client_error(&error).to_string(),
+            too_large(MAX_RESPONSE_BYTES)
+        );
+        assert_eq!(f.sent().len(), 1);
     })
     .await
 }
@@ -508,9 +1000,19 @@ async fn an_api_base_on_another_origin_is_refused_by_the_client_underneath() {
         )
         .unwrap();
         let elsewhere = Url::parse("https://evil.example.com/v1/").unwrap();
-        let openai = openai_client(config(), &elsewhere, Arc::new(client), TransportMode::Tls)
-            .unwrap()
-            .0;
+        let waits = Waits {
+            timeout: None,
+            clock: tokio_clock(),
+        };
+        let openai = openai_client(
+            config(),
+            &elsewhere,
+            Arc::new(client),
+            TransportMode::Tls,
+            waits,
+        )
+        .unwrap()
+        .0;
         let error = openai.chat().create(chat_request()).await.unwrap_err();
         let found = client_error(&error);
         assert_eq!(found.kind(), ErrorKind::Configuration);
@@ -668,7 +1170,75 @@ async fn a_body_that_fails_while_it_is_read_carries_the_clients_error() {
             .unwrap();
         let first = stream.next().await.unwrap().unwrap();
         assert_eq!(first.choices[0].delta.content.as_deref(), Some("a"));
-        assert!(stream.next().await.unwrap().is_err());
+        // The stream ends in an error at the deadline. `async_openai`
+        // keeps the message of that error only, so the client's error is
+        // not found in it.
+        let started = tokio::time::Instant::now();
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(started.elapsed() <= Duration::from_secs(5));
+        assert_unclassified_stream_error(&error);
+        assert!(stream.next().await.is_none());
+
+        // A relaxed stream over the same response keeps the client's
+        // error.
+        let mut stream = openai
+            .relaxed()
+            .create_stream(serde_json::json!({}))
+            .await
+            .unwrap();
+        stream.next().await.unwrap().unwrap();
+        let error = stream.next().await.unwrap().unwrap_err();
+        let found = client_error(&error);
+        assert_eq!(found.kind(), ErrorKind::Network);
+        assert!(found.is_timeout());
+        assert!(stream.next().await.is_none());
+    })
+    .await
+}
+
+/// A typed stream reports a failed read as a stream error that holds the
+/// message of the failure and no client error.
+fn assert_unclassified_stream_error(error: &OpenAIError) {
+    match error {
+        OpenAIError::StreamError(inner) => assert!(
+            matches!(**inner, async_openai::error::StreamError::EventStream(_)),
+            "{inner:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(Error::from_openai(error).is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_typed_stream_whose_connection_breaks_ends_in_an_error() {
+    unstuck(async {
+        const EVENT: &str = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"},\"finish_reason\":null}]}\n\n";
+        let f = fake(vec![ready("first")], None, |_, _| Answer::Broken(EVENT)).await;
+        let mut stream = f
+            .openai
+            .chat()
+            .create_stream(streaming_chat_request())
+            .await
+            .unwrap();
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.choices[0].delta.content.as_deref(), Some("a"));
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_unclassified_stream_error(&error);
+        assert!(stream.next().await.is_none());
+        // Nothing is tried again once a stream has started.
+        assert_eq!(f.sent().len(), 1);
+
+        // A relaxed stream keeps the client's error.
+        let mut stream = f
+            .openai
+            .relaxed()
+            .create_stream(serde_json::json!({}))
+            .await
+            .unwrap();
+        stream.next().await.unwrap().unwrap();
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(client_error(&error).kind(), ErrorKind::Network);
+        assert!(stream.next().await.is_none());
     })
     .await
 }
@@ -1164,6 +1734,44 @@ mod over_ehbp {
         let body: serde_json::Value = serde_json::from_slice(&seen[0].body).unwrap();
         assert_eq!(body["stream"], true);
         assert_eq!(body["user_cache_secret"], "s3cret-scope");
+    }
+
+    #[tokio::test]
+    async fn a_stream_whose_sealed_body_stops_authenticating_ends_in_an_error() {
+        let held = key(1);
+        let server = serve(&held, |_| {
+            Reply::parts(vec![
+                ehbp::data(&chunk("one")),
+                ehbp::Part::Tampered(chunk("forged").into_bytes()),
+                ehbp::data(&chunk("three")),
+                ehbp::data("data: [DONE]\n\n"),
+            ])
+            .header("content-type", "text/event-stream")
+        })
+        .await;
+        let openai = client(&server, &held.public_hex).await;
+
+        // Typed: the authentic event arrives, then the stream ends in an
+        // error and delivers nothing of the forged frame or after it. The
+        // error holds a message only, which does not name the cause.
+        let mut stream = soon(openai.chat().create_stream(streaming_chat_request()))
+            .await
+            .unwrap();
+        let first = soon(stream.next()).await.unwrap().unwrap();
+        assert_eq!(first.choices[0].delta.content.as_deref(), Some("one"));
+        let error = soon(stream.next()).await.unwrap().unwrap_err();
+        assert_unclassified_stream_error(&error);
+        assert!(soon(stream.next()).await.is_none());
+
+        // Relaxed: the same, and the error is the client's.
+        let mut stream = soon(openai.relaxed().create_stream(serde_json::json!({})))
+            .await
+            .unwrap();
+        let first = soon(stream.next()).await.unwrap().unwrap();
+        assert!(first.raw().to_string().contains("one"));
+        let error = soon(stream.next()).await.unwrap().unwrap_err();
+        assert_eq!(client_error(&error).kind(), ErrorKind::Attestation);
+        assert!(soon(stream.next()).await.is_none());
     }
 
     #[tokio::test]

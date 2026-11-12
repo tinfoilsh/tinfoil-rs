@@ -165,6 +165,12 @@ impl<V: Evidence> AttestedClient<V> {
         &self.openai_url
     }
 
+    /// The `timeout` option.
+    #[cfg(feature = "openai")]
+    pub(crate) fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
     pub(crate) fn enclave(&self) -> &str {
         self.transport.enclave().host()
     }

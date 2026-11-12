@@ -143,7 +143,7 @@ jobs:
       - name: Run clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-      # The client's OpenAI and gateway code is behind cargo features.
+      # The client's OpenAI code is behind cargo features.
       - name: Run clippy on the client without its default features
         run: cargo clippy --locked -p tinfoil --all-targets --no-default-features -- -D warnings
 

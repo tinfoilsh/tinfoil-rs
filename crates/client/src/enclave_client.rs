@@ -238,6 +238,13 @@ impl EnclaveHttpClientBuilder {
     /// source, and it is not tried again. Requests wait while the check
     /// runs, so it should be fast, and it may be called from several
     /// threads at once.
+    ///
+    /// A check that panics rejects the enclave in the same way: the panic
+    /// is caught, and the verification fails with an attestation error
+    /// for every caller that waited for it. The client stays usable, and
+    /// the next verification calls the check again, with whatever state
+    /// the panic left in what the check captured. (A program built with
+    /// `panic = "abort"` aborts instead.)
     pub fn verification_check<F>(mut self, check: F) -> Self
     where
         F: Fn(&Verification) -> Result<(), BoxError> + Send + Sync + 'static,
@@ -341,7 +348,6 @@ impl EnclaveHttpClientBuilder {
         let common = self.options.common;
         let checked = enclave::Config {
             host: self.host,
-            relay: None,
             repo: self.repo,
             verifier: common.verifier,
             verification_check: common.verification_check,

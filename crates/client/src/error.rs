@@ -15,14 +15,44 @@ pub enum ErrorKind {
     Configuration,
     /// The client could not reach what it needed: a network failure, a
     /// timeout, or an HTTP error status while it fetched attestation
-    /// material, a failed connection to the enclave, or a gateway that keeps
-    /// routing a request away from the enclave that it was sealed to. Retry
-    /// later with the same client.
+    /// material, or a failed connection to the enclave. Retry later with
+    /// the same client.
     Network,
     /// Rejected evidence, policy or channel binding: the enclave could not
-    /// be trusted, and nothing was sent to it. The client verifies again by
-    /// itself on the next request; a failure that persists deserves an
-    /// investigation.
+    /// be trusted, or what it answered could not be authenticated. The
+    /// client verifies again by itself on the next request; a failure that
+    /// persists deserves an investigation.
+    ///
+    /// Whether the request was delivered depends on where the error arose:
+    ///
+    /// - **Not delivered.** A verification failed (in `connect`,
+    ///   `ensure_verified`, `reverify`, or before a request that needed
+    ///   one): the evidence or the policy was rejected, the
+    ///   `verification_check` refused it, or the document endorses no key
+    ///   for the transport mode. No connection for the request was
+    ///   opened, and nothing was sent. In
+    ///   [`TransportMode::Tls`](crate::TransportMode::Tls) the one other
+    ///   attestation error is the pin: the server's certificate fails the
+    ///   standard checks or does not carry the attested key. That fails
+    ///   the handshake, before the request is written. So in that mode no
+    ///   attestation error leaves a request delivered.
+    /// - **Possibly delivered.** In
+    ///   [`TransportMode::Ehbp`](crate::TransportMode::Ehbp) the body is
+    ///   sealed to the attested key, so nobody else can read it, but the
+    ///   error can arise after the sealed request has left: the answer
+    ///   says that the enclave does not hold the key, a success response
+    ///   carries no valid proof that the enclave sent it, or a part of
+    ///   the response body does not authenticate while it is read (found
+    ///   with [`Error::from_reqwest`]). None of these says whether the
+    ///   enclave received the request and acted on it.
+    ///
+    /// So, in the EHBP mode, do not conclude from an attestation error on
+    /// a request that the request had no effect. Send a request that must
+    /// not take effect twice with an idempotency key, or find out what
+    /// became of it before sending it again. The client itself sends a
+    /// request a second time in one case only, after a key rejection and
+    /// a new verification; in the EHBP mode that rejection is an answer
+    /// that is not authenticated.
     Attestation,
 }
 
@@ -110,8 +140,31 @@ impl Error {
     /// A typed `async_openai` call returns `OpenAIError`. When the attested
     /// HTTP client under it fails, for example because the enclave no longer
     /// passes verification, its error travels inside that `OpenAIError`;
-    /// this returns it. `None` means that the failure came from the API or
-    /// from `async_openai` itself.
+    /// this returns it. It is found in the error of:
+    ///
+    /// - every call, streaming or not, that fails before its response
+    ///   arrives: a refused verification, a refused request, a failed
+    ///   connection, a deadline;
+    /// - a call whose response `async_openai` reads whole, when that read
+    ///   fails;
+    /// - `chat_relaxed()` calls and the streams of
+    ///   [`RelaxedChat::create_stream`](crate::RelaxedChat::create_stream)
+    ///   and [`parse_event_stream`](crate::sse::parse_event_stream), at
+    ///   any point.
+    ///
+    /// It is **not** found in an item of a stream that a typed call
+    /// returned (`chat().create_stream(..)`, `responses().create_stream(..)`
+    /// and the like). When the body of such a stream fails while it is
+    /// read (in [`TransportMode::Ehbp`](crate::TransportMode::Ehbp) a
+    /// part that does not authenticate; a broken connection; a deadline),
+    /// the stream still ends with an error and delivers nothing after it,
+    /// but `async_openai` keeps only a message in
+    /// `OpenAIError::StreamError`, and the message need not name the
+    /// cause. A caller that must tell these failures apart reads the
+    /// stream with `chat_relaxed()` or through an HTTP client.
+    ///
+    /// Otherwise `None` means that the failure came from the API or from
+    /// `async_openai` itself.
     #[cfg(feature = "openai")]
     pub fn from_openai(error: &async_openai::error::OpenAIError) -> Option<&Error> {
         use async_openai::error::OpenAIError;
@@ -243,18 +296,6 @@ impl Error {
             std::io::Error::new(std::io::ErrorKind::TimedOut, message),
         )
         .timed_out()
-    }
-
-    /// The error of a function whose body is not written yet. Its kind is
-    /// [`ErrorKind::Configuration`], because retrying cannot help, and its
-    /// message says that `what` is not implemented yet in this version of
-    /// the crate, so that it cannot be read as a problem with the caller's
-    /// options.
-    #[cfg(any(test, feature = "unstable-gateway"))]
-    pub(crate) fn not_implemented(what: &'static str) -> Self {
-        Self::configuration(format!(
-            "{what} is not implemented yet in this version of the crate"
-        ))
     }
 
     /// The same error with `change` applied. An error that other holders
@@ -420,15 +461,6 @@ mod tests {
             .and_then(|source| source.downcast_ref::<std::io::Error>())
             .expect("an I/O error");
         assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
-    }
-
-    #[test]
-    fn a_placeholder_says_that_the_function_is_not_implemented_yet() {
-        let error = Error::not_implemented("router discovery");
-        assert_eq!(
-            error.to_string(),
-            "configuration error: router discovery is not implemented yet in this version of the crate"
-        );
     }
 
     #[cfg(feature = "openai")]

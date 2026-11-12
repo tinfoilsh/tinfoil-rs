@@ -9,24 +9,12 @@
 //! verification expires or the enclave's key changes, and refuses a
 //! request to any origin other than the one that it is bound to.
 //!
-//! # The gateway route is not implemented
-//!
-//! The feature `unstable-gateway`, which is off by default, is
-//! experimental and **not implemented**. It adds the types and signatures
-//! of the gateway route without the machinery behind them: each of its
-//! functions that would perform network I/O fails with an error whose
-//! message says that the function is not implemented yet. That error has
-//! the kind [`ErrorKind::Configuration`], since retrying cannot help; it
-//! does not mean that an option is wrong. Do not enable the feature to use
-//! the gateway; everything else in the crate is complete without it.
-//!
 //! # Choosing a client
 //!
 //! | route | HTTP client | OpenAI client |
 //! |---|---|---|
 //! | Tinfoil's router, discovered (recommended) | [`RouterHttpClient`] | `Client`, or `RouterOpenAIClient` to configure it |
 //! | an enclave that the caller names | [`EnclaveHttpClient`] | `EnclaveOpenAIClient` |
-//! | Tinfoil's gateway (feature `unstable-gateway`: experimental, not implemented) | `GatewayHttpClient` | `GatewayOpenAIClient` |
 //!
 //! The OpenAI clients need the `openai` feature, which is on by default.
 //!
@@ -69,7 +57,9 @@
 //!   network or attestation. A response body is read with `reqwest`'s
 //!   methods, whose error is `reqwest`'s; [`Error::from_reqwest`] returns
 //!   the client's error inside it. Errors from the OpenAI API keep
-//!   `async_openai`'s type.
+//!   `async_openai`'s type; `Error::from_openai` returns the client's
+//!   error inside one, except for a typed stream that fails after it
+//!   started, whose error holds a message only.
 //!
 //! # What is protected
 //!
@@ -79,12 +69,54 @@
 //! attested HPKE key and stay private through a proxy; the method, URL and
 //! headers are not sealed, and neither is a request without a body.
 //!
+//! # Limits of the protection
+//!
+//! - **[`TransportMode::Ehbp`] does not authenticate the end of a
+//!   response.** Each part of a sealed response body is authenticated, and
+//!   so is the order of the parts: the content cannot be forged, altered
+//!   or reordered. Nothing marks the last part, so whoever controls the
+//!   connection can end a sealed response early between two parts, or
+//!   return one with no parts, and the read ends without an error. A
+//!   response that is cut inside a part is an error. A caller that needs
+//!   to know that a response is complete checks the response's own
+//!   terminator: that the JSON document is whole, or that the final event
+//!   of a stream arrived. The event-stream parser reports a stream that
+//!   is cut inside an event.
+//! - **In [`TransportMode::Ehbp`] a request without a body is sent as it
+//!   is**, and its response is returned as it arrives, neither encrypted
+//!   nor authenticated. An error response to a sealed request that is not
+//!   sealed itself is passed through as received, since a proxy may
+//!   refuse a request before it reaches the enclave; nothing of it is
+//!   authenticated. The exceptions return no response. A `2xx` response
+//!   to a sealed request that is not sealed is refused. The enclave's key
+//!   rejection, a `422` with the protocol's key-configuration problem, is
+//!   an attestation error, after which the client verifies again and
+//!   sends the request once more if its body can be sent again. A request
+//!   whose streamed body turns out to be empty goes out unsealed and is
+//!   held to the rules of a sealed one: a `2xx` response, a response that
+//!   claims to be sealed and the key-configuration problem are
+//!   attestation errors, the last without a replay.
+//! - **A request without a cache secret uses the prompt-cache namespace
+//!   that all such requests share.** No secret is added by an enclave
+//!   client whose `user_cache_secret` option is unset; to a request that
+//!   is not a `POST` with a body to a path ending in `/chat/completions`,
+//!   `/completions` or `/responses`; to a body that is not a single JSON
+//!   object; to a body in which `user_cache_secret` appears more than
+//!   once or with a value that is not a string; or, on a router client
+//!   that has no secret from its option, the environment or its file,
+//!   when the operating system supplies no random bytes for a new one. A
+//!   non-empty `user_cache_secret` string in the body is kept.
+//! - **The router list is not trusted.** [`RouterHttpClient`] takes its
+//!   candidates from a list that is fetched over ordinary HTTPS, and
+//!   verifies each router like any other enclave before it uses it. A
+//!   wrong list can only cause attempts that fail, within the fixed time
+//!   that discovery may take.
+//!
 //! # Features
 //!
 //! | feature | what it adds |
 //! |---|---|
 //! | `openai` (default) | the OpenAI clients over `async_openai`, with its chat completion, embedding, audio and responses APIs; the relaxed chat helper; the `sse` and `multimodal` modules |
-//! | `unstable-gateway` | the types of the gateway route. Experimental and not implemented: its calls fail, and anything behind it may change or be removed in any release |
 //!
 //! The other API families of `async_openai` are opt-in. Each feature below
 //! implies `openai` and adds the family's calls to the OpenAI clients,
@@ -123,8 +155,6 @@
 
 mod enclave_client;
 mod error;
-#[cfg(feature = "unstable-gateway")]
-mod gateway_client;
 mod internal;
 #[cfg(feature = "openai")]
 mod openai;
@@ -157,11 +187,6 @@ pub use async_openai::types::embeddings;
 
 pub use enclave_client::{EnclaveHttpClient, EnclaveHttpClientBuilder};
 pub use error::{Error, ErrorKind};
-#[cfg(feature = "unstable-gateway")]
-pub use gateway_client::{
-    Catalog, CatalogEntry, GatewayHttpClient, GatewayHttpClientBuilder, ModelPin,
-    ReplicaVerification, fetch_catalog,
-};
 #[cfg(feature = "openai")]
 pub use openai::relaxed::{
     RelaxedChat, RelaxedChatRequestBuilder, RelaxedResponse, RelaxedStream, RelaxedStreamChunk,
@@ -172,8 +197,6 @@ pub use openai::{
     Client, EnclaveOpenAIClient, EnclaveOpenAIClientBuilder, RouterOpenAIClient,
     RouterOpenAIClientBuilder,
 };
-#[cfg(all(feature = "openai", feature = "unstable-gateway"))]
-pub use openai::{GatewayOpenAIClient, GatewayOpenAIClientBuilder};
 pub use options::TransportMode;
 pub use request::RequestBuilder;
 pub use router_client::{RouterHttpClient, RouterHttpClientBuilder};

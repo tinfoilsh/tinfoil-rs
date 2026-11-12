@@ -334,6 +334,10 @@ the `tinfoil-verifier` crate:
 - When the option is unset, **router clients** resolve the secret as before:
   `TINFOIL_USER_CACHE_SECRET`, then `~/.tinfoil/user_cache_secret`, created on
   first use. **Enclave clients add no secret** unless the option is set.
+- On Unix the stored secret is used only if the file and `~/.tinfoil` belong
+  to the current user and grant nothing to the group or to others (`0600` in
+  `0700`, as the SDKs create them), and only if the file is at most 4 KiB.
+  Otherwise the client uses a random secret for the life of the process.
 - The secret is added to the JSON body of `POST` requests to
   `…/chat/completions`, `…/completions` and `…/responses`, also for requests
   that you send through the HTTP clients. A non-empty `user_cache_secret` in
@@ -350,6 +354,8 @@ the `tinfoil-verifier` crate:
 - **Limits:** a line or an event of more than 16 MiB is an error.
 - **Relaxed calls are tried again** on `429` and `5xx`, at most twice, as
   typed calls are; a `429` whose error is `insufficient_quota` is not.
+  `create` reads a response of at most 64 MiB and an error body of at most
+  1 MiB.
   Nothing is tried again once a stream has started.
 - **Error types:** `create` and `create_stream` return `OpenAIError` (0.2:
   `tinfoil::Error`); a `4xx` response whose body is not an API error object is
@@ -370,6 +376,13 @@ the `tinfoil-verifier` crate:
 - A `429` or `5xx` response is tried again at most twice, except a `429` whose
   error is `insufficient_quota`, which is reported at once. A failure of the
   attested client (verification, connection, deadline) is reported once.
+- The wait is 0.5 s before the first retry and 1 s before the second, each
+  shortened at random by up to a quarter. `Retry-After-Ms` and `Retry-After`
+  (seconds, or a date in the form `Sun, 06 Nov 1994 08:49:37 GMT`) are obeyed up to 2 minutes, or up to the `timeout`
+  option if that is shorter; a response that asks for more is not tried again
+  and is reported at once.
+- `timeout` bounds each attempt and each wait between attempts, not the call
+  as a whole.
 
 ## New in 0.3
 
