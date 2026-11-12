@@ -26,7 +26,7 @@ jobs:
         # windows-latest = x86_64-pc-windows-msvc — the platform that
         # caught the aws-lc-rs / __builtin_bswap link regression
         # downstream (see #21). Without this matrix entry the bug
-        # reaches consumers before any tinfoil-rs test ever notices.
+        # reaches consumers before any test here notices.
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -63,6 +63,27 @@ jobs:
 
       - name: Test the verifier crate with serde
         run: cargo test --locked -p tinfoil-verifier --features serde --verbose
+
+      - name: Check if API key is available
+        # Bash on every runner: the Windows runner defaults to pwsh.
+        id: gate
+        shell: bash
+        env:
+          TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
+        run: |
+          if [ -z "$TINFOIL_API_KEY" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Against the production router; skipped where the secret is not
+      # available, as on pull requests from forks.
+      - name: Run the live tests
+        if: steps.gate.outputs.run == 'true'
+        env:
+          TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
+        run: cargo test --locked -p tinfoil --test live --verbose -- --ignored
 
   msrv:
     name: MSRV (1.88)

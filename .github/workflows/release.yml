@@ -37,10 +37,10 @@ jobs:
           fi
 
       - name: Build release
-        run: cargo build --locked --release --verbose
+        run: cargo build --locked --workspace --release --verbose
 
       - name: Run tests
-        run: cargo test --locked --release --verbose
+        run: cargo test --locked --workspace --release --verbose
 
   release:
     name: Create Release
