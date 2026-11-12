@@ -69,7 +69,9 @@
 //!   network or attestation. A response body is read with `reqwest`'s
 //!   methods, whose error is `reqwest`'s; [`Error::from_reqwest`] returns
 //!   the client's error inside it. Errors from the OpenAI API keep
-//!   `async_openai`'s type.
+//!   `async_openai`'s type; `Error::from_openai` returns the client's
+//!   error inside one, except for a typed stream that fails after it
+//!   started, whose error holds a message only.
 //!
 //! # What is protected
 //!

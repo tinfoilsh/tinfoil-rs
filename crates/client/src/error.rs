@@ -110,8 +110,31 @@ impl Error {
     /// A typed `async_openai` call returns `OpenAIError`. When the attested
     /// HTTP client under it fails, for example because the enclave no longer
     /// passes verification, its error travels inside that `OpenAIError`;
-    /// this returns it. `None` means that the failure came from the API or
-    /// from `async_openai` itself.
+    /// this returns it. It is found in the error of:
+    ///
+    /// - every call, streaming or not, that fails before its response
+    ///   arrives: a refused verification, a refused request, a failed
+    ///   connection, a deadline;
+    /// - a call whose response `async_openai` reads whole, when that read
+    ///   fails;
+    /// - `chat_relaxed()` calls and the streams of
+    ///   [`RelaxedChat::create_stream`](crate::RelaxedChat::create_stream)
+    ///   and [`parse_event_stream`](crate::sse::parse_event_stream), at
+    ///   any point.
+    ///
+    /// It is **not** found in an item of a stream that a typed call
+    /// returned (`chat().create_stream(..)`, `responses().create_stream(..)`
+    /// and the like). When the body of such a stream fails while it is
+    /// read (in [`TransportMode::Ehbp`](crate::TransportMode::Ehbp) a
+    /// part that does not authenticate; a broken connection; a deadline),
+    /// the stream still ends with an error and delivers nothing after it,
+    /// but `async_openai` keeps only a message in
+    /// `OpenAIError::StreamError`, and the message need not name the
+    /// cause. A caller that must tell these failures apart reads the
+    /// stream with `chat_relaxed()` or through an HTTP client.
+    ///
+    /// Otherwise `None` means that the failure came from the API or from
+    /// `async_openai` itself.
     #[cfg(feature = "openai")]
     pub fn from_openai(error: &async_openai::error::OpenAIError) -> Option<&Error> {
         use async_openai::error::OpenAIError;

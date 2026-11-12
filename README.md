@@ -243,6 +243,8 @@ async fn read(response: tinfoil::reqwest::Response) -> Option<String> {
 }
 ```
 
+`Error::from_openai` finds the SDK's error in every call that fails before its response arrives, in calls whose response is read whole, and at any point in `chat_relaxed()` calls and streams. It does not find it in a stream of a typed call (`chat().create_stream(..)` and the like) that fails after it started: such a stream still ends with an error and delivers nothing after it, but async-openai keeps only a message (`OpenAIError::StreamError`), so an attestation failure, a broken connection and a deadline cannot be told apart there. Use `chat_relaxed().create_stream(..)` where that matters.
+
 See also the [error handling guide](https://docs.tinfoil.sh/sdk/error-handling).
 
 ## Timeouts and retries

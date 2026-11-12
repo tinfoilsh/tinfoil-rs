@@ -67,8 +67,8 @@ const INSUFFICIENT_QUOTA: &str = "insufficient_quota";
 ///   body that `async_openai` reads whole is `OpenAIError::Reqwest`, and
 ///   is found there too. A failed read of a body that `async_openai`
 ///   reads as a stream of events is `OpenAIError::StreamError`, which
-///   keeps the message of the failure and nothing else: the stream ends
-///   with that error, and no client error is found in it.
+///   keeps a message and not the error: the stream ends with that error,
+///   and no client error is found in it.
 pub(crate) fn openai_client(
     config: OpenAIConfig,
     api_base: &Url,

@@ -952,7 +952,75 @@ async fn a_body_that_fails_while_it_is_read_carries_the_clients_error() {
             .unwrap();
         let first = stream.next().await.unwrap().unwrap();
         assert_eq!(first.choices[0].delta.content.as_deref(), Some("a"));
-        assert!(stream.next().await.unwrap().is_err());
+        // The stream ends in an error at the deadline. `async_openai`
+        // keeps the message of that error only, so the client's error is
+        // not found in it.
+        let started = tokio::time::Instant::now();
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(started.elapsed() <= Duration::from_secs(5));
+        assert_unclassified_stream_error(&error);
+        assert!(stream.next().await.is_none());
+
+        // A relaxed stream over the same response keeps the client's
+        // error.
+        let mut stream = openai
+            .relaxed()
+            .create_stream(serde_json::json!({}))
+            .await
+            .unwrap();
+        stream.next().await.unwrap().unwrap();
+        let error = stream.next().await.unwrap().unwrap_err();
+        let found = client_error(&error);
+        assert_eq!(found.kind(), ErrorKind::Network);
+        assert!(found.is_timeout());
+        assert!(stream.next().await.is_none());
+    })
+    .await
+}
+
+/// A typed stream reports a failed read as a stream error that holds the
+/// message of the failure and no client error.
+fn assert_unclassified_stream_error(error: &OpenAIError) {
+    match error {
+        OpenAIError::StreamError(inner) => assert!(
+            matches!(**inner, async_openai::error::StreamError::EventStream(_)),
+            "{inner:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(Error::from_openai(error).is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_typed_stream_whose_connection_breaks_ends_in_an_error() {
+    unstuck(async {
+        const EVENT: &str = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"},\"finish_reason\":null}]}\n\n";
+        let f = fake(vec![ready("first")], None, |_, _| Answer::Broken(EVENT)).await;
+        let mut stream = f
+            .openai
+            .chat()
+            .create_stream(streaming_chat_request())
+            .await
+            .unwrap();
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.choices[0].delta.content.as_deref(), Some("a"));
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_unclassified_stream_error(&error);
+        assert!(stream.next().await.is_none());
+        // Nothing is tried again once a stream has started.
+        assert_eq!(f.sent().len(), 1);
+
+        // A relaxed stream keeps the client's error.
+        let mut stream = f
+            .openai
+            .relaxed()
+            .create_stream(serde_json::json!({}))
+            .await
+            .unwrap();
+        stream.next().await.unwrap().unwrap();
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(client_error(&error).kind(), ErrorKind::Network);
+        assert!(stream.next().await.is_none());
     })
     .await
 }
@@ -1448,6 +1516,44 @@ mod over_ehbp {
         let body: serde_json::Value = serde_json::from_slice(&seen[0].body).unwrap();
         assert_eq!(body["stream"], true);
         assert_eq!(body["user_cache_secret"], "s3cret-scope");
+    }
+
+    #[tokio::test]
+    async fn a_stream_whose_sealed_body_stops_authenticating_ends_in_an_error() {
+        let held = key(1);
+        let server = serve(&held, |_| {
+            Reply::parts(vec![
+                ehbp::data(&chunk("one")),
+                ehbp::Part::Tampered(chunk("forged").into_bytes()),
+                ehbp::data(&chunk("three")),
+                ehbp::data("data: [DONE]\n\n"),
+            ])
+            .header("content-type", "text/event-stream")
+        })
+        .await;
+        let openai = client(&server, &held.public_hex).await;
+
+        // Typed: the authentic event arrives, then the stream ends in an
+        // error and delivers nothing of the forged frame or after it. The
+        // error holds a message only, which does not name the cause.
+        let mut stream = soon(openai.chat().create_stream(streaming_chat_request()))
+            .await
+            .unwrap();
+        let first = soon(stream.next()).await.unwrap().unwrap();
+        assert_eq!(first.choices[0].delta.content.as_deref(), Some("one"));
+        let error = soon(stream.next()).await.unwrap().unwrap_err();
+        assert_unclassified_stream_error(&error);
+        assert!(soon(stream.next()).await.is_none());
+
+        // Relaxed: the same, and the error is the client's.
+        let mut stream = soon(openai.relaxed().create_stream(serde_json::json!({})))
+            .await
+            .unwrap();
+        let first = soon(stream.next()).await.unwrap().unwrap();
+        assert!(first.raw().to_string().contains("one"));
+        let error = soon(stream.next()).await.unwrap().unwrap_err();
+        assert_eq!(client_error(&error).kind(), ErrorKind::Attestation);
+        assert!(soon(stream.next()).await.is_none());
     }
 
     #[tokio::test]

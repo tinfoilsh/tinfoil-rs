@@ -159,7 +159,10 @@ pub(crate) use openai_client_methods;
 ///
 /// A failed call returns `async_openai`'s `OpenAIError`. When the cause is
 /// this crate's (the router no longer passes verification, for example),
-/// [`Error::from_openai`] returns it.
+/// [`Error::from_openai`] returns it. The exception is a stream of a typed
+/// call that fails after it started: it ends with an
+/// `OpenAIError::StreamError`, which holds a message and no cause. See
+/// [`Error::from_openai`].
 ///
 /// A call is sent again, at most twice, when the response has status
 /// `429` or `5xx`; a `429` whose error is `insufficient_quota` is not. A
