@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn a_usage_error_is_a_configuration_error_and_keeps_its_source() {
         let usage = Verifier::new()
-            .check_repo_verifiability("not a reference")
+            .check_repo_verifiability(Some("not a reference"))
             .expect_err("an invalid reference is refused");
         let error = from_verifier(usage);
         assert_eq!(error.kind(), ErrorKind::Configuration);
