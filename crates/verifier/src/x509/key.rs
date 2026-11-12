@@ -232,6 +232,11 @@ impl PublicKey {
     /// with an Ed25519 key, [`SignatureScheme::RsaPssSha384`] with an RSA
     /// key. Any other pairing is an error, as is a signature that is
     /// malformed for the scheme or does not verify.
+    ///
+    /// An Ed25519 signature is checked strictly: its scalar is in canonical
+    /// form, and neither the key nor the signature's point is of small
+    /// order. A key of small order has signatures that verify for a large
+    /// share of all messages, so nothing verifies under one.
     pub fn verify(
         &self,
         scheme: SignatureScheme,
@@ -268,7 +273,10 @@ impl PublicKey {
             (Key::Ed25519(key), SignatureScheme::Ed25519) => {
                 let bytes: &[u8; 64] = signature.try_into().map_err(|_| malformed())?;
                 let signature = ed25519_dalek::Signature::from_bytes(bytes);
-                ed25519_dalek::Verifier::verify(key, message, &signature).map_err(|_| failed())
+                // The strict check also refuses a key or a signature point
+                // of small order, with which a signature can be valid for
+                // many messages at once.
+                key.verify_strict(message, &signature).map_err(|_| failed())
             }
             (Key::Rsa(key), SignatureScheme::RsaPssSha384) => {
                 let key = rsa::pss::VerifyingKey::<Sha384>::new_with_salt_len(
@@ -417,6 +425,54 @@ AaYalIJmBZ8yyezPjTqhxrKBpMnaocVtLJBI1eM3uXnQzQGAJdJ4gs9Fyw==\n\
             key.verify(SignatureScheme::RsaPssSha384, b"message", &[0; 64])
                 .is_err()
         );
+    }
+
+    const ED25519_CASES: &[u8] = include_bytes!("../../tests/data/x509/ed25519_cases.json");
+
+    /// The SubjectPublicKeyInfo around the 32 bytes of an Ed25519 key.
+    fn ed25519_spki(key: &[u8]) -> Vec<u8> {
+        let mut spki = vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        spki.extend_from_slice(key);
+        spki
+    }
+
+    /// Recorded Ed25519 keys, messages and signatures, each with the
+    /// verdict of this crate (`rust`) and of a second, independent
+    /// verifier (`reference`). Where the two differ this crate is the
+    /// stricter one, and the case names the `class` of the difference.
+    #[test]
+    fn recorded_ed25519_signatures_get_their_recorded_verdict() {
+        use crate::canonical::decode_hex;
+        use crate::json::{self, Value};
+
+        let document = json::parse(ED25519_CASES).unwrap();
+        let cases = document.as_object().unwrap().get("cases").unwrap();
+        let cases = cases.as_array().unwrap();
+        let (mut stricter, mut accepted) = (0, 0);
+        for case in cases {
+            let case = case.as_object().unwrap();
+            let text = |name: &str| case.get(name).and_then(Value::as_str).unwrap();
+            let flag = |name: &str| case.get(name).and_then(Value::as_bool).unwrap();
+            let bytes = |name: &str| decode_hex(text(name)).unwrap();
+            let got = PublicKey::from_spki_der(&ed25519_spki(&bytes("key"))).is_ok_and(|key| {
+                key.verify(
+                    SignatureScheme::Ed25519,
+                    &bytes("message"),
+                    &bytes("signature"),
+                )
+                .is_ok()
+            });
+            let (rust, reference) = (flag("rust"), flag("reference"));
+            assert_eq!(got, rust, "{}", text("name"));
+            // Never the looser one, and a difference is always explained.
+            assert!(reference || !rust, "{}", text("name"));
+            assert_eq!(rust != reference, case.get("class").is_some());
+            stricter += usize::from(rust != reference);
+            accepted += usize::from(rust);
+        }
+        assert_eq!((cases.len(), stricter, accepted), (30, 13, 1));
     }
 
     #[test]

@@ -137,7 +137,9 @@ pub struct Entry {
     pub format: String,
     /// What the entry is about, such as [`SUBJECT_CPU`].
     pub subjects: Vec<String>,
-    /// The payload; `None` when the document leaves it out.
+    /// The payload. An entry needs one, and it must be a JSON object:
+    /// `None` records that the document leaves it out, and such an entry
+    /// is rejected when the document's collateral is checked.
     pub data: Option<Value>,
 }
 

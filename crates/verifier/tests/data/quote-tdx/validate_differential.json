@@ -159,7 +159,7 @@
 {"id":"policy/mr_seam/space","minimum":17,"mr_seam":" 11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111","reference":"assemble"},
 {"id":"policy/td_attributes/first-byte-changed","minimum":17,"reference":"validate","td_attributes":"0100001000000000"},
 {"id":"policy/td_attributes/last-byte-changed","minimum":17,"reference":"validate","td_attributes":"0000001000000001"},
-{"id":"policy/td_attributes/first-byte-higher","minimum":17,"reference":"validate","td_attributes":"0100001000000000"},
+{"id":"policy/td_attributes/first-byte-higher","minimum":17,"reference":"validate","td_attributes":"0200001000000000"},
 {"id":"policy/td_attributes/uppercase","minimum":17,"reference":"ok"},
 {"id":"policy/td_attributes/empty","minimum":17,"reference":"assemble","td_attributes":""},
 {"id":"policy/td_attributes/short","minimum":17,"reference":"assemble","td_attributes":"00001000000000"},
