@@ -24,13 +24,10 @@ pub(crate) trait Execute: Send + Sync + 'static {
     fn start(&self, method: Method, url: reqwest::Url) -> reqwest::RequestBuilder;
 }
 
-/// The future of a response from an attested client, as returned by its
-/// `tower::Service` implementation.
-///
-/// Dropping it cancels the request; see the client's `execute` for what
-/// that leaves behind.
+/// The future of a response from an attested client. Dropping it cancels
+/// the request.
 #[must_use = "futures do nothing unless polled"]
-pub struct ResponseFuture {
+pub(crate) struct ResponseFuture {
     inner: Pin<Box<dyn Future<Output = Result<Response, Error>> + Send + 'static>>,
 }
 
@@ -187,8 +184,7 @@ pub(crate) fn into_url(url: impl reqwest::IntoUrl) -> Result<reqwest::Url, Error
 }
 
 /// The request methods of an HTTP client whose `inner` field is an `Arc` of
-/// a type that implements [`Execute`], and its `tower::Service`
-/// implementation.
+/// a type that implements [`Execute`].
 macro_rules! http_request_methods {
     ($client:ident) => {
         impl $client {
@@ -288,25 +284,6 @@ macro_rules! http_request_methods {
                 request: reqwest::Request,
             ) -> Result<reqwest::Response, $crate::Error> {
                 $crate::request::Execute::execute(&*self.inner, request).await
-            }
-        }
-
-        /// Sends each request as `execute` does, so that the client can sit
-        /// under `tower` middleware. The service is always ready.
-        impl tower_service::Service<reqwest::Request> for $client {
-            type Response = reqwest::Response;
-            type Error = $crate::Error;
-            type Future = $crate::ResponseFuture;
-
-            fn poll_ready(
-                &mut self,
-                _cx: &mut std::task::Context<'_>,
-            ) -> std::task::Poll<Result<(), Self::Error>> {
-                std::task::Poll::Ready(Ok(()))
-            }
-
-            fn call(&mut self, request: reqwest::Request) -> Self::Future {
-                $crate::request::Execute::execute(&*self.inner, request)
             }
         }
     };

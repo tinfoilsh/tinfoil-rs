@@ -144,7 +144,7 @@ pub use openai::{
 #[cfg(all(feature = "openai", feature = "unstable-gateway"))]
 pub use openai::{GatewayOpenAIClient, GatewayOpenAIClientBuilder};
 pub use options::TransportMode;
-pub use request::{RequestBuilder, ResponseFuture};
+pub use request::RequestBuilder;
 pub use router_client::{RouterHttpClient, RouterHttpClientBuilder};
 
 /// The version of this SDK.

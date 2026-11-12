@@ -11,7 +11,6 @@
 #![allow(clippy::type_complexity)]
 
 use std::error::Error as StdError;
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,16 +18,11 @@ use tinfoil_next::reqwest::header::{HeaderMap, HeaderValue};
 use tinfoil_next::reqwest::{Method, Request, Response, Url};
 use tinfoil_next::verifier::{BoxError, Verification, Verifier};
 use tinfoil_next::{
-    EnclaveHttpClient, EnclaveHttpClientBuilder, Error, ErrorKind, RequestBuilder, ResponseFuture,
+    EnclaveHttpClient, EnclaveHttpClientBuilder, Error, ErrorKind, RequestBuilder,
     RouterHttpClient, RouterHttpClientBuilder, TransportMode, VERSION,
 };
 
 fn handle<T: Clone + Send + Sync + std::fmt::Debug + 'static>() {}
-fn service<T>()
-where
-    T: tower_service::Service<Request, Response = Response, Error = Error, Future = ResponseFuture>,
-{
-}
 fn send<T: Send>(value: T) -> T {
     value
 }
@@ -72,15 +66,11 @@ fn the_error_has_a_kind_a_timeout_flag_and_a_source() {
 }
 
 #[test]
-fn the_http_clients_are_handles_and_tower_services() {
+fn the_http_clients_are_handles() {
     handle::<EnclaveHttpClient>();
     handle::<RouterHttpClient>();
     handle::<EnclaveHttpClientBuilder>();
     handle::<RouterHttpClientBuilder>();
-    service::<EnclaveHttpClient>();
-    service::<RouterHttpClient>();
-    fn future<T: Future<Output = Result<Response, Error>> + Send + 'static>() {}
-    future::<ResponseFuture>();
 }
 
 #[test]
@@ -163,12 +153,6 @@ async fn enclave_client(verifier: Arc<Verifier>) -> Result<(), Box<dyn StdError>
     let _: RequestBuilder = client.head(url.clone());
     let built: Request = client.request(Method::OPTIONS, url).build()?;
     let _: Response = send(client.execute(built)).await?;
-
-    // As a `tower::Service`.
-    let mut as_service = client.clone();
-    let request = Request::new(Method::GET, client.base_url().clone());
-    let pending: ResponseFuture = tower_service::Service::call(&mut as_service, request);
-    let _: Result<Response, Error> = pending.await;
     Ok(())
 }
 
@@ -417,10 +401,9 @@ mod gateway {
     };
 
     #[test]
-    fn the_gateway_client_is_a_handle_and_a_tower_service() {
+    fn the_gateway_client_is_a_handle() {
         handle::<GatewayHttpClient>();
         handle::<GatewayHttpClientBuilder>();
-        service::<GatewayHttpClient>();
         let _: for<'a> fn(&'a GatewayHttpClient) -> &'a Url = GatewayHttpClient::base_url;
         let _: fn(&GatewayHttpClient) -> Vec<ReplicaVerification> = GatewayHttpClient::current;
     }

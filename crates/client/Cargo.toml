@@ -19,6 +19,7 @@ openai = [
     "dep:bytes",
     "dep:futures-core",
     "dep:tower-layer",
+    "dep:tower-service",
 ]
 # The gateway route. Experimental: everything behind this feature may change
 # or be removed in any release.
@@ -33,8 +34,6 @@ tinfoil-verifier = { path = "../verifier", version = "=0.1.0" }
 # Windows MSVC and is banned in deny.toml.
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls-no-provider", "stream"] }
 http = "1"
-# The `Service` trait that the HTTP clients implement.
-tower-service = "0.3"
 
 # TLS, on the `ring` provider only. `default-features = false` keeps
 # `aws_lc_rs` out of rustls's feature set.
@@ -68,7 +67,9 @@ async-stream = { version = "0.3", optional = true }
 base64 = { version = "0.22", optional = true }
 bytes = { version = "1", optional = true }
 futures-core = { version = "0.3", optional = true }
+# The traits of the service that is installed under async-openai.
 tower-layer = { version = "0.3", optional = true }
+tower-service = { version = "0.3", optional = true }
 
 # Gateway (feature `unstable-gateway`): the cache salt and the cache prefix.
 hkdf = { version = "0.12", optional = true }
@@ -81,7 +82,6 @@ libc = "0.2"
 [dev-dependencies]
 futures-core = "0.3"
 serde_json = "1"
-tower-service = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [[example]]
