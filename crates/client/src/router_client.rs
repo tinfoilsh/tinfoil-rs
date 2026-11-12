@@ -226,10 +226,35 @@ impl RouterHttpClientBuilder {
     /// client exists. The cache secret file, if this call created it,
     /// stays.
     ///
-    /// **Not implemented yet.** In this version of the crate the call always
-    /// fails with an error that says so; the text above is the contract
-    /// that it will meet.
+    /// **Not implemented yet.** In this version of the crate the call makes the
+    /// checks that need no network and then fails with an error that says so;
+    /// the text above is the contract that it will meet.
     pub async fn connect(self) -> Result<RouterHttpClient, Error> {
+        self.check()?;
         Err(Error::not_implemented("RouterHttpClient::connect"))
+    }
+
+    /// The checks that `connect` makes before any network I/O, in the
+    /// order that it documents.
+    pub(crate) fn check(&self) -> Result<(), Error> {
+        let base = self.options.checked_base_url()?;
+        if base.is_some() && self.options.mode() == TransportMode::Tls {
+            return Err(Error::configuration(
+                "a base URL is a proxy when the router is discovered, which requires TransportMode::Ehbp",
+            ));
+        }
+        self.options.common.check()?;
+        if self
+            .options
+            .common
+            .verifier
+            .as_ref()
+            .is_some_and(|verifier| verifier.caller_authorizes_config())
+        {
+            return Err(Error::configuration(
+                "a verifier that supplies or authorizes the config requires an explicit enclave",
+            ));
+        }
+        Ok(())
     }
 }

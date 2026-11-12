@@ -367,9 +367,9 @@ impl EnclaveOpenAIClientBuilder {
     /// [`EnclaveHttpClientBuilder::connect`] does, with its errors and its
     /// cancel safety.
     ///
-    /// **Not implemented yet.** In this version of the crate the call always
-    /// fails with an error that says so; the text above is the contract
-    /// that it will meet.
+    /// **Not implemented yet.** In this version of the crate the call makes the
+    /// checks that need no network and then fails with an error that says so;
+    /// the text above is the contract that it will meet.
     pub async fn connect(self) -> Result<EnclaveOpenAIClient, Error> {
         self.http.check()?;
         Err(Error::not_implemented("EnclaveOpenAIClient::connect"))
@@ -392,10 +392,11 @@ impl RouterOpenAIClientBuilder {
     /// client, as [`RouterHttpClientBuilder::connect`] does, with its
     /// errors and its cancel safety.
     ///
-    /// **Not implemented yet.** In this version of the crate the call always
-    /// fails with an error that says so; the text above is the contract
-    /// that it will meet.
+    /// **Not implemented yet.** In this version of the crate the call makes the
+    /// checks that need no network and then fails with an error that says so;
+    /// the text above is the contract that it will meet.
     pub async fn connect(self) -> Result<RouterOpenAIClient, Error> {
+        self.http.check()?;
         Err(Error::not_implemented("RouterOpenAIClient::connect"))
     }
 }

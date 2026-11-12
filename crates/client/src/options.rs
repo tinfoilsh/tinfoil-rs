@@ -4,6 +4,10 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use reqwest::Url;
+
+use crate::error::Error;
+use crate::internal::transport::base_url;
 use crate::verifier::{BoxError, Verification, Verifier};
 
 /// How a client protects its traffic to an enclave.
@@ -79,6 +83,40 @@ pub(crate) struct CommonOptions {
     pub(crate) verification_check: Option<VerificationCheck>,
     pub(crate) user_cache_secret: Option<Secret>,
     pub(crate) timeout: Option<Duration>,
+}
+
+impl CommonOptions {
+    /// A configuration error for a `user_cache_secret` that is empty or a
+    /// `timeout` of zero: an option is either unset or has a value.
+    pub(crate) fn check(&self) -> Result<(), Error> {
+        if self
+            .user_cache_secret
+            .as_ref()
+            .is_some_and(|secret| secret.expose().is_empty())
+        {
+            return Err(Error::configuration(
+                "the user cache secret is empty; leave the option unset instead",
+            ));
+        }
+        if self.timeout.is_some_and(|timeout| timeout.is_zero()) {
+            return Err(Error::configuration(
+                "the timeout is zero; leave the option unset for no deadline",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl RouteOptions {
+    /// The transport mode: the option, or [`TransportMode::Tls`].
+    pub(crate) fn mode(&self) -> TransportMode {
+        self.transport_mode.unwrap_or_default()
+    }
+
+    /// The `base_url` option, checked and parsed; `None` when it is unset.
+    pub(crate) fn checked_base_url(&self) -> Result<Option<Url>, Error> {
+        self.base_url.as_deref().map(base_url::validate).transpose()
+    }
 }
 
 impl fmt::Debug for CommonOptions {
