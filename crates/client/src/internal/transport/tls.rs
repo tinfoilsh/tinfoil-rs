@@ -166,8 +166,11 @@ impl RoundTrip for TlsBound {
 
 /// A failed request as the transport reports it: a failed certificate
 /// check is an attestation error that says that the peer does not hold the
-/// attested key; anything else is a network error.
+/// attested key; anything else is a network error. Either keeps the
+/// `reqwest` error as its source without the request's URL, whose query
+/// may hold a credential.
 fn failure(error: reqwest::Error) -> Failure {
+    let error = error.without_url();
     if let Some(reason) = certificate_failure(&error) {
         return Failure::peer_lacks_key(Error::wrap(
             ErrorKind::Attestation,

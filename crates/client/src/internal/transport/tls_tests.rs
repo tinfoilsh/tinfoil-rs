@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
 use super::{TlsMode, leaf_fingerprint};
-use crate::error::ErrorKind;
+use crate::error::{Error, ErrorKind};
 use crate::internal::enclave::Enclave;
 use crate::internal::testing::{Record, Script, Step, tokio_clock};
 use crate::internal::transport::{Failure, KeyFailure, Mode, RoundTrip, Transport};
@@ -357,6 +357,69 @@ async fn a_connection_failure_is_a_network_error_and_not_a_key_failure() {
     let failure = bound_to(&LEAF_A).send(request).await.unwrap_err();
     assert_eq!(failure.error.kind(), ErrorKind::Network);
     assert_eq!(failure.key, KeyFailure::None);
+}
+
+/// What `error` and every error behind it show, as text and in `Debug`.
+fn everything_shown(error: &Error) -> String {
+    let mut shown = format!("{error} {error:?}");
+    let mut source = std::error::Error::source(error);
+    while let Some(error) = source {
+        shown.push_str(&format!(" {error} {error:?}"));
+        source = error.source();
+    }
+    shown
+}
+
+#[tokio::test]
+async fn no_failure_repeats_the_url_of_the_request() {
+    const TARGET: &str = "/v1/models?key=hunter2";
+    let named = |error: &Error| {
+        let shown = everything_shown(error);
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(!shown.contains("/v1/models"), "{shown}");
+    };
+
+    // A connection that fails.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let closed = Url::parse(&format!("https://127.0.0.1:{port}{TARGET}")).unwrap();
+    let failure = bound_to(&LEAF_A)
+        .send(Request::new(Method::GET, closed))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.error.kind(), ErrorKind::Network);
+    named(&failure.error);
+
+    // A certificate that is refused, by the pin and by a standard check.
+    for (served, key) in [(&LEAF_B, &KEY_B), (&LEAF_A_EXPIRED, &KEY_A)] {
+        let server = serve(served, key, ok()).await;
+        let failure = bound_to(&LEAF_A)
+            .send(get(&server, TARGET))
+            .await
+            .unwrap_err();
+        assert_eq!(failure.key, KeyFailure::PeerLacksKey);
+        named(&failure.error);
+    }
+
+    // A deadline: the listener accepts and then says nothing.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let silent = Url::parse(&format!("https://127.0.0.1:{port}{TARGET}")).unwrap();
+    let mut request = Request::new(Method::GET, silent);
+    *request.timeout_mut() = Some(Duration::from_millis(100));
+    let failure = bound_to(&LEAF_A).send(request).await.unwrap_err();
+    assert!(failure.error.is_timeout());
+    named(&failure.error);
+    drop(listener);
+
+    // A plaintext request, which the binding refuses by itself.
+    let plain = Url::parse(&format!("http://127.0.0.1:{port}{TARGET}")).unwrap();
+    let failure = bound_to(&LEAF_A)
+        .send(Request::new(Method::GET, plain))
+        .await
+        .unwrap_err();
+    named(&failure.error);
 }
 
 #[tokio::test]

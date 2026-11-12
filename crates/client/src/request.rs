@@ -154,11 +154,12 @@ impl RequestBuilder {
     }
 
     /// The request as built, for a client's `execute`. An invalid URL,
-    /// header or body is a configuration error.
+    /// header or body is a configuration error, which does not repeat
+    /// the URL.
     pub fn build(self) -> Result<Request, Error> {
         self.inner?
             .build()
-            .map_err(|error| Error::wrap(ErrorKind::Configuration, error))
+            .map_err(|error| Error::wrap(ErrorKind::Configuration, error.without_url()))
     }
 
     /// Sends the request through the client that created the builder. See
@@ -177,10 +178,11 @@ impl fmt::Debug for RequestBuilder {
     }
 }
 
-/// Parses `url` as `reqwest` does, into this crate's error.
+/// Parses `url` as `reqwest` does, into this crate's error. The error does
+/// not repeat the URL, whose query may hold a credential.
 pub(crate) fn into_url(url: impl reqwest::IntoUrl) -> Result<reqwest::Url, Error> {
     url.into_url()
-        .map_err(|error| Error::wrap(ErrorKind::Configuration, error))
+        .map_err(|error| Error::wrap(ErrorKind::Configuration, error.without_url()))
 }
 
 /// The request methods of an HTTP client whose `inner` field is an `Arc` of
@@ -310,3 +312,37 @@ macro_rules! http_request_methods {
 }
 
 pub(crate) use http_request_methods;
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use super::into_url;
+    use crate::error::ErrorKind;
+
+    #[test]
+    fn a_url_that_cannot_be_requested_is_refused_without_being_repeated() {
+        for url in [
+            "mailto:someone@example.com?key=hunter2",
+            "data:text/plain,hunter2",
+            "file:///etc/hosts?key=hunter2",
+            "https://exa mple.com/?key=hunter2",
+            "//example.com/?key=hunter2",
+            "?key=hunter2",
+        ] {
+            let error = into_url(url).expect_err(url);
+            assert_eq!(error.kind(), ErrorKind::Configuration, "{url}");
+            let mut shown = format!("{error} {error:?}");
+            let mut source = error.source();
+            while let Some(error) = source {
+                shown.push_str(&format!(" {error} {error:?}"));
+                source = error.source();
+            }
+            assert!(!shown.contains("hunter2"), "{shown}");
+        }
+        // And a parsed URL of such a kind, which is what names it.
+        let parsed = reqwest::Url::parse("mailto:someone@example.com?key=hunter2").unwrap();
+        let error = into_url(parsed).expect_err("no host");
+        assert!(!format!("{error} {error:?}").contains("hunter2"));
+    }
+}
