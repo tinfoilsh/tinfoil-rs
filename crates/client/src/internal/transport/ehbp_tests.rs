@@ -1625,6 +1625,55 @@ async fn a_request_to_another_host_goes_through_the_proxy() {
 }
 
 #[tokio::test]
+async fn a_binding_sends_no_plaintext_request_to_another_host_even_when_asked_directly() {
+    // The request checks refuse such a request; this is the binding by
+    // itself, as a request would meet it that had passed them by. A proxy
+    // is configured, and would receive a plaintext request whole.
+    let key = key(1);
+    let (proxy, listener) = proxy().await;
+    let mode = EhbpMode {
+        proxy: Some(proxy),
+        roots: None,
+    };
+    let bound = bind(&mode, Some(&key.public_hex)).expect("bound");
+
+    for request in [
+        get(Url::parse("http://enclave.example.com/v1/models?key=hunter2").unwrap()),
+        with_header(
+            post(
+                Url::parse("http://enclave.example.com/v1/chat?key=hunter2").unwrap(),
+                "{}",
+            ),
+            "authorization",
+            "Bearer token",
+        ),
+        get(Url::parse("http://10.255.255.1/v1/models?key=hunter2").unwrap()),
+    ] {
+        let failure = tokio::time::timeout(PATIENCE, bound.round_trip(request))
+            .await
+            .expect("refused without waiting for a connection")
+            .expect_err("refused");
+        assert_eq!(failure.key, KeyFailure::None, "{}", failure.error);
+        let error = failure.error;
+        assert!(
+            !format!("{error} {error:?}").contains("hunter2"),
+            "{error:?}"
+        );
+    }
+    // Nothing reached the proxy.
+    assert_eq!(listener.accepted(), 0, "{:?}", listener.seen());
+
+    // Plain `http` to a loopback host is still carried, directly.
+    let server = serve(&key, |_| Reply::ok("direct")).await;
+    let response = bound
+        .round_trip(post(server.url("/v1/chat"), "{}"))
+        .await
+        .expect("a response");
+    assert_eq!(text(response).await, "direct");
+    assert_eq!(listener.accepted(), 0);
+}
+
+#[tokio::test]
 async fn a_connection_failure_is_a_network_error_that_does_not_repeat_the_url() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let address = listener.local_addr().expect("address");
