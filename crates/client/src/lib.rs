@@ -11,15 +11,14 @@
 //!
 //! # Status
 //!
-//! [`EnclaveHttpClient`] and [`RouterHttpClient`] are complete. The other
-//! clients are their API
-//! without the machinery behind it: the types, the signatures and their
-//! documented contracts are in place, and each of their functions that
-//! would perform network I/O (their `connect`, `fetch_catalog`, the
-//! relaxed chat calls and `parse_event_stream`) fails with an error whose
-//! message says that the function is not implemented yet. That error has
-//! the kind [`ErrorKind::Configuration`], since retrying cannot help; it
-//! does not mean that an option is wrong.
+//! The HTTP clients and the OpenAI clients are complete. The relaxed chat
+//! calls, `parse_event_stream` and the gateway route (feature
+//! `unstable-gateway`) are their API without the machinery behind it:
+//! their signatures and documented contracts are in place, and each of
+//! their functions that would perform network I/O fails with an error
+//! whose message says that the function is not implemented yet. That
+//! error has the kind [`ErrorKind::Configuration`], since retrying cannot
+//! help; it does not mean that an option is wrong.
 //!
 //! # Choosing a client
 //!

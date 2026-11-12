@@ -129,10 +129,23 @@ pub(crate) use openai_client_methods;
 ///
 /// A failed call returns `async_openai`'s `OpenAIError`. When the cause is
 /// this crate's (the router no longer passes verification, for example),
-/// [`Error::from_openai`] returns it. `async_openai` retries a failed
-/// request with backoff, a failed verification included; each attempt
-/// verifies again, and nothing is sent to an unverified enclave on any of
-/// them.
+/// [`Error::from_openai`] returns it.
+///
+/// `async_openai` sends a call again, at most twice and after a backoff,
+/// when the response has status `429` or `5xx`. A failure of this crate's
+/// client (a refused verification, a refused request, a failed connection,
+/// a deadline) is reported once and not tried again. Below that, the
+/// client itself sends a request once more after the enclave rejected its
+/// keys, an upload included.
+///
+/// Every call of the `async_openai` API goes through the attested client,
+/// streaming and multipart calls included. The API base of the
+/// configuration is replaced with the attested route, so a configuration
+/// that names another host, or `OPENAI_BASE_URL`, has no effect. The one
+/// helper of `async_openai` that makes a request of its own is
+/// `ImagesResponse::save` (feature `openai-images`), which downloads the
+/// URLs of a response with a plain HTTP client: such a download is not
+/// attested.
 ///
 /// A clone of the dereferenced `async_openai` client that is given another
 /// HTTP client, service or configuration no longer goes through the
@@ -159,12 +172,17 @@ impl Client {
     ///
     /// The errors and the cancel safety are those of
     /// [`RouterHttpClientBuilder::connect`] with no option set.
-    ///
-    /// **Not implemented yet.** In this version of the crate the call always
-    /// fails with an error that says so; the text above is the contract
-    /// that it will meet.
     pub async fn connect(config: OpenAIConfig) -> Result<Self, Error> {
-        Err(Error::not_implemented("Client::connect"))
+        let RouterOpenAIClient {
+            openai,
+            http,
+            api_base,
+        } = RouterOpenAIClient::connect(config).await?;
+        Ok(Self {
+            openai,
+            http,
+            api_base,
+        })
     }
 
     /// The attested HTTP client that the OpenAI client sends through, for
@@ -366,13 +384,17 @@ impl EnclaveOpenAIClientBuilder {
     /// Checks the options, verifies the enclave and returns the client, as
     /// [`EnclaveHttpClientBuilder::connect`] does, with its errors and its
     /// cancel safety.
-    ///
-    /// **Not implemented yet.** In this version of the crate the call makes the
-    /// checks that need no network and then fails with an error that says so;
-    /// the text above is the contract that it will meet.
     pub async fn connect(self) -> Result<EnclaveOpenAIClient, Error> {
-        self.http.check()?;
-        Err(Error::not_implemented("EnclaveOpenAIClient::connect"))
+        let http = self.http.connect().await?;
+        let api_base = http.inner.openai_url().clone();
+        let executor: Arc<dyn crate::request::Execute> = http.inner.clone();
+        let openai =
+            service::openai_client(self.config, &api_base, executor, http.transport_mode())?;
+        Ok(EnclaveOpenAIClient {
+            openai,
+            http,
+            api_base,
+        })
     }
 }
 
@@ -391,12 +413,16 @@ impl RouterOpenAIClientBuilder {
     /// Checks the options, discovers and verifies a router and returns the
     /// client, as [`RouterHttpClientBuilder::connect`] does, with its
     /// errors and its cancel safety.
-    ///
-    /// **Not implemented yet.** In this version of the crate the call makes the
-    /// checks that need no network and then fails with an error that says so;
-    /// the text above is the contract that it will meet.
     pub async fn connect(self) -> Result<RouterOpenAIClient, Error> {
-        self.http.check()?;
-        Err(Error::not_implemented("RouterOpenAIClient::connect"))
+        let http = self.http.connect().await?;
+        let api_base = http.inner.openai_url().clone();
+        let executor: Arc<dyn crate::request::Execute> = http.inner.clone();
+        let openai =
+            service::openai_client(self.config, &api_base, executor, http.transport_mode())?;
+        Ok(RouterOpenAIClient {
+            openai,
+            http,
+            api_base,
+        })
     }
 }
