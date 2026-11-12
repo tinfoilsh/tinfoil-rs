@@ -93,6 +93,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-openai"
+version = "0.42.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "174e979f1e2ffe94b88d584740c11fd071f6d829c29120b1ba88bcaeb3374063"
+dependencies = [
+ "async-openai-macros",
+ "base64 0.22.1",
+ "bytes",
+ "derive_builder",
+ "eventsource-stream",
+ "futures",
+ "getrandom 0.3.4",
+ "rand 0.9.5",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "async-openai-macros"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2315,7 +2343,7 @@ name = "tinfoil"
 version = "0.2.3"
 dependencies = [
  "aes-gcm",
- "async-openai",
+ "async-openai 0.41.1",
  "async-stream",
  "async-trait",
  "base64 0.22.1",
@@ -2399,7 +2427,7 @@ dependencies = [
 name = "tinfoil-next"
 version = "0.0.0"
 dependencies = [
- "async-openai",
+ "async-openai 0.42.2",
  "async-stream",
  "base64 0.22.1",
  "bytes",

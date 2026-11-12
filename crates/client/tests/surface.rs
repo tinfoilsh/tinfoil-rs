@@ -459,8 +459,10 @@ mod openai {
         let _ = client.uploads();
         #[cfg(feature = "openai-vector-stores")]
         let _ = client.vector_stores();
-        #[cfg(feature = "openai-videos")]
-        let _ = client.videos();
+        #[cfg(feature = "openai-safety")]
+        let _ = client.safety();
+        #[cfg(feature = "openai-content-provenance-checks")]
+        let _ = client.content_provenance_checks();
     }
 
     #[test]

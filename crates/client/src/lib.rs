@@ -96,21 +96,23 @@
 //! | `openai-chatkit` | ChatKit sessions and threads |
 //! | `openai-completions` | legacy text completions |
 //! | `openai-containers` | containers and their files |
+//! | `openai-content-provenance-checks` | content provenance checks |
 //! | `openai-evals` | evals and their runs |
 //! | `openai-files` | files |
 //! | `openai-fine-tuning` | fine-tuning jobs |
 //! | `openai-images` | image generation and editing |
 //! | `openai-models` | listing and retrieving models |
 //! | `openai-moderations` | moderations |
+//! | `openai-safety` | safety alerts |
 //! | `openai-skills` | skills |
 //! | `openai-uploads` | multipart uploads |
 //! | `openai-vector-stores` | vector stores |
-//! | `openai-videos` | video generation |
 //!
 //! `async_openai`'s realtime API is not offered: it opens WebSocket
 //! connections of its own, which the attested client cannot protect. Its
-//! webhook verification makes no request and is not offered either, and
-//! neither is its assistants API, which `async_openai` has deprecated.
+//! webhook verification and OpenAPI schema generation make no request and
+//! are not offered either, and neither is its videos API, which
+//! `async_openai` has deprecated.
 
 // The bodies of this crate are placeholders, which leave their arguments
 // and most internal items unused.

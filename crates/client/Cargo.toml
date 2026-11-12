@@ -26,26 +26,27 @@ openai = [
 # Further API families of async-openai. Each implies `openai` and enables
 # the async-openai feature of the same family, whose calls then exist on
 # the OpenAI clients and go through the attested HTTP client like the
-# rest. Three async-openai features have no counterpart: `realtime` opens
+# rest. These async-openai features have no counterpart: `realtime` opens
 # WebSocket connections of its own, which the attested client cannot
-# protect; `webhook` verification makes no request; and `assistant` is
-# deprecated by async-openai.
+# protect; `webhook` verification and `openapi` schema generation make no
+# request; and `video` is deprecated by async-openai.
 openai-administration = ["openai", "async-openai/administration"]
 openai-batches = ["openai", "async-openai/batch"]
 openai-byot = ["openai", "async-openai/byot"]
 openai-chatkit = ["openai", "async-openai/chatkit"]
 openai-completions = ["openai", "async-openai/completions"]
 openai-containers = ["openai", "async-openai/container"]
+openai-content-provenance-checks = ["openai", "async-openai/content-provenance-checks"]
 openai-evals = ["openai", "async-openai/evals"]
 openai-files = ["openai", "async-openai/file"]
 openai-fine-tuning = ["openai", "async-openai/finetuning"]
 openai-images = ["openai", "async-openai/image"]
 openai-models = ["openai", "async-openai/model"]
 openai-moderations = ["openai", "async-openai/moderation"]
+openai-safety = ["openai", "async-openai/safety"]
 openai-skills = ["openai", "async-openai/skill"]
 openai-uploads = ["openai", "async-openai/upload"]
 openai-vector-stores = ["openai", "async-openai/vectorstore"]
-openai-videos = ["openai", "async-openai/video"]
 # The gateway route. Experimental: everything behind this feature may change
 # or be removed in any release.
 unstable-gateway = ["dep:base64", "dep:hkdf", "dep:hmac"]
@@ -87,7 +88,7 @@ sha2 = "0.10"
 # OpenAI (feature `openai`). `default-features = false` keeps async-openai
 # from enabling reqwest's `rustls` feature; `middleware` is the hook that the
 # attested HTTP client is installed through.
-async-openai = { version = "0.41.1", default-features = false, features = ["chat-completion", "embedding", "audio", "responses", "middleware"], optional = true }
+async-openai = { version = "0.42.2", default-features = false, features = ["chat-completion", "embedding", "audio", "responses", "middleware"], optional = true }
 async-stream = { version = "0.3", optional = true }
 base64 = { version = "0.22", optional = true }
 bytes = { version = "1", optional = true }
