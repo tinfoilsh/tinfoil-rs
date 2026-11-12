@@ -445,6 +445,13 @@ async fn write_reply(
                 frame
             }
         };
+        // A chunk of no bytes is how a chunked body ends, so a part with
+        // nothing to send must not be written as a chunk: the body would
+        // end there, and the real end would follow it as stray bytes that
+        // the client reads as its next response.
+        if bytes.is_empty() {
+            continue;
+        }
         let mut chunk = format!("{:x}\r\n", bytes.len()).into_bytes();
         chunk.extend_from_slice(&bytes);
         chunk.extend_from_slice(b"\r\n");
@@ -1376,6 +1383,43 @@ async fn a_rejected_request_succeeds_once_more_under_a_new_verification() {
         .expect("a response");
     assert_eq!(text(response).await, "opened next");
     assert_eq!((script.calls(), server.accepted()), (2, 2));
+}
+
+// The local server itself.
+
+#[tokio::test]
+async fn the_local_server_leaves_no_stray_bytes_after_an_empty_unsealed_response() {
+    // Two plain requests on one connection, written by hand: whatever the
+    // server sends after the end of the first response is read as the
+    // start of the second.
+    let server = serve(&key(1), |_| Reply::ok("").status(302)).await;
+    let address = server.url.socket_addrs(|| None).expect("address");
+    let mut socket = TcpStream::connect(address.as_slice())
+        .await
+        .expect("connected");
+    let request = b"GET / HTTP/1.1\r\nhost: local\r\n\r\n";
+    let end = b"\r\n0\r\n\r\n";
+
+    let mut received = Vec::new();
+    for _ in 0..2 {
+        socket.write_all(request).await.expect("written");
+        let read = async {
+            let mut buffer = [0u8; 1024];
+            while !received.ends_with(end) {
+                let n = socket.read(&mut buffer).await.expect("read");
+                assert_ne!(n, 0, "the server closed the connection");
+                received.extend_from_slice(&buffer[..n]);
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), read)
+            .await
+            .expect("a response");
+        // Each response is one head and one end of body, and nothing else.
+        let text = String::from_utf8_lossy(&received);
+        assert!(text.starts_with("HTTP/1.1 302 "), "{text:?}");
+        assert_eq!(text.matches("0\r\n\r\n").count(), 1, "{text:?}");
+        received.clear();
+    }
 }
 
 // The carrier.

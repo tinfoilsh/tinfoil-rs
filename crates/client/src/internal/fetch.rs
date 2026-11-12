@@ -226,14 +226,20 @@ fn client_builder(https_only: bool) -> Result<ClientBuilder, Error> {
 /// that are compiled in, on the `ring` provider.
 pub(crate) fn tls_builder() -> Result<ClientBuilder, Error> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let tls = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|error| Error::wrap(ErrorKind::Configuration, error))?
-        .with_root_certificates(roots)
+        .with_root_certificates(compiled_in_roots())
         .with_no_client_auth();
     Ok(Client::builder().tls_backend_preconfigured(tls))
+}
+
+/// The root certificates that are compiled into the crate: the only ones
+/// that any client of this crate trusts.
+pub(crate) fn compiled_in_roots() -> rustls::RootCertStore {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    roots
 }
 
 /// Sends a `GET` for `url` with the SDK headers and returns the body.

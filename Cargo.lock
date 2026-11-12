@@ -2432,6 +2432,7 @@ dependencies = [
  "async-stream",
  "base64 0.22.1",
  "bytes",
+ "der",
  "futures-core",
  "futures-util",
  "getrandom 0.3.4",
@@ -2441,6 +2442,7 @@ dependencies = [
  "http",
  "http-body-util",
  "libc",
+ "p256",
  "reqwest",
  "rustls",
  "rustls-webpki",
@@ -2450,10 +2452,12 @@ dependencies = [
  "tinfoil-ehbp",
  "tinfoil-verifier",
  "tokio",
+ "tokio-rustls",
  "tower-layer",
  "tower-service",
  "url",
  "webpki-roots",
+ "x509-cert",
 ]
 
 [[package]]

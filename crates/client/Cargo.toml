@@ -117,6 +117,12 @@ hpke = "0.13"
 futures-core = "0.3"
 serde_json = "1"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "test-util"] }
+# The certificates of the TLS transport mode's tests, made when they run.
+der = { version = "0.7", default-features = false, features = ["std", "oid", "derive"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "std"] }
+x509-cert = { version = "0.2", default-features = false, features = ["std"] }
+# The local TLS server of the TLS transport mode's tests.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [[example]]
 name = "openai_drop_in"
