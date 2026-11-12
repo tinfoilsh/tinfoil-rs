@@ -288,6 +288,19 @@ pub fn parse_reference(reference: &str) -> Result<Reference, Error> {
     endorsement::parse_reference(reference).map_err(|cause| UsageError::new(cause).into())
 }
 
+/// The caller's repository pin as the reference text that verification
+/// matches, where the empty text is the absence of a pin. A pin that is
+/// itself empty is refused, so that only `None` sets no pin.
+fn pin_reference(repo: Option<&str>) -> Result<&str, UsageError> {
+    match repo {
+        None => Ok(""),
+        Some("") => Err(UsageError::new(
+            "repository pin is empty; pass None to set no pin",
+        )),
+        Some(reference) => Ok(reference),
+    }
+}
+
 impl Verifier {
     /// A verifier with the defaults: the trust anchors embedded in the
     /// crate, Tinfoil's public config and artifact signing keys, and a
@@ -327,8 +340,9 @@ impl Verifier {
     /// repository pin `repo`, without a document or any I/O, so that a
     /// caller can refuse a pin before it fetches a document.
     ///
-    /// An empty `repo` accepts the configs that the configured registry
-    /// trust authorizes. [`verify_v3`](Self::verify_v3) rejects every
+    /// Without a pin, `None`, the verifier accepts the configs that the
+    /// configured registry trust authorizes, or the config that the caller
+    /// embeds or authorizes. [`verify_v3`](Self::verify_v3) rejects every
     /// `repo` that this method rejects, whatever the document. It can
     /// still reject one that passes here: v3 collateral also requires the
     /// repository and the revision to be valid parts of a config identity,
@@ -339,14 +353,18 @@ impl Verifier {
     ///
     /// [`Error::Usage`] when:
     ///
-    /// - `repo` is not empty and is not an
-    ///   `org/project[@revision][@sha256:digest]` reference;
-    /// - `repo` is not empty and the verifier has a config authorizer,
-    ///   which cannot authenticate a repository pin;
+    /// - `repo` is a pin that is not an
+    ///   `org/project[@revision][@sha256:digest]` reference; the empty
+    ///   string is not one, and `None` is how a caller sets no pin;
+    /// - `repo` is a pin and the verifier has a config authorizer, which
+    ///   cannot authenticate a repository pin;
     /// - the verifier has an embedded config whose name or digest `repo`
     ///   does not match.
-    pub fn check_repo_verifiability(&self, repo: &str) -> Result<(), Error> {
-        self.reference_pins(repo).map(|_| ()).map_err(Error::Usage)
+    pub fn check_repo_verifiability(&self, repo: Option<&str>) -> Result<(), Error> {
+        let reference = pin_reference(repo)?;
+        self.reference_pins(reference)
+            .map(|_| ())
+            .map_err(Error::Usage)
     }
 
     /// Appraises a nonce-bound v3 attestation document at the current
@@ -354,10 +372,11 @@ impl Verifier {
     ///
     /// `nonce` is the challenge that the caller generated, and `repo` pins
     /// the expected repository or registry project as
-    /// `org/project[@revision][@sha256:digest]`. An empty `repo` accepts
-    /// what the configured registry trust authorizes; an embedded config
-    /// authorizes its exact bytes instead; a config authorizer requires an
-    /// empty `repo` and owns the authorization of the config.
+    /// `org/project[@revision][@sha256:digest]`. Without a pin, `None`,
+    /// the verifier accepts what the configured registry trust authorizes;
+    /// an embedded config authorizes its exact bytes instead; a config
+    /// authorizer requires `None` and owns the authorization of the config.
+    /// The empty string is not a pin: `Some("")` is an error.
     ///
     /// On success the caller must bind its traffic to the returned keys
     /// and enforce
@@ -371,11 +390,16 @@ impl Verifier {
     ///
     /// # Errors
     ///
-    /// [`Error::Usage`] for a nonce of the wrong length, a `repo` that
-    /// this verifier cannot verify against, or a clock outside the years
+    /// [`Error::Usage`] for a `repo` of `Some("")`, a nonce of the wrong length,
+    /// a `repo` that this verifier cannot verify against, or a clock outside the years
     /// 0000 to 9999; [`Error::Verification`], with the layer that rejected
     /// it, for a document that must not be trusted.
-    pub fn verify_v3(&self, doc: &[u8], nonce: &[u8], repo: &str) -> Result<Verification, Error> {
+    pub fn verify_v3(
+        &self,
+        doc: &[u8],
+        nonce: &[u8],
+        repo: Option<&str>,
+    ) -> Result<Verification, Error> {
         // The only clock read.
         self.verify_v3_at(doc, nonce, repo, SystemTime::now())
     }
@@ -396,16 +420,18 @@ impl Verifier {
         &self,
         doc: &[u8],
         nonce: &[u8],
-        repo: &str,
+        repo: Option<&str>,
         verification_time: SystemTime,
     ) -> Result<Verification, Error> {
+        let reference = pin_reference(repo)?;
         let now = Instant::from_system_time(verification_time)
             .ok_or_else(|| UsageError::new("verification time is out of range"))?;
-        self.verify_at(doc, nonce, repo, now)
+        self.verify_at(doc, nonce, reference, now)
     }
 
     /// Verifies a document at an instant of the verifier's own time type,
-    /// which keeps nanoseconds on every platform.
+    /// which keeps nanoseconds on every platform. An empty `repo` is the
+    /// absence of a pin.
     pub(crate) fn verify_at(
         &self,
         doc: &[u8],
@@ -598,7 +624,8 @@ impl Verifier {
         )
     }
 
-    /// The pins that `reference` sets under this verifier's policy, or a
+    /// The pins that `reference` sets under this verifier's policy, where
+    /// an empty `reference` is the absence of a pin, or a
     /// usage error if verification rejects `reference` whatever the
     /// document. Every check of that kind belongs here, so that
     /// [`check_repo_verifiability`](Self::check_repo_verifiability) makes

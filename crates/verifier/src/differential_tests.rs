@@ -65,6 +65,12 @@ pub(crate) fn member<'a>(object: &'a Object, name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("member {name} is missing"))
 }
 
+/// The repository pin of a recorded case, where the empty text records
+/// that there is none.
+pub(crate) fn pin(repo: &str) -> Option<&str> {
+    Some(repo).filter(|repo| !repo.is_empty())
+}
+
 pub(crate) fn text<'a>(object: &'a Object, name: &str) -> &'a str {
     object.get(name).and_then(Value::as_str).unwrap_or("")
 }
@@ -516,7 +522,7 @@ fn replay(fixture: &Fixture, case: &Object) -> Outcome {
         (Ok(_), true) => return Outcome::Differs("build succeeds".to_owned()),
     };
     let repo = text(case, "repo");
-    let repo_check = verifier.check_repo_verifiability(repo);
+    let repo_check = verifier.check_repo_verifiability(pin(repo));
     if let Err(error) = &repo_check
         && !matches!(error, Error::Usage(_))
     {
