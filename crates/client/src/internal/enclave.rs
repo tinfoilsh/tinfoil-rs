@@ -433,7 +433,7 @@ mod tests {
             hpke: None,
             expires,
         };
-        assert!(fresh_at(&with(Some(now + Duration::from_nanos(1))), now));
+        assert!(fresh_at(&with(Some(now + Duration::from_micros(1))), now));
         assert!(!fresh_at(&with(Some(now)), now));
         assert!(!fresh_at(&with(Some(now - Duration::from_secs(1))), now));
         assert!(!fresh_at(&with(None), now));
