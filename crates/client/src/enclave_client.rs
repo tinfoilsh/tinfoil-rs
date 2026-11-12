@@ -45,24 +45,36 @@ impl EnclaveHttpClient {
     ///
     /// `host` is a host with an optional port, not a URL. `repo` is the
     /// repository that the enclave's code or config must come from, as
-    /// `owner/name[@tag][@sha256:digest]`. An empty `repo` sets no pin: the
+    /// `Some("owner/name[@tag][@sha256:digest]")`. `None` sets no pin: the
     /// enclave must then run a config that the verifier's own policy
     /// authorizes, which for the default verifier is one signed into the
-    /// public registry.
+    /// public registry. An empty string is not "no pin": `Some("")` is a
+    /// configuration error.
+    ///
+    /// ```no_run
+    /// # async fn run() -> Result<(), tinfoil_next::Error> {
+    /// use tinfoil_next::EnclaveHttpClient;
+    ///
+    /// let pinned = EnclaveHttpClient::connect("enclave.example.com", Some("owner/name")).await?;
+    /// let unpinned = EnclaveHttpClient::connect("enclave.example.com", None).await?;
+    /// # let _ = (pinned, unpinned);
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// See [`EnclaveHttpClientBuilder::connect`] for the checks, the errors
     /// and cancel safety.
-    pub async fn connect(host: impl Into<String>, repo: impl Into<String>) -> Result<Self, Error> {
+    pub async fn connect(host: impl Into<String>, repo: Option<&str>) -> Result<Self, Error> {
         Self::builder(host, repo).connect().await
     }
 
     /// Starts a client for the enclave at `host`, verified against `repo`,
     /// to be configured before it connects. The arguments are those of
     /// [`connect`](Self::connect).
-    pub fn builder(host: impl Into<String>, repo: impl Into<String>) -> EnclaveHttpClientBuilder {
+    pub fn builder(host: impl Into<String>, repo: Option<&str>) -> EnclaveHttpClientBuilder {
         EnclaveHttpClientBuilder {
             host: host.into(),
-            repo: repo.into(),
+            repo: repo.map(str::to_owned),
             options: RouteOptions::default(),
         }
     }
@@ -81,8 +93,8 @@ impl EnclaveHttpClient {
     }
 
     /// The repository pin that the enclave is verified against, with any
-    /// tag or digest. Empty when the client was created without a pin.
-    pub fn repo(&self) -> &str {
+    /// tag or digest. `None` when the client was created without a pin.
+    pub fn repo(&self) -> Option<&str> {
         self.inner.repo()
     }
 
@@ -175,7 +187,7 @@ impl fmt::Debug for EnclaveHttpClient {
 #[must_use = "a builder does nothing until `connect` is called"]
 pub struct EnclaveHttpClientBuilder {
     host: String,
-    repo: String,
+    repo: Option<String>,
     options: RouteOptions,
 }
 
@@ -275,7 +287,7 @@ impl EnclaveHttpClientBuilder {
     ///    URL), a query string or a fragment; or it uses `http://` for a
     ///    host other than `localhost` or a loopback IP address.
     /// 3. `user_cache_secret` is empty, or `timeout` is zero.
-    /// 4. `repo` is not empty and is not a repository reference, or the
+    /// 4. `repo` is `Some("")`, or is not a repository reference, or the
     ///    verifier cannot verify against it: a verifier with a config
     ///    authorizer takes no pin, and one with an embedded config takes
     ///    only a matching one.
@@ -296,6 +308,12 @@ impl EnclaveHttpClientBuilder {
     /// fails with an error that says so; the text above is the contract
     /// that it will meet.
     pub async fn connect(self) -> Result<EnclaveHttpClient, Error> {
+        self.check()?;
         Err(Error::not_implemented("EnclaveHttpClient::connect"))
+    }
+
+    /// The checks of the options that are written so far. No I/O.
+    pub(crate) fn check(&self) -> Result<(), Error> {
+        crate::internal::enclave::check_pin(self.repo.as_deref())
     }
 }

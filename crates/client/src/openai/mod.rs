@@ -205,12 +205,12 @@ pub struct EnclaveOpenAIClient {
 
 impl EnclaveOpenAIClient {
     /// Verifies the enclave at `host` against `repo`, as
-    /// [`EnclaveHttpClient::connect`] does, and returns an OpenAI client
-    /// over it. `config` is applied first; then the API base and the HTTP
+    /// [`EnclaveHttpClient::connect`] does (`None` sets no repository pin),
+    /// and returns an OpenAI client over it. `config` is applied first; then the API base and the HTTP
     /// client are set, so that `config` cannot replace them.
     pub async fn connect(
         host: impl Into<String>,
-        repo: impl Into<String>,
+        repo: Option<&str>,
         config: OpenAIConfig,
     ) -> Result<Self, Error> {
         Self::builder(host, repo, config).connect().await
@@ -221,7 +221,7 @@ impl EnclaveOpenAIClient {
     /// [`EnclaveHttpClientBuilder`].
     pub fn builder(
         host: impl Into<String>,
-        repo: impl Into<String>,
+        repo: Option<&str>,
         config: OpenAIConfig,
     ) -> EnclaveOpenAIClientBuilder {
         EnclaveOpenAIClientBuilder {
@@ -371,6 +371,7 @@ impl EnclaveOpenAIClientBuilder {
     /// fails with an error that says so; the text above is the contract
     /// that it will meet.
     pub async fn connect(self) -> Result<EnclaveOpenAIClient, Error> {
+        self.http.check()?;
         Err(Error::not_implemented("EnclaveOpenAIClient::connect"))
     }
 }

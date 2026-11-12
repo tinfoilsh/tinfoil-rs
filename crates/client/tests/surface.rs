@@ -77,7 +77,7 @@ fn the_http_clients_are_handles() {
 fn the_accessors_have_their_signatures() {
     let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a Url = EnclaveHttpClient::base_url;
     let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a str = EnclaveHttpClient::enclave;
-    let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a str = EnclaveHttpClient::repo;
+    let _: for<'a> fn(&'a EnclaveHttpClient) -> Option<&'a str> = EnclaveHttpClient::repo;
     let _: fn(&EnclaveHttpClient) -> TransportMode = EnclaveHttpClient::transport_mode;
     let _: fn(&EnclaveHttpClient) -> Arc<Verification> = EnclaveHttpClient::current;
 
@@ -91,7 +91,7 @@ fn the_accessors_have_their_signatures() {
 
 #[test]
 fn a_builder_does_no_io_and_prints_no_secret() {
-    let builder = EnclaveHttpClient::builder("enclave.example.com", "org/repo")
+    let builder = EnclaveHttpClient::builder("enclave.example.com", Some("org/repo"))
         .transport_mode(TransportMode::Ehbp)
         .base_url("https://user:hunter2@proxy.example.com/")
         .verifier(Verifier::new())
@@ -107,12 +107,12 @@ fn a_builder_does_no_io_and_prints_no_secret() {
 async fn enclave_client(verifier: Arc<Verifier>) -> Result<(), Box<dyn StdError>> {
     let client: EnclaveHttpClient = send(EnclaveHttpClient::connect(
         "enclave.example.com",
-        "org/repo",
+        Some("org/repo"),
     ))
     .await?;
 
     let builder: EnclaveHttpClientBuilder =
-        EnclaveHttpClient::builder(String::from("enclave.example.com"), "org/repo@v1.2.3")
+        EnclaveHttpClient::builder(String::from("enclave.example.com"), Some("org/repo@v1.2.3"))
             .transport_mode(TransportMode::Ehbp)
             .base_url("https://proxy.example.com/")
             .verifier(verifier)
@@ -125,6 +125,10 @@ async fn enclave_client(verifier: Arc<Verifier>) -> Result<(), Box<dyn StdError>
             .user_cache_secret("opaque-random-value")
             .timeout(Duration::from_secs(30));
     let configured: EnclaveHttpClient = send(builder.connect()).await?;
+
+    let unpinned: EnclaveHttpClient =
+        send(EnclaveHttpClient::connect("enclave.example.com", None)).await?;
+    let _: Option<&str> = unpinned.repo();
 
     let current: Arc<Verification> = configured.current();
     let valid: Arc<Verification> = send(configured.ensure_verified()).await?;
@@ -186,6 +190,29 @@ async fn router_client() -> Result<(), Error> {
     Ok(())
 }
 
+#[tokio::test]
+async fn an_empty_repository_pin_is_refused_before_any_io() {
+    // `.invalid` never resolves, so a connection attempt could not pass
+    // for the refusal.
+    let error = EnclaveHttpClient::connect("enclave.invalid", Some(""))
+        .await
+        .expect_err("an empty pin is refused");
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(
+        error.to_string().contains("repository pin is empty"),
+        "{error}"
+    );
+
+    let error = EnclaveHttpClient::builder("enclave.invalid", Some(""))
+        .connect()
+        .await
+        .expect_err("an empty pin is refused");
+    assert!(
+        error.to_string().contains("repository pin is empty"),
+        "{error}"
+    );
+}
+
 #[test]
 fn the_callers_of_the_async_surface_compile() {
     // The functions above are compiled, which is the check; they are not
@@ -242,10 +269,22 @@ mod openai {
         let _: for<'a> fn(&'a OpenAIError) -> Option<&'a Error> = Error::from_openai;
     }
 
+    #[tokio::test]
+    async fn an_empty_repository_pin_is_refused_by_the_openai_client() {
+        let error = EnclaveOpenAIClient::connect("enclave.invalid", Some(""), OpenAIConfig::new())
+            .await
+            .expect_err("an empty pin is refused");
+        assert_eq!(error.kind(), ErrorKind::Configuration);
+        assert!(
+            error.to_string().contains("repository pin is empty"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn an_openai_builder_prints_no_api_key() {
         let config = OpenAIConfig::new().with_api_key("sk-secret-key");
-        let builder = EnclaveOpenAIClient::builder("enclave.example.com", "org/repo", config)
+        let builder = EnclaveOpenAIClient::builder("enclave.example.com", Some("org/repo"), config)
             .transport_mode(TransportMode::Tls)
             .base_url("https://enclave.example.com/api/")
             .verifier(Verifier::new())
@@ -360,13 +399,13 @@ mod openai {
         let config = OpenAIConfig::new().with_api_key(&key);
         let enclave: EnclaveOpenAIClient = send(EnclaveOpenAIClient::connect(
             "enclave.example.com",
-            "org/repo",
+            Some("org/repo"),
             config.clone(),
         ))
         .await?;
         let _: &EnclaveHttpClient = enclave.http_client();
         let builder: EnclaveOpenAIClientBuilder =
-            EnclaveOpenAIClient::builder("enclave.example.com", "org/repo", config.clone())
+            EnclaveOpenAIClient::builder("enclave.example.com", Some("org/repo"), config.clone())
                 .transport_mode(TransportMode::Ehbp)
                 .base_url("https://proxy.example.com/v1/");
         let _: EnclaveOpenAIClient = send(builder.connect()).await?;

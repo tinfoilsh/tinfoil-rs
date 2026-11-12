@@ -57,9 +57,12 @@ impl RouterHttpClient {
         self.inner.enclave()
     }
 
-    /// The repository that the router is verified against.
+    /// The repository that the router is verified against. A router is
+    /// always pinned to Tinfoil's router repository.
     pub fn repo(&self) -> &str {
-        self.inner.repo()
+        self.inner
+            .repo()
+            .unwrap_or(crate::internal::router::ROUTER_REPO)
     }
 
     /// The transport mode that the client was created with.

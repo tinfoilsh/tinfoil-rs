@@ -64,8 +64,8 @@ pub(crate) struct Config {
     /// A host that fetches the attestation document on the client's behalf.
     pub(crate) relay: Option<String>,
     /// The repository pin, `org/project[@revision][@sha256:digest]`, or
-    /// empty to accept a config that the verifier authorizes.
-    pub(crate) repo: String,
+    /// `None` to accept a config that the verifier authorizes.
+    pub(crate) repo: Option<String>,
     /// The policy; `None` selects the default verifier.
     pub(crate) verifier: Option<Arc<Verifier>>,
     /// The caller's veto.
@@ -75,7 +75,7 @@ pub(crate) struct Config {
 /// One enclave and the policy that its attestation is verified against.
 pub(crate) struct Enclave<V = Verification> {
     host: String,
-    repo: String,
+    repo: Option<String>,
     verifier: Option<Arc<Verifier>>,
     source: Source<V>,
     check: Option<Check<V>>,
@@ -83,8 +83,9 @@ pub(crate) struct Enclave<V = Verification> {
 }
 
 impl Enclave<Verification> {
-    /// Checks `config.repo` against the verifier's rules for a repository
-    /// pin (`Verifier::check_repo_verifiability`) and does no I/O. A usage
+    /// Checks `config.repo` with [`check_pin`] and then against the
+    /// verifier's rules for a repository pin
+    /// (`Verifier::check_repo_verifiability`), and does no I/O. A usage
     /// error from the verifier is a configuration error.
     pub(crate) fn new(config: Config) -> Result<Self, Error> {
         Err(Error::not_implemented("the enclave"))
@@ -102,9 +103,9 @@ impl<V: Evidence> Enclave<V> {
         &self.host
     }
 
-    /// The repository pin, with any tag or digest; empty without one.
-    pub(crate) fn repo(&self) -> &str {
-        &self.repo
+    /// The repository pin, with any tag or digest; `None` without one.
+    pub(crate) fn repo(&self) -> Option<&str> {
+        self.repo.as_deref()
     }
 
     /// Fetches and verifies the enclave's attestation, and tries once more
@@ -142,6 +143,18 @@ impl<V: Evidence> Enclave<V> {
     /// tries several enclaves moves on quickly.
     pub(crate) async fn verify_once(&self) -> Result<V, Error> {
         Err(Error::not_implemented("enclave verification"))
+    }
+}
+
+/// Refuses an empty repository pin. "No pin" is `None`; `Some("")` is a
+/// configuration error, so that an empty string from a caller's own
+/// configuration never silently removes the pin.
+pub(crate) fn check_pin(repo: Option<&str>) -> Result<(), Error> {
+    match repo {
+        Some("") => Err(Error::configuration(
+            "the repository pin is empty; pass `None` to verify without a repository pin",
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -185,6 +198,15 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::Configuration);
         let source = std::error::Error::source(&error).expect("the verifier's error");
         assert!(source.is::<crate::verifier::Error>());
+    }
+
+    #[test]
+    fn an_empty_pin_is_refused_and_an_absent_one_is_not() {
+        let error = check_pin(Some("")).expect_err("an empty pin is refused");
+        assert_eq!(error.kind(), ErrorKind::Configuration);
+        assert!(error.to_string().contains("repository pin is empty"));
+        assert!(check_pin(None).is_ok());
+        assert!(check_pin(Some("owner/name")).is_ok());
     }
 
     struct Record(Option<SystemTime>);

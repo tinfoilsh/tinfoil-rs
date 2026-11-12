@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("TINFOIL_API_KEY")?;
 
     // The enclave is verified before `connect` returns.
-    let client = EnclaveHttpClient::connect(ENCLAVE, REPO).await?;
+    let client = EnclaveHttpClient::connect(ENCLAVE, Some(REPO)).await?;
 
     let verified = client.current();
     println!("enclave:     {}", client.enclave());
@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Configured: bodies are sealed to the enclave's HPKE key and travel
     // through a proxy, which sees only the method, the URL and the headers.
-    let proxied = EnclaveHttpClient::builder(ENCLAVE, REPO)
+    let proxied = EnclaveHttpClient::builder(ENCLAVE, Some(REPO))
         .transport_mode(TransportMode::Ehbp)
         .base_url("https://proxy.example.com/tinfoil/")
         .timeout(Duration::from_secs(60))

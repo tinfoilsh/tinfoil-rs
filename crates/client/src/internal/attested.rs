@@ -63,7 +63,7 @@ impl AttestedClient {
         self.transport.enclave().host()
     }
 
-    pub(crate) fn repo(&self) -> &str {
+    pub(crate) fn repo(&self) -> Option<&str> {
         self.transport.enclave().repo()
     }
 
