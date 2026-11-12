@@ -27,6 +27,7 @@ use crate::verifier::{BoxError, Verification, Verifier};
 #[derive(Clone)]
 pub struct GatewayOpenAIClient {
     openai: OpenAI,
+    sender: super::service::Sender,
     http: GatewayHttpClient,
     api_base: Url,
 }

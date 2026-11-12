@@ -9,14 +9,16 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use async_openai::config::OpenAIConfig;
-use async_openai::error::OpenAIError;
+use async_openai::config::{Config, OpenAIConfig};
+use async_openai::error::{ApiError, ApiErrorResponse, OpenAIError, WrappedError};
+use async_openai::middleware::HttpRequestFactory;
 use futures_core::Stream;
-use reqwest::Url;
+use reqwest::header::CONTENT_TYPE;
+use reqwest::{Method, Response, Url};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
-use crate::error::Error;
+use crate::openai::service::Sender;
 use crate::request::Execute;
 
 /// The path of the chat-completion endpoint under an OpenAI base URL.
@@ -26,8 +28,10 @@ pub(crate) const CHAT_COMPLETIONS_PATH: &str = "chat/completions";
 ///
 /// Its requests go through the same attested HTTP client as the typed
 /// calls, with the same credentials and headers from the client's
-/// `OpenAIConfig`, to `chat/completions` under the client's API base.
+/// `OpenAIConfig` and the same retries, to `chat/completions` under the
+/// client's API base.
 pub struct RelaxedChat<'a> {
+    pub(crate) sender: Sender,
     pub(crate) http: Arc<dyn Execute>,
     pub(crate) api_base: &'a Url,
     pub(crate) config: &'a OpenAIConfig,
@@ -44,31 +48,32 @@ impl RelaxedChat<'_> {
     ///
     /// `stream` is set to `false` in the body, so a body that asks for a
     /// stream by mistake is not answered with events; use
-    /// [`create_stream`](Self::create_stream) for those. The user cache
-    /// secret is added by the HTTP client underneath, as for every chat
-    /// request.
+    /// [`create_stream`](Self::create_stream) for those. A body that is
+    /// not a JSON object is sent as it is. The user cache secret is added
+    /// by the HTTP client underneath, as for every chat request.
     ///
     /// # Errors
     ///
-    /// The errors are those of a typed call: an error status from the API
+    /// The errors are those of a typed call. An error status from the API
     /// is `OpenAIError::ApiError`, with the fields of the API's error
-    /// object where the body has one, and a failure of the attested HTTP
-    /// client travels inside the `OpenAIError`, where
-    /// [`Error::from_openai`](crate::Error::from_openai) finds it. Unlike a
-    /// typed call, the request is sent once: the API's errors are not
-    /// retried.
+    /// object; the body of a `5xx` response is its message as it is, and a
+    /// `4xx` body without an error object is
+    /// `OpenAIError::JSONDeserialize`, as is a successful response that is
+    /// not JSON. A failure of the attested HTTP client travels inside the
+    /// `OpenAIError`, where
+    /// [`Error::from_openai`](crate::Error::from_openai) finds it. A `429`
+    /// or `5xx` response is tried again as for a typed call.
     ///
     /// # Cancel safety
     ///
     /// Dropping the future cancels the request, as
     /// [`EnclaveHttpClient::execute`](crate::EnclaveHttpClient::execute)
     /// describes.
-    ///
-    /// **Not implemented yet.** In this version of the crate the call always
-    /// fails with an error that says so; the text above is the contract
-    /// that it will meet.
     pub async fn create(&self, body: impl Into<Value>) -> Result<RelaxedResponse, OpenAIError> {
-        Err(not_implemented("RelaxedChat::create"))
+        let response = self.send(body.into(), false).await?;
+        let bytes = response.bytes().await.map_err(OpenAIError::Reqwest)?;
+        let body = serde_json::from_slice(&bytes).map_err(|error| not_json(error, &bytes))?;
+        Ok(RelaxedResponse { body })
     }
 
     /// As [`create`](Self::create), for a streamed response: `stream` is
@@ -77,17 +82,102 @@ impl RelaxedChat<'_> {
     /// as they were sent.
     ///
     /// The future resolves when the response headers have arrived; an
-    /// error status is reported then. Dropping the future cancels the
-    /// request, and dropping the stream closes the connection.
+    /// error status is reported then, after the retries of a typed call.
+    /// Nothing is tried again once the stream has started. The stream is
+    /// that of [`parse_event_stream`](crate::sse::parse_event_stream): it
+    /// ends at `[DONE]`, or when the response ends after a complete event,
+    /// and it fails when the response ends inside an event or cannot be
+    /// read further.
     ///
-    /// **Not implemented yet.** In this version of the crate the call always
-    /// fails with an error that says so; the text above is the contract
-    /// that it will meet.
+    /// Dropping the future cancels the request, and dropping the stream
+    /// closes the connection.
     pub async fn create_stream(
         &self,
         body: impl Into<Value>,
     ) -> Result<RelaxedStream, OpenAIError> {
-        Err(not_implemented("RelaxedChat::create_stream"))
+        let response = self.send(body.into(), true).await?;
+        let mut events = crate::sse::parse_event_stream(response.bytes_stream());
+        Ok(Box::pin(async_stream::stream! {
+            while let Some(event) =
+                std::future::poll_fn(|cx| events.as_mut().poll_next(cx)).await
+            {
+                yield event.map(|body| RelaxedStreamChunk { body });
+            }
+        }))
+    }
+
+    /// Sends `body` with its `stream` member set to `stream` and returns
+    /// the response if its status is a success; otherwise the API's error.
+    async fn send(&self, mut body: Value, stream: bool) -> Result<Response, OpenAIError> {
+        force_stream(&mut body, stream);
+        let url = self
+            .api_base
+            .join(CHAT_COMPLETIONS_PATH)
+            .map_err(|error| OpenAIError::InvalidArgument(error.to_string()))?;
+        let body = serde_json::to_vec(&body)
+            .map_err(|error| OpenAIError::InvalidArgument(error.to_string()))?;
+        let (http, headers) = (Arc::clone(&self.http), self.config.headers());
+        let query: Vec<(String, String)> = self
+            .config
+            .query()
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
+        // Built anew for each attempt, as every call of the client is.
+        let factory = HttpRequestFactory::new(move || {
+            let request = http
+                .start(Method::POST, url.clone())
+                .headers(headers.clone())
+                .query(&query)
+                .header(CONTENT_TYPE, "application/json")
+                .body(body.clone())
+                .build()
+                .map_err(OpenAIError::Reqwest);
+            std::future::ready(request)
+        });
+        let response = self.sender.send(factory).await?;
+        if response.status().is_success() {
+            Ok(response)
+        } else {
+            Err(api_error(response).await)
+        }
+    }
+}
+
+/// Sets the `stream` member of a body that is a JSON object.
+fn force_stream(body: &mut Value, stream: bool) {
+    if let Some(members) = body.as_object_mut() {
+        members.insert("stream".to_owned(), Value::Bool(stream));
+    }
+}
+
+/// The error for a response body that is not the JSON that was expected.
+fn not_json(error: serde_json::Error, body: &[u8]) -> OpenAIError {
+    OpenAIError::JSONDeserialize(error, String::from_utf8_lossy(body).into_owned())
+}
+
+/// The error for a response with an error status, read as a typed call
+/// reads it: the body of a `5xx` response is the message as it is, since
+/// such a body need not be JSON; any other body must hold the API's
+/// error object.
+async fn api_error(response: Response) -> OpenAIError {
+    let status_code = response.status();
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => return OpenAIError::Reqwest(error),
+    };
+    let parsed = if status_code.is_server_error() {
+        let message = String::from_utf8_lossy(&bytes).into_owned();
+        serde_json::from_value::<ApiError>(json!({ "message": message }))
+    } else {
+        serde_json::from_slice::<WrappedError>(&bytes).map(|wrapped| wrapped.error)
+    };
+    match parsed {
+        Ok(api_error) => OpenAIError::ApiError(ApiErrorResponse {
+            status_code,
+            api_error,
+        }),
+        Err(error) => not_json(error, &bytes),
     }
 }
 
@@ -103,13 +193,6 @@ impl std::fmt::Debug for RelaxedChat<'_> {
 /// [`RelaxedChat::create_stream`].
 pub type RelaxedStream =
     Pin<Box<dyn Stream<Item = Result<RelaxedStreamChunk, OpenAIError>> + Send + 'static>>;
-
-/// The error of a function whose body is not written yet, as an OpenAI
-/// call reports a failure of the HTTP client underneath.
-pub(crate) fn not_implemented(what: &'static str) -> OpenAIError {
-    let error: crate::verifier::BoxError = Box::new(Error::not_implemented(what));
-    OpenAIError::from(error)
-}
 
 /// Permissive view of a chat-completion response.
 #[derive(Debug, Clone)]
