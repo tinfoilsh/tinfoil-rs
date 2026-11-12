@@ -30,6 +30,7 @@
 use std::collections::BTreeSet;
 use std::error::Error as StdError;
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use tinfoil_verifier::{
@@ -377,8 +378,13 @@ fn public_items(source: &str) -> Vec<String> {
     items
 }
 
+/// Held by every test that reads or rewrites the committed listing, so that
+/// a run that rewrites it never lets another test read a file half written.
+static LISTING_FILE: Mutex<()> = Mutex::new(());
+
 #[test]
 fn the_public_items_are_the_listed_ones() {
+    let _listing_file = LISTING_FILE.lock().unwrap_or_else(PoisonError::into_inner);
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let read = |relative: &str| std::fs::read_to_string(root.join(relative)).unwrap();
     let exported = exported_names(&read("src/lib.rs"));
@@ -427,6 +433,7 @@ fn the_public_items_are_the_listed_ones() {
 
 #[test]
 fn an_ordinary_build_lists_no_replaceable_trust_anchor() {
+    let _listing_file = LISTING_FILE.lock().unwrap_or_else(PoisonError::into_inner);
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let listing = std::fs::read_to_string(root.join("tests/public_api.txt")).unwrap();
     let dangerous: Vec<&str> = listing
