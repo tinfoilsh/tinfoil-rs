@@ -80,7 +80,7 @@ pub struct ReplicaVerification {
 /// digest, and at least one replica.
 ///
 /// The catalog is fetched from `https://<host>/catalog` within 10 seconds
-/// and is at most 2 MiB; redirects are not followed.
+/// and is at most 2 MiB; redirects are followed only to `https://` URLs.
 /// Every failure is a network error, except a `host` that yields no URL,
 /// which is a configuration error.
 ///

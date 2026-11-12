@@ -22,6 +22,10 @@ pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// this size is accepted; one byte more is refused.
 pub(crate) const MAX_DOCUMENT_BYTES: usize = 32 << 20;
 
+/// How many requests one fetch of unattested material makes at most: the
+/// first, and one for each redirect that it follows.
+pub(crate) const MAX_REQUESTS: usize = 10;
+
 /// Where the attestation document of `host` is fetched with `nonce`:
 /// `https://<host>/.well-known/tinfoil-attestation?nonce=<lowercase hex>`,
 /// or, through a relay,
@@ -55,12 +59,14 @@ pub(crate) fn document_url(
 ///   headers and nothing of the caller's: no credential, no cookie.
 /// - It goes out on a connection of its own, never a pooled one, so that a
 ///   fetch after a rollout cannot land on a replica that is draining.
-/// - Redirects are not followed: a `3xx` is an error status like any
-///   other.
-/// - The fetch ends after [`FETCH_TIMEOUT`], whatever the caller's own
-///   deadline is.
-/// - The body is read as a stream, and the read stops once it exceeds
-///   [`MAX_DOCUMENT_BYTES`].
+/// - Redirects are followed, to `https://` URLs only and for at most
+///   [`MAX_REQUESTS`] requests in all. The document proves itself once it
+///   is verified, so a redirect cannot make an untrusted document pass; it
+///   can only fail the fetch.
+/// - The fetch ends after [`FETCH_TIMEOUT`], redirects included, whatever
+///   the caller's own deadline is.
+/// - The body of the final response is read as a stream, and the read
+///   stops once it exceeds [`MAX_DOCUMENT_BYTES`].
 ///
 /// Every failure is a network error (a connection failure, a timeout, a
 /// status above 299, an oversized body), except an invalid `host` or
@@ -92,19 +98,45 @@ pub(crate) async fn document(
 ///   operating system's trust store and `SSL_CERT_FILE` are not read, so
 ///   the result does not depend on the machine.
 /// - Only `https://` URLs are requested.
-/// - Redirects are not followed, and no connection is kept for reuse.
+/// - Redirects are followed under the rule of [`redirect_policy`], and no
+///   connection is kept for reuse.
 /// - A forward proxy named by `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`
 ///   is used, as `reqwest` does by default. The material proves itself
 ///   once it is verified, so a proxy can only make the fetch fail.
 pub(crate) fn plain_client() -> Result<Client, Error> {
-    client_builder()?
+    client_builder(true)?
         .https_only(true)
         .build()
         .map_err(|error| Error::wrap(ErrorKind::Configuration, error))
 }
 
+/// The redirect rule for unattested material. A redirect is followed
+/// unless:
+///
+/// - its target is not an `https://` URL, when `https_only` is set, as it
+///   always is outside this module's own tests: a redirect never moves a
+///   fetch to plaintext;
+/// - [`MAX_REQUESTS`] requests have already been made in the chain.
+///
+/// A redirect that is not followed fails the fetch. The target may be on
+/// another host. Its URL is the `Location` as the server gave it, resolved
+/// against the request's URL; nothing of the request's query is carried
+/// over unless the server repeats it.
+fn redirect_policy(https_only: bool) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if https_only && attempt.url().scheme() != "https" {
+            attempt.error("refusing a redirect to a URL that is not HTTPS")
+        } else if attempt.previous().len() >= MAX_REQUESTS {
+            attempt.error("stopped after too many redirects")
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
 /// The settings that every client for unattested material shares.
-fn client_builder() -> Result<ClientBuilder, Error> {
+/// `https_only` is that of [`redirect_policy`].
+fn client_builder(https_only: bool) -> Result<ClientBuilder, Error> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -115,14 +147,15 @@ fn client_builder() -> Result<ClientBuilder, Error> {
         .with_no_client_auth();
     Ok(Client::builder()
         .tls_backend_preconfigured(tls)
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(redirect_policy(https_only))
         .pool_max_idle_per_host(0))
 }
 
 /// Sends a `GET` for `url` with the SDK headers and returns the body.
 ///
-/// `timeout` bounds the request and the read of the body together. A
-/// status above 299 is an error. The body is refused once it exceeds
+/// `timeout` bounds the whole fetch: every request of a redirect chain and
+/// the read of the final body together. A final status above 299 is an
+/// error, a redirect that was not followed included. The body is refused once it exceeds
 /// `limit` bytes: at once when the response declares a longer one, and
 /// otherwise as soon as the bytes read pass the limit. `what` names the
 /// material in the errors. Every failure is a network error.
@@ -228,27 +261,52 @@ mod tests {
 
     const NONCE: [u8; NONCE_SIZE] = [0xab; NONCE_SIZE];
 
-    /// A local HTTP server that answers every request with `response` and
-    /// records what it received. With `response` empty it never answers.
+    /// What the local server does with one request.
+    enum Reply {
+        /// Send these bytes and close.
+        Send(Vec<u8>),
+        /// Send these bytes after this much of Tokio's time.
+        SendAfter(Duration, Vec<u8>),
+        /// Never answer.
+        Hang,
+    }
+
+    /// A local HTTP server that records what it received.
     struct Server {
         url: Url,
         accepted: Arc<AtomicUsize>,
         requests: Arc<Mutex<Vec<String>>>,
     }
 
+    /// A server that answers every request with `response`, or never
+    /// answers when `response` is empty.
     async fn serve(response: Vec<u8>) -> Server {
+        serve_with(move |_| {
+            if response.is_empty() {
+                Reply::Hang
+            } else {
+                Reply::Send(response.clone())
+            }
+        })
+        .await
+    }
+
+    /// A server that answers each request with what `handler` returns for
+    /// the request's path and query.
+    async fn serve_with(handler: impl Fn(&str) -> Reply + Send + Sync + 'static) -> Server {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let address = listener.local_addr().expect("address");
         let accepted = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let (count, seen) = (Arc::clone(&accepted), Arc::clone(&requests));
+        let handler = Arc::new(handler);
         tokio::spawn(async move {
             loop {
                 let Ok((mut socket, _)) = listener.accept().await else {
                     return;
                 };
                 count.fetch_add(1, Ordering::SeqCst);
-                let (response, seen) = (response.clone(), Arc::clone(&seen));
+                let (handler, seen) = (Arc::clone(&handler), Arc::clone(&seen));
                 tokio::spawn(async move {
                     let mut request = Vec::new();
                     let mut buffer = [0u8; 4096];
@@ -258,12 +316,17 @@ mod tests {
                             Ok(n) => request.extend_from_slice(&buffer[..n]),
                         }
                     }
-                    seen.lock()
-                        .await
-                        .push(String::from_utf8_lossy(&request).into_owned());
-                    if response.is_empty() {
-                        std::future::pending::<()>().await;
-                    }
+                    let request = String::from_utf8_lossy(&request).into_owned();
+                    let target = request.split(' ').nth(1).unwrap_or_default().to_owned();
+                    seen.lock().await.push(request);
+                    let response = match handler(&target) {
+                        Reply::Send(response) => response,
+                        Reply::SendAfter(delay, response) => {
+                            tokio::time::sleep(delay).await;
+                            response
+                        }
+                        Reply::Hang => std::future::pending().await,
+                    };
                     let _ = socket.write_all(&response).await;
                     let _ = socket.shutdown().await;
                 });
@@ -280,6 +343,32 @@ mod tests {
         }
     }
 
+    fn redirect(location: &str) -> Vec<u8> {
+        format!("HTTP/1.1 302 Found\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .into_bytes()
+    }
+
+    /// A server whose `/hop/<n>` redirects to `/hop/<n - 1>` after `delay`,
+    /// down to `/hop/0`, which answers with `body`. Its URL is the first
+    /// hop of a chain with `redirects` redirects.
+    async fn chain(redirects: usize, delay: Duration, body: &'static [u8]) -> Server {
+        let mut server = serve_with(move |target| {
+            let hop: usize = target
+                .strip_prefix("/hop/")
+                .and_then(|n| n.parse().ok())
+                .expect("a hop");
+            let response = if hop == 0 {
+                ok(body)
+            } else {
+                redirect(&format!("/hop/{}", hop - 1))
+            };
+            Reply::SendAfter(delay, response)
+        })
+        .await;
+        server.url = server.url.join(&format!("/hop/{redirects}")).expect("url");
+        server
+    }
+
     fn ok(body: &[u8]) -> Vec<u8> {
         let mut response = format!(
             "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -293,7 +382,7 @@ mod tests {
     /// The production client, allowed to speak plain HTTP to the local
     /// server and kept away from any proxy of the test machine.
     fn local_client() -> Client {
-        client_builder()
+        client_builder(false)
             .expect("builder")
             .no_proxy()
             .build()
@@ -414,7 +503,7 @@ mod tests {
     #[tokio::test]
     async fn a_status_above_299_is_a_network_error() {
         for status in [
-            "300 Multiple Choices",
+            "304 Not Modified",
             "404 Not Found",
             "429 Too Many Requests",
             "503 Service Unavailable",
@@ -436,17 +525,108 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_redirect_is_an_error_and_is_not_followed() {
-        let target = serve(ok(b"{}")).await;
-        let response = format!(
-            "HTTP/1.1 302 Found\r\nlocation: {}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-            target.url
-        );
-        let server = serve(response.into_bytes()).await;
-        let error = get(&server, 1024).await.expect_err("a redirect");
+    async fn redirects_are_followed_while_the_chain_stays_within_ten_requests() {
+        let server = chain(MAX_REQUESTS - 1, Duration::ZERO, b"{\"hops\":9}").await;
+        assert_eq!(get(&server, 1024).await.expect("body"), b"{\"hops\":9}");
+        assert_eq!(server.accepted.load(Ordering::SeqCst), MAX_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn the_redirect_after_the_tenth_request_is_refused() {
+        let server = chain(MAX_REQUESTS, Duration::ZERO, b"{}").await;
+        let error = get(&server, 1024).await.expect_err("too many redirects");
         assert_eq!(error.kind(), ErrorKind::Network);
-        assert!(error.to_string().contains("302"), "{error}");
+        assert!(!error.is_timeout());
+        // Ten requests were made, and the last hop was never asked for.
+        assert_eq!(server.accepted.load(Ordering::SeqCst), MAX_REQUESTS);
+        let requests = server.requests.lock().await;
+        assert!(!requests.iter().any(|r| r.starts_with("GET /hop/0 ")));
+    }
+
+    #[tokio::test]
+    async fn a_redirect_may_lead_to_another_host_and_keeps_the_sdk_headers() {
+        let target = serve(ok(b"{\"from\":\"target\"}")).await;
+        let location = target.url.to_string();
+        let server = serve_with(move |_| Reply::Send(redirect(&location))).await;
+        assert_eq!(
+            get(&server, 1024).await.expect("body"),
+            b"{\"from\":\"target\"}"
+        );
+        let requests = target.requests.lock().await;
+        let request = requests.first().expect("one request").to_ascii_lowercase();
+        assert!(
+            request.contains("\r\ntinfoil-sdk: tinfoil-rs\r\n"),
+            "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_target_is_the_location_as_given_without_the_requests_query() {
+        let server = serve_with(|target| {
+            if target.starts_with("/.well-known/") {
+                Reply::Send(redirect("/moved"))
+            } else {
+                Reply::Send(ok(b"{}"))
+            }
+        })
+        .await;
+        get(&server, 1024).await.expect("body");
+        let requests = server.requests.lock().await;
+        assert!(
+            requests
+                .last()
+                .is_some_and(|r| r.starts_with("GET /moved HTTP/1.1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_plain_http_is_refused_and_its_target_is_not_contacted() {
+        let target = serve(ok(b"{}")).await;
+        let location = target.url.to_string();
+        let server = serve_with(move |_| Reply::Send(redirect(&location))).await;
+        // The production redirect rule, on a client that may still start
+        // from the local plain-HTTP server.
+        let client = client_builder(true)
+            .expect("builder")
+            .no_proxy()
+            .build()
+            .expect("client");
+        let error = get_bounded(&client, server.url.clone(), 1024, FETCH_TIMEOUT, "document")
+            .await
+            .expect_err("a downgrade");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert_eq!(server.accepted.load(Ordering::SeqCst), 1);
         assert_eq!(target.accepted.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_size_bound_applies_to_the_response_at_the_end_of_a_redirect_chain() {
+        static BODY: [u8; 64] = [b'a'; 64];
+        let server = chain(3, Duration::ZERO, &BODY).await;
+        assert_eq!(get(&server, 64).await.expect("at the limit").len(), 64);
+        let error = get(&server, 63).await.expect_err("over the limit");
+        assert!(error.to_string().contains("exceeds 63 bytes"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn the_timeout_covers_a_whole_redirect_chain_and_not_each_request() {
+        // Real time, because paused time cannot be trusted to wait for
+        // socket I/O between two timers.
+        let timeout = Duration::from_millis(1000);
+        let client = local_client();
+        let fetch =
+            |server: &Server| get_bounded(&client, server.url.clone(), 1024, timeout, "document");
+
+        // Each of the six requests takes a quarter of the bound; together
+        // they take one and a half times the bound.
+        let server = chain(5, Duration::from_millis(250), b"{}").await;
+        let error = fetch(&server).await.expect_err("too slow in all");
+        assert!(error.is_timeout(), "{error}");
+        assert!(server.accepted.load(Ordering::SeqCst) > 1);
+
+        // A chain of two quick requests fits.
+        let server = chain(1, Duration::from_millis(50), b"{}").await;
+        assert_eq!(fetch(&server).await.expect("body"), b"{}");
     }
 
     #[tokio::test]
