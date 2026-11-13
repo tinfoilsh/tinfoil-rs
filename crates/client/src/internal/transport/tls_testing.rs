@@ -400,11 +400,11 @@ pub(crate) async fn serve(
                             let (state, handler) = (Arc::clone(&state), Arc::clone(&handler));
                             async move {
                                 let (parts, body) = request.into_parts();
-                                let body = body
-                                    .collect()
-                                    .await
-                                    .map(|collected| collected.to_bytes())
-                                    .unwrap_or_default();
+                                // A body that fails while it is read is
+                                // not an empty one: the request ends
+                                // here, unrecorded and unanswered, and
+                                // the connection with it.
+                                let body = body.collect().await?.to_bytes();
                                 let authority = parts
                                     .uri
                                     .authority()
@@ -427,7 +427,7 @@ pub(crate) async fn serve(
                                     body,
                                 };
                                 state.seen.lock().unwrap().push(seen.clone());
-                                Ok::<_, Infallible>(handler(seen).await)
+                                Ok::<_, hyper::Error>(handler(seen).await)
                             }
                         })
                     };
