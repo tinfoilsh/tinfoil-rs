@@ -616,6 +616,11 @@ fn check_certificate_binding(
             }
             None => OID_SHA256,
         };
+        if algorithm == OID_SHA1 {
+            return Err(error(
+                "SHA-1 certificate identifiers require the legacy attribute",
+            ));
+        }
         check_cert_id(
             algorithm,
             first.cert_hash.as_bytes(),
@@ -643,10 +648,15 @@ fn check_cert_id(
     }
     if let Some(named) = issuer_serial {
         let certificate = &signer.parsed().tbs_certificate;
-        if named.serial != certificate.serial_number || !named.issuer.iter().any(|name| {
-            matches!(name, GeneralName::DirectoryName(issuer) if *issuer == certificate.issuer)
-        }) {
-            return Err(error("timestamp certificate issuer or serial does not match signer"));
+        if named.serial != certificate.serial_number
+            || named.issuer.len() != 1
+            || !matches!(
+                named.issuer.first(), Some(GeneralName::DirectoryName(issuer)) if *issuer == certificate.issuer
+            )
+        {
+            return Err(error(
+                "timestamp certificate issuer or serial does not match signer",
+            ));
         }
     }
     Ok(())
