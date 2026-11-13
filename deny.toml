@@ -1,3 +1,31 @@
+# Checked by `cargo deny check`: advisories, bans, licences and sources.
+
+# Every feature of every workspace member, for every target, so that optional
+# and platform-specific dependencies are checked too.
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities always fail. Unsound and unmaintained crates fail wherever
+# they are in the graph, and so do yanked releases.
+unsound = "all"
+unmaintained = "all"
+yanked = "deny"
+# An ignore that no longer matches anything must be removed.
+unused-ignored-advisory = "deny"
+# Each ignore states why the advisory cannot be triggered here and what would
+# change that. Re-read them whenever the cryptographic code changes.
+ignore = [
+    # Timing side channel in RSA private-key operations (decryption and
+    # signing). No patched release exists on the 0.9 line. Added 2026-11-12.
+    { id = "RUSTSEC-2023-0071", reason = "the workspace holds no RSA private key: `rsa` is used by tinfoil-verifier only, to parse public keys and verify RSA-PSS signatures over public data. Revisit if any crate ever signs, decrypts or generates keys with `rsa`, and remove once a patched release is in use." },
+    # Secret-dependent branches in big-integer arithmetic that is meant to be
+    # constant-time (subtraction, zero counting, division, Montgomery
+    # multiplication, equality, inversion). Patched only in 0.7.6, which the
+    # elliptic-curve 0.13 line cannot use. Added 2026-11-12.
+    { id = "RUSTSEC-2026-0387", reason = "no secret integer reaches `crypto-bigint` outside tests: it is used through `p256` and `p384` only, and the library code only verifies ECDSA signatures with them, over public keys, messages and signatures. Sealed request bodies use HPKE with X25519, which does not use `crypto-bigint`; the P-256 KEM that `hpke` also compiles is never instantiated. The only signing is in test code, which signs the certificates of a local test server with fixed keys that protect nothing. Revisit if any non-test code ever signs or performs key agreement with a NIST curve, or selects an HPKE KEM other than X25519, and remove once `crypto-bigint` >= 0.7.6 is in use." },
+]
+
 # TLS is pinned to the `ring` rustls provider so the workspace links on
 # Windows MSVC. These crates must never enter the dependency graph.
 [bans]
@@ -8,3 +36,37 @@ deny = [
     { crate = "native-tls" },
     { crate = "openssl-sys" },
 ]
+
+# The workspace is distributed under Apache-2.0, so every dependency must
+# offer a licence that allows that: permissive licences only, no copyleft.
+# A crate under an OR-expression passes through any one allowed alternative.
+[licenses]
+allow = [
+    # The workspace's own licence.
+    "Apache-2.0",
+    # Permissive; requires only that the copyright and permission notice be kept.
+    "MIT",
+    # Permissive; notice retention and no endorsement by the authors' names.
+    "BSD-3-Clause",
+    # Permissive; equivalent to MIT in effect, notice retention only.
+    "ISC",
+    # Permissive; covers the Unicode data tables and the code built from them,
+    # and requires only that the notice be kept.
+    "Unicode-3.0",
+    # Permissive data licence of the Mozilla root certificate list in
+    # `webpki-roots` and `webpki-root-certs`; no conditions on using the data.
+    "CDLA-Permissive-2.0",
+]
+# Licence texts must match almost exactly to count as detected.
+confidence-threshold = 0.93
+# An allowed licence that no crate needs any longer must be removed.
+unused-allowed-license = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The sealed-body protocol's client, which is released as git tags.
+allow-git = ["https://github.com/tinfoilsh/encrypted-http-body-protocol"]
+# Git dependencies must be pinned to a tag or a revision, not to a branch.
+required-git-spec = "tag"
