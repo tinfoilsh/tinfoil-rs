@@ -145,13 +145,18 @@ fn verification_verdict(kind: ErrorKind, layer: Option<Layer>) -> Verdict {
     }
 }
 
-/// The verdict for a failed request over the pinned connection. An
-/// attestation error there is the pin: the server does not present the
-/// verified key, which the policy layer's code reports. Any other failure
-/// says nothing about the enclave.
-fn channel_verdict(kind: ErrorKind) -> Verdict {
-    match kind {
-        ErrorKind::Attestation => Verdict::Rejected(CODE_POLICY_REJECTED),
+/// The verdict for a failed request over the pinned connection. A server
+/// that does not present the verified key makes the client verify again;
+/// a document that the verifier then rejects carries the code of the
+/// rejecting layer. Any other attestation error there is the pin itself,
+/// which the policy layer's code reports. Any other failure says nothing
+/// about the enclave.
+fn channel_verdict(kind: ErrorKind, layer: Option<Layer>) -> Verdict {
+    match (kind, layer) {
+        (ErrorKind::Attestation, Some(layer)) => {
+            facts::layer_code(layer).map_or(Verdict::Internal, Verdict::Rejected)
+        }
+        (ErrorKind::Attestation, None) => Verdict::Rejected(CODE_POLICY_REJECTED),
         _ => Verdict::Internal,
     }
 }
@@ -206,7 +211,7 @@ async fn verify(request: &Request) -> Outcome {
         .send()
         .await;
     if let Err(error) = response {
-        let verdict = channel_verdict(error.kind());
+        let verdict = channel_verdict(error.kind(), rejecting_layer(&error));
         return Outcome::of(verdict, format!("channel binding to {host}: {error}"));
     }
     // The verification that the connection was pinned to.
@@ -337,13 +342,30 @@ mod tests {
     }
 
     #[test]
-    fn only_a_refused_pin_rejects_the_channel() {
+    fn a_refused_pin_rejects_the_channel_unless_a_new_verification_was_rejected() {
         assert_eq!(
-            channel_verdict(ErrorKind::Attestation),
+            channel_verdict(ErrorKind::Attestation, None),
             Verdict::Rejected(CODE_POLICY_REJECTED)
         );
-        assert_eq!(channel_verdict(ErrorKind::Network), Verdict::Internal);
-        assert_eq!(channel_verdict(ErrorKind::Configuration), Verdict::Internal);
+        // The document of the verification that followed was rejected: the
+        // code is that of the rejecting layer.
+        assert_eq!(
+            channel_verdict(ErrorKind::Attestation, Some(Layer::Envelope)),
+            verification_verdict(ErrorKind::Attestation, Some(Layer::Envelope))
+        );
+        assert_ne!(
+            channel_verdict(ErrorKind::Attestation, Some(Layer::Envelope)),
+            Verdict::Rejected(CODE_POLICY_REJECTED)
+        );
+        assert_eq!(channel_verdict(ErrorKind::Network, None), Verdict::Internal);
+        assert_eq!(
+            channel_verdict(ErrorKind::Network, Some(Layer::Envelope)),
+            Verdict::Internal
+        );
+        assert_eq!(
+            channel_verdict(ErrorKind::Configuration, None),
+            Verdict::Internal
+        );
     }
 
     /// An error that only passes on its source.
@@ -364,9 +386,10 @@ mod tests {
 
     #[test]
     fn the_rejecting_layer_is_found_among_the_sources() {
+        let nonce = tinfoil::verifier::random_nonce().expect("the random source");
         // Not a document at all: the envelope layer rejects it.
         let rejection = Verifier::new()
-            .verify_v3(b"{}", &[0; 32], Some("owner/name"))
+            .verify_v3(b"{}", &nonce, Some("owner/name"))
             .unwrap_err();
         assert!(matches!(rejection, VerifierError::Verification(_)));
         let wrapped = Wrapper(Box::new(Wrapper(Box::new(rejection))));
@@ -374,7 +397,7 @@ mod tests {
 
         // A usage error is not a rejection, and neither is another error.
         let usage = Verifier::new()
-            .verify_v3(b"{}", &[0; 32], Some(""))
+            .verify_v3(b"{}", &nonce, Some(""))
             .unwrap_err();
         assert!(matches!(usage, VerifierError::Usage(_)));
         assert_eq!(rejecting_layer(&Wrapper(Box::new(usage))), None);
