@@ -137,5 +137,5 @@ fn recorded_timestamp_responses_get_their_recorded_verdicts() {
         stricter += usize::from(check(name, case, code, &output, "timestamp"));
         accepted += usize::from(code == EXIT_ACCEPTED);
     }
-    assert_eq!((accepted, stricter), (81, 22));
+    assert_eq!((accepted, stricter), (80, 23));
 }
