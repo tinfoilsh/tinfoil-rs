@@ -4,7 +4,7 @@
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
-use tinfoil_conformance::EXIT_INTERNAL;
+use tinfoil_conformance::{EXIT_INTERNAL, live};
 
 fn main() -> ExitCode {
     exit(run())
@@ -18,21 +18,44 @@ fn run() -> i32 {
     };
     match command.as_str() {
         "capabilities" => write_json(&tinfoil_conformance::capabilities(), 0),
-        // Not implemented yet. These commands take their own input, not a
-        // stage input, so they are answered here instead of being decoded as
-        // a stage; the suite skips a command that reports itself unsupported.
-        "live-verify" | "capture" => {
+        // Not implemented. The command takes arguments, not a stage input,
+        // so it is answered here instead of being decoded as a stage.
+        "capture" => {
             let (output, code) = tinfoil_conformance::unsupported(&command);
             write_json(&output, code)
         }
-        stage => {
-            let mut stdin = Vec::new();
-            if let Err(error) = std::io::stdin().read_to_end(&mut stdin) {
-                eprintln!("reading input: {error}");
+        live::COMMAND => {
+            let Some(stdin) = read_stdin() else {
                 return EXIT_INTERNAL;
+            };
+            let outcome = live::run(&stdin);
+            if let Some(diagnostic) = &outcome.diagnostic {
+                eprintln!("{}: {diagnostic}", live::COMMAND);
             }
+            // A run without a verdict prints nothing to stdout.
+            match &outcome.output {
+                Some(output) => write_json(output, outcome.code),
+                None => outcome.code,
+            }
+        }
+        stage => {
+            let Some(stdin) = read_stdin() else {
+                return EXIT_INTERNAL;
+            };
             let (output, code) = tinfoil_conformance::run(stage, &stdin);
             write_json(&output, code)
+        }
+    }
+}
+
+/// Reads all of stdin, or reports why it could not be read.
+fn read_stdin() -> Option<Vec<u8>> {
+    let mut stdin = Vec::new();
+    match std::io::stdin().read_to_end(&mut stdin) {
+        Ok(_) => Some(stdin),
+        Err(error) => {
+            eprintln!("reading input: {error}");
+            None
         }
     }
 }
