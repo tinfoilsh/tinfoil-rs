@@ -69,4 +69,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
-        run: gh release create "$TAG_NAME" --generate-notes
+        # A pre-release version (v0.3.0-rc.1) is a GitHub pre-release, not the latest release.
+        run: |
+          flags=()
+          if [[ "$TAG_NAME" == *-* ]]; then
+            flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$TAG_NAME" --generate-notes "${flags[@]}"
