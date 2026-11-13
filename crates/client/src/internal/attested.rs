@@ -109,9 +109,8 @@ impl<V: Evidence> AttestedClient<V> {
     /// As [`new`](Self::new), with the client's cache secret made from the
     /// `secret` of `settings` by `resolve`.
     ///
-    /// `resolve` may store a secret. It runs last, after everything that
-    /// can fail, so that nothing is stored for a client that cannot be
-    /// made.
+    /// `resolve` runs last, after everything that can fail, so that no
+    /// secret is resolved for a client that cannot be made.
     pub(crate) fn new_with(
         transport: Transport<V>,
         settings: Settings,

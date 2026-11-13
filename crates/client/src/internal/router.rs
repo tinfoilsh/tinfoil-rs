@@ -100,9 +100,8 @@ pub(crate) async fn discover<V: Evidence>(
 ///
 /// `resolve` turns the `user_cache_secret` option into the client's
 /// secret. It runs once and last: after discovery has chosen and verified
-/// a router, and after everything else that can fail, so a client that
-/// cannot be created stores no secret. It may read or create a small file,
-/// and does so synchronously.
+/// a router, and after everything else that can fail, so that a client
+/// that cannot be created resolves no secret.
 pub(crate) async fn connect<V: Evidence>(
     list: impl Future<Output = Vec<String>>,
     enclave_for: impl Fn(&str) -> Result<Enclave<V>, Error>,

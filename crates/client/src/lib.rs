@@ -106,9 +106,9 @@
 //!   `/completions` or `/responses`; to a body that is not a single JSON
 //!   object; to a body in which `user_cache_secret` appears more than
 //!   once or with a value that is not a string; or, on a router client
-//!   that has no secret from its option, the environment or its file,
-//!   when the operating system supplies no random bytes for a new one. A
-//!   non-empty `user_cache_secret` string in the body is kept.
+//!   without the option, when the operating system supplies no random
+//!   bytes for the secret of the process. A non-empty `user_cache_secret`
+//!   string in the body is kept.
 //! - **The router list is not trusted.** [`RouterHttpClient`] takes its
 //!   candidates from a list that is fetched over ordinary HTTPS, and
 //!   verifies each router like any other enclave before it uses it. A
