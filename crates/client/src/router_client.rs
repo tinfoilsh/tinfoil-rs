@@ -200,6 +200,11 @@ impl RouterHttpClientBuilder {
     /// file belong to the user that runs the program, with the modes
     /// `0700` and `0600`; or remove the file, and the directory too if it
     /// belongs to another user, so that the client creates them anew.
+    ///
+    /// The owner and the modes are checked on Unix only. On Windows the
+    /// client does not inspect the file's access control list: the file
+    /// is as private as the user's profile directory, whose default
+    /// permissions admit the user, the system and administrators.
     pub fn user_cache_secret(mut self, secret: impl Into<String>) -> Self {
         self.options.common.user_cache_secret = Some(Secret::new(secret));
         self

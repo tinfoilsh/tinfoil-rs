@@ -33,8 +33,11 @@ differences.
 tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.2.3" }
 
 # 0.3
-tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.3.0" }
+tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "<release tag>" }
 ```
+
+For `<release tag>`, use the latest release tag from the repository's
+[releases page](https://github.com/tinfoilsh/tinfoil-rs/releases).
 
 The minimum supported Rust version is still 1.88. The package is still named
 `tinfoil`; it now lives in `crates/client`, which Cargo finds by name.
@@ -118,8 +121,13 @@ let client = EnclaveOpenAIClient::builder(enclave, Some(repo), config)
 
 The OpenAI client uses the base URL verbatim as its API base, so include the
 path that your proxy serves the API under (for example `…/v1/`). The base URL
-must be HTTPS (or `http://` on localhost), without credentials, a query string
-or a fragment. With the router, `RouterOpenAIClient::builder(config)` takes
+must be HTTPS, without credentials, a query string or a fragment. Plain
+`http://` is accepted only for a loopback host: the name `localhost` (not
+`localhost.` and not a subdomain), an IPv4 address in `127.0.0.0/8`, or the
+IPv6 address `[::1]` in any spelling (`[0:0:0:0:0:0:0:1]` is the same
+address). An IPv4 address must be written as four decimal numbers, so
+`127.1` and `0x7f.0.0.1` are refused, and an IPv4 address mapped into IPv6
+(`[::ffff:127.0.0.1]`) does not count as loopback. With the router, `RouterOpenAIClient::builder(config)` takes
 the same two setters, and the router that discovery chooses is named to the
 proxy in the `X-Tinfoil-Enclave-Url` header.
 
@@ -337,7 +345,8 @@ the `tinfoil-verifier` crate:
 - On Unix the stored secret is used only if the file and `~/.tinfoil` belong
   to the current user and grant nothing to the group or to others (`0600` in
   `0700`, as the SDKs create them), and only if the file is at most 4 KiB.
-  Otherwise the client uses a random secret for the life of the process.
+  Otherwise the client uses a random secret for the life of the process. On
+  Windows the file's access control list is not inspected.
 - The secret is added to the JSON body of `POST` requests to
   `…/chat/completions`, `…/completions` and `…/responses`, also for requests
   that you send through the HTTP clients. A non-empty `user_cache_secret` in

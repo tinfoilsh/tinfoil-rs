@@ -93,9 +93,12 @@
 //!   an attestation error, after which the client verifies again and
 //!   sends the request once more if its body can be sent again. A request
 //!   whose streamed body turns out to be empty goes out unsealed and is
-//!   held to the rules of a sealed one: a `2xx` response, a response that
-//!   claims to be sealed and the key-configuration problem are
-//!   attestation errors, the last without a replay.
+//!   held to the rules of a sealed one: a `2xx` response and a response
+//!   that claims to be sealed are attestation errors. So is the
+//!   key-configuration problem in answer to such a request, but it is not
+//!   a key rejection, since nothing was sealed to a key: the current
+//!   verification stays in place, the client does not verify again, and
+//!   the request is not sent again.
 //! - **A request without a cache secret uses the prompt-cache namespace
 //!   that all such requests share.** No secret is added by an enclave
 //!   client whose `user_cache_secret` option is unset; to a request that

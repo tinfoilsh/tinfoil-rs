@@ -16,11 +16,11 @@ Coming from 0.2? See [MIGRATION.md](MIGRATION.md).
 
 ## Installation
 
-Releases are git tags of this repository. Depend on a tag:
+Releases are git tags of this repository. Depend on a tag, with the latest release tag from the repository's [releases page](https://github.com/tinfoilsh/tinfoil-rs/releases) in place of `<release tag>`:
 
 ```toml
 [dependencies]
-tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.3.0" }
+tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "<release tag>" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -28,7 +28,7 @@ For the verifier alone:
 
 ```toml
 [dependencies]
-tinfoil-verifier = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.3.0" }
+tinfoil-verifier = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "<release tag>" }
 ```
 
 The clients need a Tokio runtime. There is no blocking API.
@@ -142,12 +142,12 @@ async fn through_a_proxy(api_key: &str) -> Result<RouterOpenAIClient, tinfoil::E
 }
 ```
 
-The base URL must be absolute and use HTTPS (`http://` is accepted for `localhost` and loopback addresses only), without credentials, a query string or a fragment. The mode is the option and nothing else: a client never falls back from one mode to the other.
+The base URL must be absolute and use HTTPS, without credentials, a query string or a fragment. `http://` is accepted only for the name `localhost` and for a loopback IP address: `127.0.0.0/8` or `[::1]`. An IPv4 address must be written as four decimal numbers. The mode is the option and nothing else: a client never falls back from one mode to the other.
 
 ## Limits of the protection
 
 - **EHBP mode does not authenticate the end of a response.** Each part of a sealed response body is authenticated, and so is the order of the parts, so the content cannot be forged, altered or reordered. Nothing marks the last part, though: whoever controls the connection (a proxy, for example) can end a sealed response early between two parts, or return one with no parts at all, and the read ends without an error. A response that is cut inside a part is an error. If you need to know that a response is complete, check its own terminator: that the JSON document is whole, or that the final event of a stream arrived. The SSE parser (`chat_relaxed().create_stream`, `sse::parse_event_stream`) reports a stream that is cut inside an event, and a stream that ends after a complete event without `[DONE]` ends without an error.
-- **In EHBP mode a request without a body is sent as it is**, and its response is returned as it arrives: neither is encrypted or authenticated. An error response (a status outside `2xx`) to a sealed request that is not sealed itself is passed through as received, because a proxy may refuse a request before it reaches the enclave; its status, headers and body are not authenticated either. There are exceptions, none of which returns a response. A `2xx` response to a sealed request that is not sealed is refused. The enclave's key rejection (a `422` with the protocol's key-configuration problem) is not returned either: it is an attestation error, and after a new verification the client sends the request once more if its body can be sent again. A request whose streamed body turns out to be empty goes out unsealed but is held to the rules of a sealed one: a `2xx` response, any response that claims to be sealed, and the key-configuration problem are attestation errors (the last without a replay).
+- **In EHBP mode a request without a body is sent as it is**, and its response is returned as it arrives: neither is encrypted or authenticated. An error response (a status outside `2xx`) to a sealed request that is not sealed itself is passed through as received, because a proxy may refuse a request before it reaches the enclave; its status, headers and body are not authenticated either. There are exceptions, none of which returns a response. A `2xx` response to a sealed request that is not sealed is refused. The enclave's key rejection (a `422` with the protocol's key-configuration problem) is not returned either: it is an attestation error, and after a new verification the client sends the request once more if its body can be sent again. A request whose streamed body turns out to be empty goes out unsealed but is held to the rules of a sealed one: a `2xx` response and any response that claims to be sealed are attestation errors. So is the key-configuration problem in answer to such a request, but it is not a key rejection, since nothing was sealed to a key: the current verification stays in place, the client does not verify again, and the request is not sent again.
 - **Requests without a cache secret share one prompt-cache namespace** with every other request that carries none. No secret is added by an enclave client whose `user_cache_secret` option is unset; to a request that is not a `POST` with a body to a path ending in `/chat/completions`, `/completions` or `/responses`; to a body that is not a single JSON object; to a body in which `user_cache_secret` appears more than once or with a value that is not a string, which is sent as it is; or, on a router client without the option, the environment variable or a stored secret, when the operating system supplies no random bytes for a new one. A non-empty `user_cache_secret` string in the body is kept.
 - **The OpenAI clients bound the responses that are read into memory for you.** async-openai reads a response whole, and in EHBP mode an error response, or the response to a request without a body, can come from a proxy. A body beyond its limit is not cut short: the read fails with a network error (`Error::from_openai` finds it, except in a typed stream, whose errors hold a message only).
 
@@ -293,7 +293,7 @@ These bounds are fixed:
 - `tinfoil::multimodal` builds image and audio content parts from files and bytes.
 - `tinfoil::sse::parse_event_stream` is the bounded server-sent-event parser, for streaming endpoints that you call through an HTTP client.
 
-**Prompt caching.** Multi-user services must scope prompt caches to each end user: set `user_cache_secret(..)` on the builder, or a `user_cache_secret` member in a request's JSON body, which wins. When the option is unset, the router clients take the secret from `TINFOIL_USER_CACHE_SECRET` or from `~/.tinfoil/user_cache_secret`, which they create on first use (mode `0600`, in a directory of mode `0700`); the enclave clients add nothing. A stored secret that is not the user's own is not used: a file or directory that is a symbolic link, a file larger than 4 KiB, and on Unix a file or directory that belongs to another user or that the group or others can access. The client leaves it as it is and uses a random secret for the life of the process instead. See [Prompt caching](https://docs.tinfoil.sh/sdk/prompt-caching).
+**Prompt caching.** Multi-user services must scope prompt caches to each end user: set `user_cache_secret(..)` on the builder, or a `user_cache_secret` member in a request's JSON body, which wins. When the option is unset, the router clients take the secret from `TINFOIL_USER_CACHE_SECRET` or from `~/.tinfoil/user_cache_secret`, which they create on first use (mode `0600`, in a directory of mode `0700`); the enclave clients add nothing. A stored secret that is not the user's own is not used: a file or directory that is a symbolic link, a file larger than 4 KiB, and on Unix a file or directory that belongs to another user or that the group or others can access. The client leaves it as it is and uses a random secret for the life of the process instead. The owner and mode checks are made on Unix only. On Windows the crate does not inspect the file's access-control list: the file is protected by the user's profile directory, whose default permissions admit the user, the system and administrators, and the crate does not verify that. See [Prompt caching](https://docs.tinfoil.sh/sdk/prompt-caching).
 
 ## Cargo features
 

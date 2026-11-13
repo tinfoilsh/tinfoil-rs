@@ -22,6 +22,13 @@
 //! others, is left as it is and not used: someone else could have chosen
 //! or read the secret, and with it the cache scope. The client then uses
 //! a secret of its own for the life of the process.
+//!
+//! The owner and the mode are checked on Unix only. On Windows the access
+//! control list of the file is not inspected: the standard library gives
+//! no access to it, and this crate has no unsafe code. There the file is
+//! as private as the user's profile directory, whose default permissions
+//! admit the user, the system and administrators; the checks for a
+//! symbolic link, the kind of file and its size still apply.
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -203,7 +210,9 @@ fn check_private(metadata: &fs::Metadata) -> io::Result<()> {
     }
 }
 
-/// Where there are no owners and modes, there is nothing to check.
+/// On other platforms the owner and the permissions are not checked: on
+/// Windows they are an access control list, which is not read here. The
+/// file is then as private as the directory that holds it.
 #[cfg(not(unix))]
 fn check_private(_: &fs::Metadata) -> io::Result<()> {
     Ok(())
