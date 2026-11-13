@@ -1839,3 +1839,33 @@ fn recorded_validations_have_their_recorded_outcome() {
     assert!(cases.len() > 200);
     assert!(outcomes.values().all(|count| *count > 30), "{outcomes:?}");
 }
+
+#[test]
+fn authenticated_collateral_bounds_the_quote_lifetime() {
+    for id in [
+        "chain/quote-root/reissued-expires-now",
+        "pcs/header/tcb-info/chain-root-reissued-expires-now",
+        "pcs/header/qe-identity/chain-root-reissued-expires-now",
+        "pcs/header/pck-crl/chain-root-reissued-expires-now",
+        "pcs/crl/pck-crl/next-update-now",
+        "pcs/crl/root-crl/next-update-now",
+        "json/tcb-info/next-update-at-now-zero-offset",
+        "json/qe-identity/next-update-at-now-zero-offset",
+    ] {
+        let sample = Recorded::load(id);
+        let evidence = || Evidence {
+            quote: &sample.quote,
+            pcs: &sample.pcs,
+        };
+        let verified = authenticate(evidence(), sample.now, sample.root.as_deref()).unwrap();
+        assert_eq!(verified.expires_at(), sample.now, "{id}");
+        let after = sample
+            .now
+            .checked_add(std::time::Duration::from_nanos(1))
+            .unwrap();
+        assert!(
+            authenticate(evidence(), after, sample.root.as_deref()).is_err(),
+            "{id}"
+        );
+    }
+}

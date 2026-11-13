@@ -46,6 +46,8 @@ const PEM_CERTIFICATE_END: &[u8] = b"-----END CERTIFICATE-----";
 /// What a verified quote establishes beyond its own contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedQuote {
+    /// The earliest expiry of the certificates and collateral used.
+    pub expires_at: Instant,
     /// The PCK certificate that certifies the quoting enclave.
     pub pck_certificate: Certificate,
     /// The PCK certificate's SGX extensions.
@@ -401,7 +403,7 @@ fn verify_pck_chain(
 }
 
 /// Checks that nothing of the collateral has expired at `now`.
-fn check_collateral_expiry(collateral: &Collateral, now: Instant) -> Result<(), QuoteError> {
+fn check_collateral_expiry(collateral: &Collateral, now: Instant) -> Result<Instant, QuoteError> {
     let checks = [
         (collateral.tcb_info.value.next_update, "TCB info"),
         (collateral.qe_identity.value.next_update, "QE identity"),
@@ -432,12 +434,14 @@ fn check_collateral_expiry(collateral: &Collateral, now: Instant) -> Result<(), 
             "PCK revocation list root certificate",
         ),
     ];
+    let mut expires_at = collateral.tcb_info.value.next_update;
     for (end, what) in checks {
         if now > end {
             return Err(expired(what));
         }
+        expires_at = expires_at.min(end);
     }
-    Ok(())
+    Ok(expires_at)
 }
 
 /// Verifies a signed collateral document: its stated root has the profile
@@ -752,7 +756,11 @@ pub fn verify_quote(
     let collateral = obtain_collateral(&extensions.fmspc, ca, collateral)?;
 
     verify_pck_chain(&chain, &collateral, trusted_root, now)?;
-    check_collateral_expiry(&collateral, now)?;
+    let expires_at = check_collateral_expiry(&collateral, now)?
+        .min(chain.pck.not_after())
+        .min(chain.intermediate.not_after())
+        .min(chain.root.not_after())
+        .min(trusted_root.not_after());
     verify_response(
         &collateral.tcb_info_issuer,
         &collateral.tcb_info.signed_bytes,
@@ -805,6 +813,7 @@ pub fn verify_quote(
     verify_qe_report(&signed_data.qe_report, &collateral.qe_identity.value)?;
 
     Ok(VerifiedQuote {
+        expires_at,
         pck_certificate: chain.pck,
         pck_extensions: extensions,
         tcb_info: collateral.tcb_info.value,

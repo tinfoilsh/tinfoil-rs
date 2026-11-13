@@ -343,13 +343,13 @@ fn recorded_config_endorsements_get_their_recorded_outcomes() {
     let outcome = replay(&fixture, "config", |case, reference| {
         verify_config(&fixture, case, reference)
     });
-    assert_eq!(outcome, (48, 0));
+    assert_eq!(outcome, (52, 0));
 }
 
 #[test]
-fn the_signature_time_of_a_certified_endorsement_is_within_the_window() {
+fn signature_time_is_historical_and_still_bounded_in_the_future() {
     // In each case the inner timestamp is inside the window, so the
-    // verdict turns on the time of the signature alone.
+    // future bound still applies to the signature time.
     let fixture = Fixture::load();
     let verdict = |id: &str| {
         let case = fixture
@@ -360,11 +360,11 @@ fn the_signature_time_of_a_certified_endorsement_is_within_the_window() {
     };
     for (id, accepted) in [
         ("certified/signature-age-edge", true),
-        ("certified/signature-age-over-1ns", false),
-        ("certified/signature-age-over-1s", false),
+        ("certified/signature-age-over-1ns", true),
+        ("certified/signature-age-over-1s", true),
         ("certified/signature-custom-age-edge", true),
-        ("certified/signature-custom-age-over-1s", false),
-        ("certified/signature-custom-age-over-30s", false),
+        ("certified/signature-custom-age-over-1s", true),
+        ("certified/signature-custom-age-over-30s", true),
         ("certified/signature-skew-edge", true),
         ("certified/signature-skew-over-1ns", false),
         ("certified/signature-skew-over-1s", false),

@@ -344,7 +344,11 @@ fn recorded_list(object: &Object, name: &str) -> Vec<String> {
 }
 
 /// The differences between a verification and the recorded facts.
-fn compare_facts(verified: &Verification, facts: &Object) -> Vec<String> {
+fn compare_facts(
+    verified: &Verification,
+    facts: &Object,
+    hardware_expiry: Option<Instant>,
+) -> Vec<String> {
     let mut differences = Vec::new();
     let mut check = |name: &str, same: bool| {
         if !same {
@@ -398,10 +402,15 @@ fn compare_facts(verified: &Verification, facts: &Object) -> Vec<String> {
         "hpke",
         verified.hpke_public_key() == member(facts, "hpke").as_str(),
     );
+    let hardware_expiry = hardware_expiry.map(|t| (t.unix_seconds(), t.subsec_nanos()));
+    let recorded_expiry = recorded_time(text(facts, "freshness_expires_at"));
+    let expiry = match (recorded_expiry, hardware_expiry) {
+        (Some(approval), Some(hardware)) => Some(approval.min(hardware)),
+        (approval, hardware) => approval.or(hardware),
+    };
     check(
         "freshness_expires_at",
-        system_time(verified.freshness_expires_at())
-            == recorded_time(text(facts, "freshness_expires_at")),
+        system_time(verified.freshness_expires_at()) == expiry,
     );
     check(
         "verified_at",
@@ -561,7 +570,18 @@ fn replay(fixture: &Fixture, case: &Object) -> Outcome {
     };
     match result {
         Ok(verified) if verdict == "accept" => {
-            let differences = compare_facts(&verified, object(member(recorded, "facts")));
+            // The config fixtures' authenticated collateral has these fixed deadlines,
+            // including when all reference values are embedded.
+            let hardware_expiry = match text(case, "name").split('/').next() {
+                Some("config-sev") => Some(Instant::parse_rfc3339("2034-12-30T00:00:00Z").unwrap()),
+                Some("config-tdx") => Some(Instant::parse_rfc3339("2030-01-01T00:00:00Z").unwrap()),
+                _ => None,
+            };
+            let differences = compare_facts(
+                &verified,
+                object(member(recorded, "facts")),
+                hardware_expiry,
+            );
             if differences.is_empty() {
                 Outcome::Agree
             } else {

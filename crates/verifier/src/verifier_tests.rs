@@ -1063,7 +1063,10 @@ fn a_config_authorizer_never_chooses_the_kind_of_error() {
         (config.name.as_deref(), config.reference.as_deref()),
         (None, None)
     );
-    assert_eq!(verified.freshness_expires_at(), None);
+    assert_eq!(
+        verified.freshness_expires_at(),
+        at("2034-12-30T00:00:00Z").to_system_time()
+    );
 }
 
 #[test]
