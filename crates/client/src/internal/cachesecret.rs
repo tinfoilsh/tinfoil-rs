@@ -114,7 +114,7 @@ mod tests {
         let first = exposed(generate()).unwrap();
         let second = exposed(generate()).unwrap();
         assert!(is_generated(&first));
-        assert_ne!(first, second);
+        assert!(first != second, "two generated secrets are equal");
     }
 
     #[test]
@@ -125,7 +125,10 @@ mod tests {
         let empty = exposed(resolve(Some(Secret::new("")))).unwrap();
         let unset = exposed(resolve(None)).unwrap();
         assert!(is_generated(&unset));
-        assert_eq!(empty, unset);
+        assert!(
+            empty == unset,
+            "an empty option did not select the process secret"
+        );
     }
 
     #[test]
@@ -139,7 +142,7 @@ mod tests {
         });
         assert!(is_generated(&first));
         for other in &others {
-            assert_eq!(other, &first);
+            assert!(other == &first, "a thread got a different secret");
         }
     }
 
@@ -202,11 +205,15 @@ mod tests {
         if env::var_os(CHILD_MARKER).is_none() {
             return;
         }
+        // The messages never print a secret.
         let first = exposed(resolve(None)).unwrap();
-        assert!(is_generated(&first), "{first}");
-        assert_ne!(first, FROM_ENV);
-        assert_ne!(first, FROM_FILE);
-        assert_eq!(exposed(resolve(None)).unwrap(), first);
+        assert!(is_generated(&first), "the secret is not a generated one");
+        assert!(first != FROM_ENV, "the secret came from the environment");
+        assert!(first != FROM_FILE, "the secret came from the file");
+        assert!(
+            exposed(resolve(None)).unwrap() == first,
+            "the process secret changed"
+        );
         // The option still wins.
         let explicit = exposed(resolve(Some(Secret::new("explicit"))));
         assert_eq!(explicit.as_deref(), Some("explicit"));

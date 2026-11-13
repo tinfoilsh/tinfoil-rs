@@ -953,13 +953,17 @@ mod options {
             let body = r#"{"model":"m","n":1}"#;
             let first = sent_by_a_router_client(None, body).await;
             let second = sent_by_a_router_client(None, body).await;
-            assert_eq!(first, second);
+            // The messages never print the generated secret.
+            assert!(first == second, "two router clients sent different secrets");
             let secret = cachesecret::resolve(None).unwrap();
             let expected = format!(
                 r#"{{"model":"m","n":1,"user_cache_secret":"{}"}}"#,
                 secret.expose()
             );
-            assert_eq!(first, expected);
+            assert!(
+                first == expected,
+                "the body is not the original with the process secret appended"
+            );
             assert_eq!(secret.expose().len(), 64);
         })
         .await
