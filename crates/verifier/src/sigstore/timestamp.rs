@@ -9,10 +9,13 @@ use ::der::asn1::{BitString, Int, ObjectIdentifier, OctetString, OctetStringRef}
 use ::der::{Decode, Encode, Sequence, Tag, Tagged};
 use cms::content_info::ContentInfo;
 use cms::signed_data::{SignedData, SignerIdentifier, SignerInfo};
+use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use x509_cert::attr::Attributes;
 use x509_cert::ext::Extensions;
-use x509_cert::ext::pkix::name::GeneralName;
+use x509_cert::ext::pkix::certpolicy::PolicyInformation;
+use x509_cert::ext::pkix::name::{GeneralName, GeneralNames};
+use x509_cert::serial_number::SerialNumber;
 use x509_cert::spki::AlgorithmIdentifierOwned;
 
 use super::SigstoreError;
@@ -46,6 +49,11 @@ const OID_TIME_STAMPING: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.
 const OID_ECDSA_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
 const OID_ECDSA_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3");
 const OID_ECDSA_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.4");
+const OID_SIGNING_CERTIFICATE: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.2.12");
+const OID_SIGNING_CERTIFICATE_V2: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.2.47");
+const OID_SHA1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.14.3.2.26");
 const OID_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
 const OID_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.2");
 const OID_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.3");
@@ -390,6 +398,8 @@ impl ParsedTimestamp {
             return Err(error("timestamp signer is not the trusted certificate"));
         }
 
+        check_certificate_binding(signed_attributes, signer)?;
+
         let signature_hash = if info.signature_algorithm.oid == OID_ECDSA_SHA256 {
             EcdsaHash::Sha256
         } else if info.signature_algorithm.oid == OID_ECDSA_SHA384 {
@@ -503,15 +513,19 @@ impl ParsedTimestamp {
     }
 }
 
-/// The single value of the first signed attribute with the given
+/// The single value of the unique signed attribute with the given
 /// identifier, or `None` when no attribute has it.
 fn attribute(
     attributes: &Attributes,
     oid: ObjectIdentifier,
 ) -> Result<Option<&::der::Any>, SigstoreError> {
-    let Some(attribute) = attributes.iter().find(|attribute| attribute.oid == oid) else {
+    let mut matching = attributes.iter().filter(|attribute| attribute.oid == oid);
+    let Some(attribute) = matching.next() else {
         return Ok(None);
     };
+    if matching.next().is_some() {
+        return Err(error(format!("duplicate timestamp signed attribute {oid}")));
+    }
     let mut values = attribute.values.iter();
     match (values.next(), values.next()) {
         (Some(value), None) => Ok(Some(value)),
@@ -519,6 +533,123 @@ fn attribute(
             "timestamp signed attribute {oid} must have exactly one value"
         ))),
     }
+}
+
+#[derive(Sequence)]
+struct IssuerSerial {
+    issuer: GeneralNames,
+    serial: SerialNumber,
+}
+
+#[derive(Sequence)]
+struct EssCertId {
+    cert_hash: OctetString,
+    #[asn1(optional = "true")]
+    issuer_serial: Option<IssuerSerial>,
+}
+
+#[derive(Sequence)]
+struct EssCertIdV2 {
+    #[asn1(optional = "true")]
+    hash_algorithm: Option<AlgorithmIdentifierOwned>,
+    cert_hash: OctetString,
+    #[asn1(optional = "true")]
+    issuer_serial: Option<IssuerSerial>,
+}
+
+#[derive(Sequence)]
+struct SigningCertificate {
+    certs: Vec<EssCertId>,
+    #[asn1(optional = "true")]
+    policies: Option<Vec<PolicyInformation>>,
+}
+
+#[derive(Sequence)]
+struct SigningCertificateV2 {
+    certs: Vec<EssCertIdV2>,
+    #[asn1(optional = "true")]
+    policies: Option<Vec<PolicyInformation>>,
+}
+
+fn check_certificate_binding(
+    attributes: &Attributes,
+    signer: &Certificate,
+) -> Result<(), SigstoreError> {
+    let legacy = attribute(attributes, OID_SIGNING_CERTIFICATE)?;
+    let modern = attribute(attributes, OID_SIGNING_CERTIFICATE_V2)?;
+    if legacy.is_none() && modern.is_none() {
+        return Err(error("timestamp lacks a signing-certificate attribute"));
+    }
+    if let Some(value) = legacy {
+        let binding: SigningCertificate = value
+            .decode_as()
+            .map_err(|_| error("malformed timestamp signing-certificate attribute"))?;
+        let first = binding
+            .certs
+            .first()
+            .ok_or_else(|| error("timestamp signing-certificate attribute has no certificates"))?;
+        check_cert_id(
+            OID_SHA1,
+            first.cert_hash.as_bytes(),
+            first.issuer_serial.as_ref(),
+            signer,
+        )?;
+    }
+    if let Some(value) = modern {
+        let binding: SigningCertificateV2 = value
+            .decode_as()
+            .map_err(|_| error("malformed timestamp signing-certificate-v2 attribute"))?;
+        let first = binding
+            .certs
+            .first()
+            .ok_or_else(|| error("timestamp signing-certificate attribute has no certificates"))?;
+        let algorithm = match &first.hash_algorithm {
+            Some(algorithm) => {
+                if algorithm
+                    .parameters
+                    .as_ref()
+                    .is_some_and(|p| p.tag() != Tag::Null)
+                {
+                    return Err(error("invalid timestamp certificate hash parameters"));
+                }
+                algorithm.oid
+            }
+            None => OID_SHA256,
+        };
+        check_cert_id(
+            algorithm,
+            first.cert_hash.as_bytes(),
+            first.issuer_serial.as_ref(),
+            signer,
+        )?;
+    }
+    Ok(())
+}
+
+fn check_cert_id(
+    algorithm: ObjectIdentifier,
+    digest: &[u8],
+    issuer_serial: Option<&IssuerSerial>,
+    signer: &Certificate,
+) -> Result<(), SigstoreError> {
+    // SHA-1 here identifies a certificate for ESSCertID; it is not a signature algorithm.
+    let expected = if algorithm == OID_SHA1 {
+        Sha1::digest(signer.der()).to_vec()
+    } else {
+        hash(digest_of(algorithm)?, signer.der())
+    };
+    if digest != expected {
+        return Err(error("timestamp certificate hash does not match signer"));
+    }
+    if let Some(named) = issuer_serial {
+        let certificate = &signer.parsed().tbs_certificate;
+        if named.serial != certificate.serial_number || !named.issuer.iter().any(|name| {
+            matches!(name, GeneralName::DirectoryName(issuer) if *issuer == certificate.issuer)
+        }) {
+            return Err(error("timestamp certificate issuer or serial does not match signer"));
+        }
+    }
+    Ok(())
 }
 
 /// Whether a signer identifier names `certificate` by issuer and serial

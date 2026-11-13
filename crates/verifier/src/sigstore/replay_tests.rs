@@ -526,7 +526,7 @@ fn recorded_timestamp_responses_get_their_recorded_verdicts() {
             assert_eq!(Some(at.as_str()), text(case, "timestamp"), "{name}");
         }
     }
-    assert_eq!(accepted, 81);
+    assert_eq!(accepted, 80);
 }
 
 #[test]
