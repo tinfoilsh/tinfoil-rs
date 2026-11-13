@@ -112,6 +112,13 @@ pub enum Authenticated {
 }
 
 impl Authenticated {
+    pub(crate) fn expires_at(&self) -> Instant {
+        match self {
+            Authenticated::SevSnp(quote) => quote.expires_at(),
+            Authenticated::Tdx(quote) => quote.expires_at(),
+        }
+    }
+
     /// The platform label of the quote:
     /// [`PLATFORM_SEV_SNP`](crate::policy::PLATFORM_SEV_SNP) or
     /// [`PLATFORM_TDX`](crate::policy::PLATFORM_TDX).

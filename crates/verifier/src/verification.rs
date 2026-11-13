@@ -199,17 +199,11 @@ impl Verification {
         crypto_material_data(&self.crypto_material, id, format)
     }
 
-    /// When the freshness proofs stop vouching for the document.
+    /// The earliest approval or current CPU collateral deadline.
     ///
-    /// A cached verification must not authorize new requests at or after
-    /// this time, and verifying the same proofs again does not extend it.
-    /// For a code release it is the earlier deadline of the code and
-    /// platform witnesses; for a config it is the earliest deadline among
-    /// the config, platform and runtime approvals. Embedded components and
-    /// a config accepted by the caller's authorizer add no deadline, so
-    /// the result is `None` when no endorsement was consulted: renewal is
-    /// then the caller's own policy, and `None` is not a promise that the
-    /// evidence stays valid.
+    /// Cached verification must not authorize requests at or after this
+    /// time. Hardware bounds the result even when every reference is
+    /// embedded. Verifying the same evidence again does not extend it.
     pub fn freshness_expires_at(&self) -> Option<SystemTime> {
         self.freshness_expires_at
     }

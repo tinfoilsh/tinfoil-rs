@@ -895,7 +895,7 @@ impl ConfigVerifier {
     /// 7. the statement is v2;
     /// 8. at least one RFC 3161 timestamp over the bundle's signature
     ///    verifies ([`verify_signature_timestamps`]); the first is the
-    ///    signature time, and it is within the window;
+    ///    signature time, and it is not beyond the future bound;
     /// 9. the signing certificate has the registry profile at the
     ///    signature time ([`verify_signing_certificate`]);
     /// 10. the certificate's URI is the statement's registry identifier;
@@ -988,7 +988,9 @@ impl ConfigVerifier {
                     .first()
                     .copied()
                     .ok_or_else(|| error("threshold not met for verified signed timestamps"))?;
-                window.check(signed_at)?;
+                if signed_at > window.latest {
+                    return Err(error("signature timestamp is in the future"));
+                }
                 let certificate_der = match &bundle.key_material {
                     KeyMaterial::Certificate(der) => der.as_slice(),
                     KeyMaterial::PublicKey { .. } => &[],

@@ -29,6 +29,7 @@ pub struct Evidence<'a> {
 /// expected value.
 #[derive(Debug, Clone)]
 pub struct Quote {
+    expires_at: Instant,
     identity: String,
     launch: Register,
     report: Report,
@@ -39,6 +40,10 @@ pub struct Quote {
 }
 
 impl Quote {
+    pub(crate) fn expires_at(&self) -> Instant {
+        self.expires_at
+    }
+
     /// The authenticated machine identifier: the CHIP_ID in lowercase hex.
     pub fn identity(&self) -> &str {
         &self.identity
@@ -183,6 +188,12 @@ pub fn authenticate(
         ));
     }
     Ok(Quote {
+        expires_at: verified
+            .vcek
+            .not_after()
+            .min(roots.ask.not_after())
+            .min(roots.ark.not_after())
+            .min(crl.next_update()),
         identity: identity(&report.chip_id)?,
         launch: Register::new(report.measurement),
         report,
@@ -202,6 +213,7 @@ impl Quote {
         let parsed = Report::parse(report).unwrap();
         let vcek = Certificate::from_der(vcek_der).unwrap();
         Quote {
+            expires_at: vcek.not_after(),
             identity: identity(&parsed.chip_id).unwrap(),
             launch: Register::new(parsed.measurement),
             product_line: ProductLine::from_report(&parsed).unwrap(),
@@ -251,6 +263,10 @@ mod tests {
         assert_eq!(quote.report_bytes(), TURIN_REPORT);
         assert_eq!(quote.report().version, 5);
         assert_eq!(quote.vcek().der(), TURIN_VCEK_DER);
+        assert_eq!(
+            quote.expires_at(),
+            Crl::from_der(TURIN_CRL_DER).unwrap().next_update()
+        );
         assert_eq!(quote.vcek_extensions().hwid, TURIN_REPORT[0x1A0..0x1A8]);
         let Measurement::SevSnp { launch } = quote.measurement() else {
             panic!("not an SEV-SNP measurement");

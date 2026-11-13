@@ -28,6 +28,7 @@ pub struct Evidence<'a> {
 /// value.
 #[derive(Debug, Clone)]
 pub struct Quote {
+    expires_at: Instant,
     identity: String,
     mrtd: Register,
     rtmrs: [Register; 4],
@@ -39,6 +40,10 @@ pub struct Quote {
 }
 
 impl Quote {
+    pub(crate) fn expires_at(&self) -> Instant {
+        self.expires_at
+    }
+
     /// The authenticated machine identifier: the PPID in lowercase hex.
     pub fn identity(&self) -> &str {
         &self.identity
@@ -90,6 +95,7 @@ impl Quote {
         let quote = QuoteV4::parse(quote_bytes)?;
         let [rtmr0, rtmr1, rtmr2, rtmr3] = quote.body.rtmrs;
         Ok(Quote {
+            expires_at: Instant::UNIX_EPOCH,
             identity: String::new(),
             mrtd: Register::new(quote.body.mr_td),
             rtmrs: [
@@ -647,6 +653,7 @@ pub fn authenticate(
 
     let [rtmr0, rtmr1, rtmr2, rtmr3] = quote.body.rtmrs;
     Ok(Quote {
+        expires_at: verified.expires_at,
         identity,
         mrtd: Register::new(quote.body.mr_td),
         rtmrs: [

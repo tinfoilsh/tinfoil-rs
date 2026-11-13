@@ -381,8 +381,8 @@ impl Verifier {
     /// On success the caller must bind its traffic to the returned keys
     /// and enforce
     /// [`freshness_expires_at`](Verification::freshness_expires_at) when
-    /// it is set. With every reference embedded there is no deadline, and
-    /// renewal is the caller's.
+    /// it is set. Hardware collateral bounds the result even when every
+    /// reference is embedded.
     ///
     /// The verifier puts no bound on the size of `doc`, and parsing takes
     /// memory in proportion to it. The caller bounds the document where it
@@ -493,11 +493,15 @@ impl Verifier {
             .validate()
             .map_err(|cause| rejected_at(Layer::Policy)(cause.into()))?;
 
-        let freshness_expires_at = endorsed
-            .freshness_expires_at
-            .map(system_time)
-            .transpose()
-            .map_err(|cause| rejected_at(Layer::Provenance)(cause.into()))?;
+        let expires_at = authenticated.expires_at();
+        let freshness_expires_at = Some(
+            system_time(
+                endorsed
+                    .freshness_expires_at
+                    .map_or(expires_at, |at| at.min(expires_at)),
+            )
+            .map_err(|cause| rejected_at(Layer::Quote)(cause.into()))?,
+        );
         Ok(Verification {
             config_repo: endorsed.selected.repo,
             code_digest: endorsed.selected.digest,
