@@ -12,6 +12,9 @@
 //! implements no stage, says so in its capabilities, and reports
 //! [`EXIT_UNSUPPORTED`] for every stage once its input has parsed, so that
 //! the suite skips its fixtures instead of failing them.
+//!
+//! The `live-verify` command ([`live`]) verifies a running enclave through
+//! the client instead. It uses no seam and is part of every build.
 
 // Clippy has no test exemption for this lint; see the workspace lints.
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
@@ -196,13 +199,7 @@ pub struct Rejection {
 /// The input is parsed before the stage is looked at, so malformed input is
 /// reported as such for every stage name.
 pub fn run(stage: &str, stdin: &[u8]) -> (Output, i32) {
-    // A struct also deserialises from an array, member by position, so the
-    // input is required to be an object before it is decoded.
-    let is_object = stdin
-        .iter()
-        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
-        .is_some_and(|byte| *byte == b'{');
-    if !is_object {
+    if !is_object(stdin) {
         return malformed(stage);
     }
     let Ok(input) = serde_json::from_slice::<Input>(stdin) else {
@@ -228,6 +225,16 @@ pub fn run(stage: &str, stdin: &[u8]) -> (Output, i32) {
     }
 }
 
+/// Whether the input starts as a JSON object. A struct also deserialises
+/// from an array, member by position, so an input is required to be an
+/// object before it is decoded.
+fn is_object(stdin: &[u8]) -> bool {
+    stdin
+        .iter()
+        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+        .is_some_and(|byte| *byte == b'{')
+}
+
 /// The adapter's self-description, which the suite reads to decide which
 /// fixtures apply.
 pub fn capabilities() -> serde_json::Value {
@@ -239,8 +246,8 @@ pub fn capabilities() -> serde_json::Value {
             "stages_supported": stages_supported(),
             "synthetic_roots": synthetic_roots(),
             "freshness_enforced": cfg!(tinfoil_conformance),
-            "live_verify": false,
-            "channel_binding": "none",
+            "live_verify": true,
+            "channel_binding": live::CHANNEL_BINDING,
         },
     })
 }
@@ -312,6 +319,8 @@ fn malformed(stage: &str) -> (Output, i32) {
     (output, EXIT_MALFORMED)
 }
 
+mod facts;
+pub mod live;
 #[cfg(tinfoil_conformance)]
 mod stages;
 
@@ -459,6 +468,13 @@ mod tests {
         for stage in stages {
             assert!(STAGES.contains(&stage.as_str().unwrap()));
         }
+    }
+
+    #[test]
+    fn capabilities_report_the_live_command_in_every_build() {
+        let capabilities = capabilities();
+        assert_eq!(capabilities["v3"]["live_verify"], true);
+        assert_eq!(capabilities["v3"]["channel_binding"], "tls-spki");
     }
 }
 

@@ -79,13 +79,35 @@ fn malformed_stdin_exits_with_the_malformed_code() {
 }
 
 #[test]
-fn live_verify_is_unsupported_whatever_its_input() {
-    let output = adapter(
-        &["live-verify"],
-        r#"{"host":"example.com","repo":"org/repo"}"#,
-    );
+fn live_verify_refuses_malformed_input_before_it_contacts_anything() {
+    for stdin in [
+        "",
+        "{",
+        r#"{"host":"enclave.example"}"#,
+        r#"{"host":"https://enclave.example","repo":"owner/name"}"#,
+    ] {
+        let output = adapter(&["live-verify"], stdin);
+        assert_eq!(output.status.code(), Some(EXIT_MALFORMED), "{stdin}");
+        let json = stdout_json(&output);
+        assert_eq!(json["stage"], "live-verify");
+        assert_eq!(json["accepted"], false);
+        assert_eq!(json["rejection"]["code"], "MALFORMED_INPUT");
+        assert!(!output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn capabilities_report_live_verification_over_a_pinned_connection() {
+    let capabilities = stdout_json(&adapter(&["capabilities"], ""));
+    assert_eq!(capabilities["v3"]["live_verify"], true);
+    assert_eq!(capabilities["v3"]["channel_binding"], "tls-spki");
+}
+
+#[test]
+fn capture_is_unsupported() {
+    let output = adapter(&["capture", "-host", "enclave.example"], "");
     assert_eq!(output.status.code(), Some(EXIT_UNSUPPORTED));
-    assert_eq!(stdout_json(&output)["stage"], "live-verify");
+    assert_eq!(stdout_json(&output)["stage"], "capture");
 }
 
 #[test]

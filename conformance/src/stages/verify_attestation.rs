@@ -5,46 +5,13 @@ use std::time::SystemTime;
 
 use tinfoil_verifier::conformance::instant::Instant;
 
-use tinfoil_verifier::{Error, Expected, Layer, Verifier};
+use tinfoil_verifier::{Error, Verifier};
 
-use super::authenticate_quote::{SEV_SNP_MEASUREMENT_TYPE, TDX_MEASUREMENT_TYPE, measurement};
 use super::{accepted, appraisal_time, is_unset_clock, rejected};
 use crate::{
-    AcceptOutputs, CODE_ENVELOPE_REJECTED, CODE_MALFORMED_INPUT, CODE_POLICY_REJECTED,
-    CODE_PROVENANCE_REJECTED, CODE_QUOTE_REJECTED, EXIT_INTERNAL, EXIT_MALFORMED, Input,
-    Measurement, Output, Rejection, STAGE_VERIFY, decode_base64, decode_hex, malformed,
+    CODE_ENVELOPE_REJECTED, CODE_MALFORMED_INPUT, EXIT_INTERNAL, EXIT_MALFORMED, Input, Output,
+    Rejection, STAGE_VERIFY, decode_base64, decode_hex, facts, malformed,
 };
-
-/// Lays out expected registers for the wire, in platform order, with an
-/// empty string for a register that is left unconstrained. `None` for a
-/// platform that the wire contract does not know.
-fn expected(registers: &Expected) -> Option<Measurement> {
-    let hex = |register: &Option<tinfoil_verifier::Register>| {
-        register
-            .map(|register| register.to_string())
-            .unwrap_or_default()
-    };
-    Some(match registers {
-        Expected::SevSnp { launch } => Measurement {
-            kind: SEV_SNP_MEASUREMENT_TYPE.to_owned(),
-            registers: vec![hex(launch)],
-        },
-        Expected::Tdx {
-            mrtd,
-            rtmr0,
-            rtmr1,
-            rtmr2,
-            rtmr3,
-        } => Measurement {
-            kind: TDX_MEASUREMENT_TYPE.to_owned(),
-            registers: [mrtd, rtmr0, rtmr1, rtmr2, rtmr3]
-                .into_iter()
-                .map(hex)
-                .collect(),
-        },
-        _ => return None,
-    })
-}
 
 /// The output and exit code for an error of the verifier: a usage error is
 /// malformed input, and a rejection carries the code of its layer. An
@@ -63,13 +30,7 @@ fn rejection(error: &Error) -> (Output, i32) {
             };
             return (output, EXIT_MALFORMED);
         }
-        Error::Verification(rejected) => match rejected.layer() {
-            Layer::Envelope => Some(CODE_ENVELOPE_REJECTED),
-            Layer::Provenance => Some(CODE_PROVENANCE_REJECTED),
-            Layer::Quote => Some(CODE_QUOTE_REJECTED),
-            Layer::Policy => Some(CODE_POLICY_REJECTED),
-            _ => None,
-        },
+        Error::Verification(rejected) => facts::layer_code(rejected.layer()),
         _ => None,
     };
     match code {
@@ -118,20 +79,8 @@ pub(crate) fn run(input: &Input, verifier: &Verifier) -> (Output, i32) {
         Ok(verified) => verified,
         Err(error) => return rejection(&error),
     };
-    let (Some(tls_public_key_fp), Some(hpke_public_key)) =
-        (verified.tls_public_key_fp(), verified.hpke_public_key())
-    else {
-        return rejected(stage, CODE_ENVELOPE_REJECTED);
-    };
-    accepted(
-        stage,
-        Some(AcceptOutputs {
-            code_digest: verified.code_digest().to_owned(),
-            code_measurement: expected(verified.code_measurement()),
-            enclave_measurement: measurement(verified.enclave_measurement()),
-            tls_public_key_fp: tls_public_key_fp.to_owned(),
-            hpke_public_key: hpke_public_key.to_owned(),
-            ..AcceptOutputs::default()
-        }),
-    )
+    match facts::verified(&verified) {
+        Some(outputs) => accepted(stage, Some(outputs)),
+        None => rejected(stage, CODE_ENVELOPE_REJECTED),
+    }
 }

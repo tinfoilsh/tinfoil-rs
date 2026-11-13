@@ -2045,7 +2045,9 @@ dependencies = [
  "base64 0.22.1",
  "serde",
  "serde_json",
+ "tinfoil",
  "tinfoil-verifier",
+ "tokio",
 ]
 
 [[package]]

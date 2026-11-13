@@ -83,7 +83,7 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         env:
           TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
-        run: cargo test --locked -p tinfoil --test live --verbose -- --ignored
+        run: cargo test --locked -p tinfoil -p tinfoil-conformance --test live --verbose -- --ignored
 
   msrv:
     name: MSRV (1.88)

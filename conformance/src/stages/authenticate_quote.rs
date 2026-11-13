@@ -3,47 +3,16 @@
 
 use std::time::SystemTime;
 
-use tinfoil_verifier::Measurement as Registers;
 use tinfoil_verifier::conformance::document;
 use tinfoil_verifier::conformance::instant::Instant;
 use tinfoil_verifier::conformance::quote::{self, VendorRoots};
 
 use super::{accepted, appraisal_time, rejected, trusted_root, vendor_roots};
+use crate::facts::measurement;
 use crate::{
-    AcceptOutputs, CODE_QUOTE_REJECTED, Input, Measurement, Output, STAGE_AUTHENTICATE_QUOTE,
-    decode_base64, malformed,
+    AcceptOutputs, CODE_QUOTE_REJECTED, Input, Output, STAGE_AUTHENTICATE_QUOTE, decode_base64,
+    malformed,
 };
-
-/// The measurement type of an SEV-SNP quote on the wire.
-pub(crate) const SEV_SNP_MEASUREMENT_TYPE: &str = "https://tinfoil.sh/predicate/sev-snp-guest/v2";
-/// The measurement type of a TDX quote on the wire.
-pub(crate) const TDX_MEASUREMENT_TYPE: &str = "https://tinfoil.sh/predicate/tdx-guest/v2";
-
-/// Lays out authenticated registers for the wire, in platform order.
-/// `None` for a measurement of a platform that the wire contract does not
-/// know.
-pub(crate) fn measurement(registers: &Registers) -> Option<Measurement> {
-    Some(match registers {
-        Registers::SevSnp { launch } => Measurement {
-            kind: SEV_SNP_MEASUREMENT_TYPE.to_owned(),
-            registers: vec![launch.to_string()],
-        },
-        Registers::Tdx {
-            mrtd,
-            rtmr0,
-            rtmr1,
-            rtmr2,
-            rtmr3,
-        } => Measurement {
-            kind: TDX_MEASUREMENT_TYPE.to_owned(),
-            registers: [mrtd, rtmr0, rtmr1, rtmr2, rtmr3]
-                .into_iter()
-                .map(ToString::to_string)
-                .collect(),
-        },
-        _ => return None,
-    })
-}
 
 /// Runs the stage.
 ///

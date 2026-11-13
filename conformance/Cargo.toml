@@ -13,7 +13,12 @@ repository.workspace = true
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The client that `live-verify` connects to an enclave with. Without the
+# OpenAI clients, which the command does not use.
+tinfoil = { path = "../crates/client", default-features = false }
 tinfoil-verifier = { workspace = true }
+# The runtime that the client needs.
+tokio = { version = "1", default-features = false, features = ["rt"] }
 
 [lints]
 workspace = true
