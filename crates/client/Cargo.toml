@@ -127,10 +127,6 @@ futures-core = { version = "0.3", optional = true }
 # The trait of the service that is installed under async-openai.
 tower-service = { version = "0.3", optional = true }
 
-[target.'cfg(unix)'.dependencies]
-# `O_NOFOLLOW` for the cache-secret file.
-libc = "0.2"
-
 [dev-dependencies]
 # The enclave's side of the sealed-body protocol, for the local server that
 # the EHBP mode is tested against: `tinfoil-ehbp` has the client's side only.

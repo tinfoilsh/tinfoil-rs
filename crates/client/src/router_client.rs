@@ -180,31 +180,13 @@ impl RouterHttpClientBuilder {
     /// wins over it. Use an opaque random value, not a user ID or an API
     /// key.
     ///
-    /// Unset, the client takes the secret from the
-    /// `TINFOIL_USER_CACHE_SECRET` environment variable, and otherwise
-    /// from the file `~/.tinfoil/user_cache_secret`, which it creates with
-    /// a random secret on first use (mode `0600`, in a directory of mode
-    /// `0700`) and which the other Tinfoil SDKs on the machine share. This
-    /// is the only place where a client reads the environment or the file
-    /// system.
-    ///
-    /// A stored secret is used only if the file system shows that it is
-    /// the user's own. The file or its directory is left untouched and
-    /// not used when it is a symbolic link or not a regular file or
-    /// directory, when the file is larger than 4 KiB or holds no secret,
-    /// and, on Unix, when either belongs to another user or grants any
-    /// access to the group or to others. The client then uses a random
-    /// secret that lasts for the process, so its requests are still
-    /// scoped, but share no cache with other processes; `connect` does
-    /// not fail. To get a stored secret again, make the directory and the
-    /// file belong to the user that runs the program, with the modes
-    /// `0700` and `0600`; or remove the file, and the directory too if it
-    /// belongs to another user, so that the client creates them anew.
-    ///
-    /// The owner and the modes are checked on Unix only. On Windows the
-    /// client does not inspect the file's access control list: the file
-    /// is as private as the user's profile directory, whose default
-    /// permissions admit the user, the system and administrators.
+    /// Unset, the client uses a random secret that is generated in memory
+    /// once per process and that every router client in the process
+    /// shares; requests from different processes therefore share no
+    /// prompt cache. The client never reads the secret from the
+    /// environment or from a file: to keep a secret that stays the same
+    /// across processes or machines, generate and store it in the
+    /// application, and pass it here.
     pub fn user_cache_secret(mut self, secret: impl Into<String>) -> Self {
         self.options.common.user_cache_secret = Some(Secret::new(secret));
         self
@@ -251,15 +233,12 @@ impl RouterHttpClientBuilder {
     /// discovers anew. The `timeout` option bounds the whole call.
     ///
     /// The user cache secret is resolved last, once the client is certain
-    /// to be created; resolving it never fails. Unless the option or the
-    /// environment supplies the secret, this reads or creates one small
-    /// file in the home directory, synchronously.
+    /// to be created; resolving it never fails and does no I/O.
     ///
     /// # Cancel safety
     ///
     /// Dropping the future stops discovery and closes its connections. No
-    /// client exists. The cache secret file, if this call created it,
-    /// stays.
+    /// client exists.
     pub async fn connect(self) -> Result<RouterHttpClient, Error> {
         let (fallback, settings) = self.prepare()?;
         let mode = mode_for(settings.mode)?;

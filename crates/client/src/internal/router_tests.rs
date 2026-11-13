@@ -825,8 +825,6 @@ async fn the_timeout_bounds_discovery_and_the_fallback_together() {
 // The options and the secret of the router client.
 
 mod options {
-    use std::ffi::OsString;
-
     use super::*;
     use crate::RouterHttpClient;
     use crate::internal::cachesecret;
@@ -888,32 +886,12 @@ mod options {
         assert!(message.contains("explicit enclave"), "{message}");
     }
 
-    /// A directory of its own for one test, removed when the test ends.
-    struct Home(std::path::PathBuf);
-
-    impl Home {
-        fn new() -> Self {
-            let mut suffix = [0u8; 8];
-            getrandom::fill(&mut suffix).unwrap();
-            let name = format!("tinfoil-router-test-{}", fetch::lower_hex(&suffix));
-            let path = std::env::temp_dir().join(name);
-            std::fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for Home {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     #[tokio::test(start_paused = true)]
-    async fn a_client_that_fails_after_discovery_stores_no_secret() {
+    async fn a_client_that_fails_after_discovery_resolves_no_secret() {
         unstuck(async {
-            let home = Home::new();
             let world = World::new(vec![("a.example", vec![good("a")])]);
-            let at = home.0.clone();
+            let resolved = Arc::new(Mutex::new(0));
+            let count = Arc::clone(&resolved);
             // A pinned client cannot take a base URL on another origin:
             // the client is refused once its router is known.
             let error = connect(
@@ -924,73 +902,84 @@ mod options {
                     base_url: Some(Url::parse("https://proxy.example.com/").unwrap()),
                     ..settings(None)
                 },
-                move |option| cachesecret::resolve_from(option, None, Some(at)),
+                move |option| {
+                    *count.lock().unwrap() += 1;
+                    cachesecret::resolve(option)
+                },
             )
             .await
             .err()
             .expect("no client");
             assert_eq!(error.kind(), ErrorKind::Configuration);
-            // The router was discovered and verified, and nothing was stored.
+            // The router was discovered and verified, and no secret was
+            // resolved.
             assert_eq!(world.attempts("a.example"), 1);
-            assert!(!home.0.join(cachesecret::DIR_NAME).exists());
+            assert_eq!(*resolved.lock().unwrap(), 0);
+        })
+        .await
+    }
+
+    /// A router client made with the crate's resolver and `option`, and
+    /// the body that it sent for `body`.
+    async fn sent_by_a_router_client(option: Option<&str>, body: &str) -> String {
+        let world = World::new(vec![("a.example", vec![good("a")])]);
+        let mode = Recording::default();
+        let sent = Arc::clone(&mode.sent);
+        let client = connect(
+            hosts(&["a.example"]),
+            world.enclave_for(),
+            Arc::new(mode),
+            Settings {
+                secret: option.map(Secret::new),
+                ..settings(None)
+            },
+            cachesecret::resolve,
+        )
+        .await
+        .unwrap();
+        let executor: Arc<dyn Execute> = Arc::new(client);
+        let url = "https://a.example/v1/chat/completions";
+        RequestBuilder::new(executor, Method::POST, into_url(url))
+            .body(body.to_owned())
+            .send()
+            .await
+            .unwrap();
+        sent.lock().unwrap()[0].1.clone()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn router_clients_without_the_option_share_the_secret_of_the_process() {
+        unstuck(async {
+            let body = r#"{"model":"m","n":1}"#;
+            let first = sent_by_a_router_client(None, body).await;
+            let second = sent_by_a_router_client(None, body).await;
+            assert_eq!(first, second);
+            let secret = cachesecret::resolve(None).unwrap();
+            let expected = format!(
+                r#"{{"model":"m","n":1,"user_cache_secret":"{}"}}"#,
+                secret.expose()
+            );
+            assert_eq!(first, expected);
+            assert_eq!(secret.expose().len(), 64);
         })
         .await
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_router_client_takes_its_secret_from_the_option_the_environment_or_the_file() {
+    async fn the_option_and_then_the_body_win_over_the_secret_of_the_process() {
         unstuck(async {
-            let home = Home::new();
-            let url = "https://a.example/v1/chat/completions";
-            let cases: [(Option<&str>, Option<&str>, Option<&str>); 3] = [
-                (Some("from-option"), Some("from-env"), Some("from-option")),
-                (None, Some("from-env"), Some("from-env")),
-                // Neither: a secret is generated and stored under the home.
-                (None, None, None),
-            ];
-            for (option, env, expected) in cases {
-                let world = World::new(vec![("a.example", vec![good("a")])]);
-                let mode = Recording::default();
-                let sent = Arc::clone(&mode.sent);
-                let (env, at) = (env.map(OsString::from), home.0.clone());
-                let client = connect(
-                    hosts(&["a.example"]),
-                    world.enclave_for(),
-                    Arc::new(mode),
-                    Settings {
-                        secret: option.map(Secret::new),
-                        ..settings(None)
-                    },
-                    move |option| cachesecret::resolve_from(option, env, Some(at)),
-                )
-                .await
-                .unwrap();
-                let executor: Arc<dyn Execute> = Arc::new(client);
-                RequestBuilder::new(executor, Method::POST, into_url(url))
-                    .body("{}")
-                    .send()
-                    .await
-                    .unwrap();
-                let body = sent.lock().unwrap()[0].1.clone();
-                let stored = std::fs::read_to_string(
-                    home.0
-                        .join(cachesecret::DIR_NAME)
-                        .join(cachesecret::FILE_NAME),
-                )
-                .ok();
-                match expected {
-                    Some(secret) => {
-                        assert_eq!(body, format!(r#"{{"user_cache_secret":"{secret}"}}"#));
-                        // Nothing was stored for a secret that was given.
-                        assert_eq!(stored, None);
-                    }
-                    None => {
-                        let stored = stored.expect("a stored secret");
-                        assert_eq!(stored.len(), 64);
-                        assert_eq!(body, format!(r#"{{"user_cache_secret":"{stored}"}}"#));
-                    }
-                }
+            let from_option = sent_by_a_router_client(Some("from-option"), "{}").await;
+            assert_eq!(from_option, r#"{"user_cache_secret":"from-option"}"#);
+
+            // A non-empty string in the body wins over the option and over
+            // the secret of the process, and the body is sent as it is.
+            let body = r#"{ "user_cache_secret" : "from-body", "model":"m" }"#;
+            for option in [Some("from-option"), None] {
+                assert_eq!(sent_by_a_router_client(option, body).await, body);
             }
+            // A body that repeats the member is sent as it is.
+            let repeated = r#"{"user_cache_secret":"","user_cache_secret":""}"#;
+            assert_eq!(sent_by_a_router_client(None, repeated).await, repeated);
         })
         .await
     }

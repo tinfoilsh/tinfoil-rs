@@ -263,8 +263,7 @@ impl EnclaveHttpClientBuilder {
     /// to each of its users. Use an opaque random value, not a user ID or
     /// an API key.
     ///
-    /// Unset, this client adds nothing: it reads neither the environment
-    /// nor a file.
+    /// Unset, this client adds nothing.
     pub fn user_cache_secret(mut self, secret: impl Into<String>) -> Self {
         self.options.common.user_cache_secret = Some(Secret::new(secret));
         self

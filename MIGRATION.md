@@ -355,6 +355,9 @@ the `tinfoil-verifier` crate:
   command.
 - **Reading `TINFOIL_API_KEY`.** Nothing in the SDK reads an API key from the
   environment.
+- **Reading `TINFOIL_USER_CACHE_SECRET` and `~/.tinfoil/user_cache_secret`.**
+  Nothing in the SDK reads the cache secret from the environment or from a
+  file; pass it with `user_cache_secret(..)`.
 - **`Client::api_key()` / `SecureClient::api_key()`.** The caller owns the
   key.
 
@@ -391,14 +394,18 @@ the `tinfoil-verifier` crate:
 
 - The client-level secret is an option of the builder
   (`user_cache_secret(..)`), not a method on a built client.
-- When the option is unset, **router clients** resolve the secret as before:
-  `TINFOIL_USER_CACHE_SECRET`, then `~/.tinfoil/user_cache_secret`, created on
-  first use. **Enclave clients add no secret** unless the option is set.
-- On Unix the stored secret is used only if the file and `~/.tinfoil` belong
-  to the current user and grant nothing to the group or to others (`0600` in
-  `0700`, as the SDKs create them), and only if the file is at most 4 KiB.
-  Otherwise the client uses a random secret for the life of the process. On
-  Windows the file's access control list is not inspected.
+- A request's secret is, in order: a non-empty `user_cache_secret` string in
+  its JSON body; the client's `user_cache_secret(..)` option; and, for
+  **router clients** only, a random secret that is generated in memory once
+  per process and that every router client in the process shares. **Enclave
+  clients add no secret** unless the option is set.
+- **`TINFOIL_USER_CACHE_SECRET` and `~/.tinfoil/user_cache_secret` are no
+  longer read**, and the file is no longer created. Without the option, each
+  process uses its own random secret, so prompt-cache hits are no longer
+  shared across processes. To keep a secret that stays the same across
+  processes or machines, store it in your application and pass it with
+  `user_cache_secret(..)`; an existing `~/.tinfoil/user_cache_secret` can be
+  read by the application and passed in the same way.
 - The secret is added to the JSON body of `POST` requests to
   `…/chat/completions`, `…/completions` and `…/responses`, also for requests
   that you send through the HTTP clients. A non-empty `user_cache_secret` in
