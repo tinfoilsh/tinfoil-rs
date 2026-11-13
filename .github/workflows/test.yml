@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 permissions: {}
 
@@ -57,6 +56,12 @@ jobs:
       - name: Run integration tests
         run: cargo test --locked --test '*' --verbose
 
+      - name: Test the verifier crate
+        run: cargo test --locked -p tinfoil-verifier --verbose
+
+      - name: Test the verifier crate with serde
+        run: cargo test --locked -p tinfoil-verifier --features serde --verbose
+
       - name: Check if API key is available
         # Bash only — Windows runner uses pwsh by default, but bash is
         # available there too. Force it explicitly so the heredoc syntax
@@ -107,3 +112,87 @@ jobs:
 
       - name: Unit tests on MSRV
         run: cargo test --locked --lib --verbose
+
+      - name: Test the verifier crate on MSRV
+        run: cargo test --locked -p tinfoil-verifier --verbose
+
+      - name: Test the verifier crate with serde on MSRV
+        run: cargo test --locked -p tinfoil-verifier --features serde --verbose
+
+  lint:
+    name: Format and clippy (v3 crates)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup update stable && rustup default stable && rustup component add rustfmt clippy
+
+      - name: Check formatting
+        run: cargo fmt --check -p tinfoil-verifier -p tinfoil-conformance
+
+      - name: Run clippy
+        run: cargo clippy --locked -p tinfoil-verifier -p tinfoil-conformance --all-targets -- -D warnings
+
+      # The conformance adapter's stages, and the verifier modules that they
+      # reach, are compiled only with this flag.
+      - name: Run clippy with the conformance stages
+        env:
+          RUSTFLAGS: --cfg tinfoil_conformance
+        run: cargo clippy --locked -p tinfoil-verifier -p tinfoil-conformance --all-targets -- -D warnings
+
+  conformance:
+    name: Conformance vectors
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check out the shared vectors
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: tinfoilsh/tinfoil-conformance
+          # Pinned; bump deliberately when the vector suite changes.
+          ref: e0063e74ba050706643ee86e11ed4340759e34f1
+          path: tinfoil-conformance
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup update stable && rustup default stable
+
+      - name: Run the adapter over the vectors
+        env:
+          # Compiles the adapter's stages in; without the flag every fixture
+          # is skipped.
+          RUSTFLAGS: --cfg tinfoil_conformance
+          # Documentation tests are built by rustdoc, which takes its own flags.
+          RUSTDOCFLAGS: --cfg tinfoil_conformance
+          TINFOIL_CONFORMANCE_VECTORS: ${{ github.workspace }}/tinfoil-conformance/vectors/v3
+        # The verifier's own tests run here too: with the vectors at hand
+        # its replay of them checks every recorded verdict, and it fails
+        # if a case is skipped.
+        run: |
+          cargo test --locked -p tinfoil-conformance -- --nocapture
+          cargo test --locked -p tinfoil-verifier
+
+  deny:
+    name: Banned dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check banned crates
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check bans

@@ -1,0 +1,18 @@
+[package]
+name = "tinfoil-conformance"
+version = "0.0.0"
+description = "Conformance adapter that drives the Tinfoil verifier from the shared v3 vectors"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tinfoil-verifier = { path = "../crates/verifier" }
+
+[lints]
+workspace = true

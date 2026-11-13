@@ -1,0 +1,3 @@
+crates/verifier/src/trust/data/* -text
+crates/verifier/tests/data/** -text
+conformance/tests/data/** -text
