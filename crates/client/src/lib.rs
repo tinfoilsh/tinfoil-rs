@@ -210,5 +210,11 @@ pub use router_client::{RouterHttpClient, RouterHttpClientBuilder};
 #[doc = include_str!("../../../README.md")]
 struct ReadmeExamples;
 
+// And the examples of the migration guide. Its examples of the earlier API
+// are marked `ignore`.
+#[cfg(all(doctest, feature = "openai"))]
+#[doc = include_str!("../../../MIGRATION.md")]
+struct MigrationExamples;
+
 /// The version of this SDK.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

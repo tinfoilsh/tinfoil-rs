@@ -59,12 +59,17 @@ The environment is no longer read. Pass the key in an `OpenAIConfig`:
 ```rust,ignore
 // 0.2
 let client = tinfoil::Client::new_default().await?;
+```
 
+```rust,no_run
 // 0.3
 use tinfoil::async_openai::config::OpenAIConfig;
 
-let api_key = std::env::var("TINFOIL_API_KEY")?;
-let client = tinfoil::Client::connect(OpenAIConfig::new().with_api_key(api_key)).await?;
+async fn connect() -> Result<tinfoil::Client, Box<dyn std::error::Error>> {
+    let api_key = std::env::var("TINFOIL_API_KEY")?;
+    let client = tinfoil::Client::connect(OpenAIConfig::new().with_api_key(api_key)).await?;
+    Ok(client)
+}
 ```
 
 `Client::connect` discovers and verifies Tinfoil's router, as `new_default`
@@ -85,17 +90,21 @@ let client = tinfoil::Client::new(
     api_key,
 )
 .await?;
+```
 
+```rust,no_run
 // 0.3
 use tinfoil::EnclaveOpenAIClient;
 use tinfoil::async_openai::config::OpenAIConfig;
 
-let client = EnclaveOpenAIClient::connect(
-    "inference.tinfoil.sh",
-    Some("tinfoilsh/confidential-model-router"),
-    OpenAIConfig::new().with_api_key(api_key),
-)
-.await?;
+async fn connect(api_key: &str) -> Result<EnclaveOpenAIClient, tinfoil::Error> {
+    EnclaveOpenAIClient::connect(
+        "inference.tinfoil.sh",
+        Some("tinfoilsh/confidential-model-router"),
+        OpenAIConfig::new().with_api_key(api_key),
+    )
+    .await
+}
 ```
 
 The repository is an `Option<&str>`: `None` sets no pin, and `Some("")` is an
@@ -108,15 +117,26 @@ Proxy mode is a transport mode plus a base URL, on any client:
 ```rust,ignore
 // 0.2
 let client = tinfoil::Client::new_with_proxy(enclave, repo, api_key, proxy_url).await?;
+```
 
+```rust,no_run
 // 0.3
+use tinfoil::async_openai::config::OpenAIConfig;
 use tinfoil::{EnclaveOpenAIClient, TransportMode};
 
-let client = EnclaveOpenAIClient::builder(enclave, Some(repo), config)
-    .transport_mode(TransportMode::Ehbp)
-    .base_url(proxy_url)
-    .connect()
-    .await?;
+async fn connect(
+    enclave: &str,
+    repo: &str,
+    api_key: &str,
+    proxy_url: &str,
+) -> Result<EnclaveOpenAIClient, tinfoil::Error> {
+    let config = OpenAIConfig::new().with_api_key(api_key);
+    EnclaveOpenAIClient::builder(enclave, Some(repo), config)
+        .transport_mode(TransportMode::Ehbp)
+        .base_url(proxy_url)
+        .connect()
+        .await
+}
 ```
 
 The OpenAI client uses the base URL verbatim as its API base, so include the
@@ -138,10 +158,16 @@ Not needed after construction. To check or renew a verification:
 ```rust,ignore
 // 0.2
 let ground_truth = client.verify().await?;
+```
 
+```rust,no_run
 // 0.3
-let verified = client.http_client().ensure_verified().await?; // valid now
-let renewed = client.http_client().reverify().await?;         // verify again regardless
+async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
+    let verified = client.http_client().ensure_verified().await?; // valid now
+    let renewed = client.http_client().reverify().await?; // verify again regardless
+    println!("{} then {}", verified.code_digest(), renewed.code_digest());
+    Ok(())
+}
 ```
 
 ### Other methods of `Client`
@@ -187,14 +213,23 @@ let response = secure
     .bearer_auth(secure.api_key())
     .send()
     .await?;
+```
 
+```rust,no_run
 // 0.3
-let client = tinfoil::EnclaveHttpClient::connect(host, Some(repo)).await?;
-let response = client
-    .get(client.base_url().join("v1/models")?)
-    .bearer_auth(api_key)
-    .send()
-    .await?;
+async fn models(
+    host: &str,
+    repo: &str,
+    api_key: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let client = tinfoil::EnclaveHttpClient::connect(host, Some(repo)).await?;
+    let response = client
+        .get(client.base_url().join("v1/models")?)
+        .bearer_auth(api_key)
+        .send()
+        .await?;
+    Ok(response.text().await?)
+}
 ```
 
 The request builder has `header`, `headers`, `bearer_auth`, `body`, `json`,
@@ -208,22 +243,35 @@ work in both modes; in `TransportMode::Ehbp` they seal the body.
 ### A pinned measurement
 
 `with_measurement` skipped the provenance checks and compared one measurement.
-In 0.3 a pin is an additional check on top of the full verification:
+In 0.3 a pin is an additional check on top of the full verification, so the
+client is also given the repository that the enclave must run (`repo` below),
+or `None` to accept any config that the verifier's policy authorizes:
 
 ```rust,ignore
 // 0.2
 let secure = tinfoil::SecureClient::with_measurement(host, api_key, measurement);
+```
 
+```rust,no_run
 // 0.3
+use tinfoil::EnclaveHttpClient;
 use tinfoil::verifier::{Expected, Verifier};
 
-let verifier = Verifier::builder()
-    .pinned_registers(Expected::parse_sev_snp(launch_digest_hex)?)
-    .build()?;
-let client = tinfoil::EnclaveHttpClient::builder(host, Some(repo))
-    .verifier(verifier)
-    .connect()
-    .await?;
+/// `measurement` is the SEV-SNP launch digest in hexadecimal.
+async fn connect(
+    host: &str,
+    repo: &str,
+    measurement: &str,
+) -> Result<EnclaveHttpClient, Box<dyn std::error::Error>> {
+    let verifier = Verifier::builder()
+        .pinned_registers(Expected::parse_sev_snp(measurement)?)
+        .build()?;
+    let client = EnclaveHttpClient::builder(host, Some(repo))
+        .verifier(verifier)
+        .connect()
+        .await?;
+    Ok(client)
+}
 ```
 
 To verify against a config that you supply yourself rather than a repository,
@@ -264,15 +312,19 @@ what vouched for the enclave.
 Typed OpenAI calls returned `OpenAIError` in 0.2 as well. What is new is that
 a failure of the attested client under such a call can be recovered:
 
-```rust,ignore
+```rust,no_run
 // 0.3
-match client.chat().create(request).await {
-    Ok(response) => { /* … */ }
-    Err(error) => match tinfoil::Error::from_openai(&error) {
-        Some(cause) if cause.kind() == tinfoil::ErrorKind::Attestation => { /* not trusted */ }
-        Some(cause) => { /* configuration or network */ }
-        None => { /* the API's own error */ }
-    },
+use tinfoil::chat::CreateChatCompletionRequest;
+
+async fn ask(client: &tinfoil::Client, request: CreateChatCompletionRequest) {
+    match client.chat().create(request).await {
+        Ok(_response) => { /* … */ }
+        Err(error) => match tinfoil::Error::from_openai(&error) {
+            Some(cause) if cause.kind() == tinfoil::ErrorKind::Attestation => { /* not trusted */ }
+            Some(_cause) => { /* configuration or network */ }
+            None => { /* the API's own error */ }
+        },
+    }
 }
 ```
 
