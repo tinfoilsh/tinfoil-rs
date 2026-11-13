@@ -11,7 +11,7 @@ use reqwest::{Request, Response, StatusCode, Url};
 use tower_service::Service;
 
 use crate::error::{Error, ErrorKind};
-use crate::internal::{BoxFuture, fetch};
+use crate::internal::{BoxFuture, body, fetch};
 use crate::openai::retry::{MAX_RETRIES, Waits};
 use crate::options::TransportMode;
 use crate::request::Execute;
@@ -28,6 +28,13 @@ const INSUFFICIENT_QUOTA: &str = "insufficient_quota";
 /// [`TransportMode::Ehbp`] an error response can come from a proxy and is
 /// not authenticated, so its size is not left to whoever sent it.
 pub(crate) const MAX_ERROR_BODY_BYTES: usize = 1 << 20;
+
+/// The largest body of a successful response that is read into memory on
+/// the caller's behalf: by `async_openai` for a typed call, streamed or
+/// not, and by this crate for a relaxed call that is not streamed. It
+/// leaves room for a large batch of embeddings or a response that holds
+/// audio or images.
+pub(crate) const MAX_RESPONSE_BYTES: usize = 64 << 20;
 
 /// An `async_openai` client that sends through `http`, and the service
 /// that it sends through.
@@ -70,6 +77,11 @@ pub(crate) const MAX_ERROR_BODY_BYTES: usize = 1 << 20;
 ///   sent is the sealed one, whose length the transport declares, and the
 ///   mode refuses a request that sets the header; so there the header is
 ///   removed from the request that `async_openai` built.
+/// - **Sizes.** `async_openai` reads response bodies into memory, so the
+///   responses that it is handed are bounded ([`bounded`]): an error
+///   response at [`MAX_ERROR_BODY_BYTES`], a successful one, streamed or
+///   not, at [`MAX_RESPONSE_BYTES`]. A longer body fails where it is
+///   read, with the client's network error.
 /// - **Errors.** An error of `http` is returned boxed, which
 ///   `async_openai` reports as `OpenAIError::Boxed`;
 ///   [`Error::from_openai`] finds it there. A failed read of a response
@@ -236,9 +248,7 @@ pub(crate) async fn read_within(
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(OpenAIError::Reqwest)? {
         if chunk.len() > limit.saturating_sub(body.len()) {
-            return Err(boxed(Error::network(format!(
-                "the response body is larger than {limit} bytes"
-            ))));
+            return Err(boxed(body::too_large(limit)));
         }
         body.extend_from_slice(&chunk);
     }
@@ -256,8 +266,23 @@ impl Service<HttpRequestFactory> for Attested {
 
     fn call(&mut self, factory: HttpRequestFactory) -> Self::Future {
         let this = self.clone();
-        Box::pin(async move { this.send(&factory).await })
+        Box::pin(async move { this.send(&factory).await.map(bounded) })
     }
+}
+
+/// `response`, as it is handed to `async_openai`, which reads the body of
+/// every response into memory: whole when the call is not streamed and
+/// when the status is an error, and event by event, ahead of the caller,
+/// when it is streamed. The body fails once it exceeds
+/// [`MAX_RESPONSE_BYTES`], or [`MAX_ERROR_BODY_BYTES`] when the status is
+/// not a success ([`body::limit`]).
+fn bounded(response: Response) -> Response {
+    let limit = if response.status().is_success() {
+        MAX_RESPONSE_BYTES
+    } else {
+        MAX_ERROR_BODY_BYTES
+    };
+    body::limit(response, limit)
 }
 
 /// A client error as `async_openai` carries it.

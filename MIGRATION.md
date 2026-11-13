@@ -384,6 +384,14 @@ the `tinfoil-verifier` crate:
 - `timeout` bounds each attempt and each wait between attempts, not the call
   as a whole.
 
+### OpenAI response sizes
+
+- The OpenAI clients read at most 1 MiB of an error response and at most
+  64 MiB of a successful one, for typed calls (streamed or not) and for
+  `chat_relaxed().create`. A longer body fails the read with a network error;
+  it is not cut short. To download more than 64 MiB, send the request through
+  `http_client()` and read the body as a stream.
+
 ## New in 0.3
 
 - `RouterHttpClient` and `EnclaveHttpClient` as first-class HTTP clients, with

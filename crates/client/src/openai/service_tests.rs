@@ -834,10 +834,147 @@ async fn a_rate_limit_is_tried_again_whatever_its_body_holds() {
     .await
 }
 
+/// A response with `status` whose body is `size` bytes in chunks, with no
+/// declared length.
+fn chunked(status: u16, size: usize) -> Answer {
+    static CHUNK: [u8; 64 * 1024] = [b' '; 64 * 1024];
+    let whole = size / CHUNK.len();
+    let rest = bytes::Bytes::from_static(&CHUNK).slice(..size % CHUNK.len());
+    let chunks = std::iter::repeat_n(bytes::Bytes::from_static(&CHUNK), whole)
+        .chain(std::iter::once(rest))
+        .map(Ok::<_, std::io::Error>);
+    let response = http::Response::builder()
+        .status(status)
+        .body(reqwest::Body::wrap_stream(futures_util::stream::iter(
+            chunks,
+        )));
+    Answer::Whole(Response::from(response.unwrap()))
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_error_response_of_a_typed_call_is_read_up_to_its_limit_and_no_further() {
+    use super::MAX_ERROR_BODY_BYTES;
+    unstuck(async {
+        // Beyond the limit, with a declared length, without one, and
+        // without an end: the client's network error, found in the
+        // call's error. A server error is tried three times first.
+        let over: [fn(u16) -> Answer; 3] = [
+            |status| sized(status, MAX_ERROR_BODY_BYTES + 1),
+            |status| chunked(status, MAX_ERROR_BODY_BYTES + 1),
+            endless,
+        ];
+        for (index, answer) in over.into_iter().enumerate() {
+            for (status, attempts) in [(400, 1), (404, 1), (500, 3), (503, 3)] {
+                let f = fake(vec![ready("first")], None, move |_, _| answer(status)).await;
+                let error = f.openai.chat().create(chat_request()).await.unwrap_err();
+                let found = client_error(&error);
+                assert_eq!(found.kind(), ErrorKind::Network, "{index} {status}");
+                assert_eq!(found.to_string(), too_large(MAX_ERROR_BODY_BYTES));
+                assert!(!found.is_timeout());
+                assert_eq!(f.sent().len(), attempts, "{index} {status}");
+
+                // The same for a call that asked for a stream.
+                let f = fake(vec![ready("first")], None, move |_, _| answer(status)).await;
+                let result = f
+                    .openai
+                    .chat()
+                    .create_stream(streaming_chat_request())
+                    .await;
+                let error = result.err().expect("an error status");
+                assert_eq!(
+                    client_error(&error).to_string(),
+                    too_large(MAX_ERROR_BODY_BYTES),
+                    "{index} {status}"
+                );
+            }
+        }
+
+        // Exactly the limit: read whole, and reported as what it is.
+        for answer in [sized as fn(u16, usize) -> Answer, chunked] {
+            for status in [404, 502] {
+                let f = fake(vec![ready("first")], None, move |_, _| {
+                    answer(status, MAX_ERROR_BODY_BYTES)
+                })
+                .await;
+                let error = f.openai.chat().create(chat_request()).await.unwrap_err();
+                assert!(Error::from_openai(&error).is_none(), "{status}: {error:?}");
+                assert!(
+                    matches!(
+                        error,
+                        OpenAIError::JSONDeserialize(..) | OpenAIError::ApiError(_)
+                    ),
+                    "{status}: {error:?}"
+                );
+            }
+        }
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_successful_response_of_a_typed_call_is_read_up_to_its_limit_and_no_further() {
+    use super::MAX_RESPONSE_BYTES;
+    unstuck(async {
+        // Beyond the limit: the client's network error.
+        let over: [fn() -> Answer; 2] = [|| chunked(200, MAX_RESPONSE_BYTES + 1), || endless(200)];
+        for (index, answer) in over.into_iter().enumerate() {
+            let f = fake(vec![ready("first")], None, move |_, _| answer()).await;
+            let error = f.openai.chat().create(chat_request()).await.unwrap_err();
+            let found = client_error(&error);
+            assert_eq!(found.kind(), ErrorKind::Network, "{index}");
+            assert_eq!(found.to_string(), too_large(MAX_RESPONSE_BYTES), "{index}");
+            assert_eq!(f.sent().len(), 1, "{index}");
+        }
+        // Exactly the limit: read whole. It is whitespace, so the error
+        // is that of a body that is not the JSON of a completion.
+        let f = fake(vec![ready("first")], None, |_, _| {
+            chunked(200, MAX_RESPONSE_BYTES)
+        })
+        .await;
+        let error = f.openai.chat().create(chat_request()).await.unwrap_err();
+        assert!(Error::from_openai(&error).is_none());
+        match error {
+            OpenAIError::JSONDeserialize(_, text) => assert_eq!(text.len(), MAX_RESPONSE_BYTES),
+            other => panic!("{other:?}"),
+        }
+
+        // A typed stream is held to the same limit: events without end
+        // are delivered until the limit, and then the stream ends in an
+        // error, which holds a message only.
+        let f = fake(vec![ready("first")], None, |_, _| {
+            let event = bytes::Bytes::from(chunk(&"a".repeat(1 << 20)));
+            let body =
+                futures_util::stream::repeat_with(move || Ok::<_, std::io::Error>(event.clone()));
+            Answer::Whole(Response::from(http::Response::new(
+                reqwest::Body::wrap_stream(body),
+            )))
+        })
+        .await;
+        let mut stream = f
+            .openai
+            .chat()
+            .create_stream(streaming_chat_request())
+            .await
+            .unwrap();
+        let mut delivered = 0;
+        let error = loop {
+            match stream.next().await.expect("the stream ends in an error") {
+                Ok(_) => delivered += 1,
+                Err(error) => break error,
+            }
+        };
+        // Each event is a little more than 1 MiB.
+        assert_eq!(delivered, (MAX_RESPONSE_BYTES >> 20) - 1);
+        assert_unclassified_stream_error(&error);
+        assert!(stream.next().await.is_none());
+    })
+    .await
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_relaxed_call_reads_no_more_of_a_body_than_its_limit() {
     use super::MAX_ERROR_BODY_BYTES;
-    use crate::openai::relaxed::MAX_RESPONSE_BYTES;
+    use super::MAX_RESPONSE_BYTES;
     unstuck(async {
         // An error body without an end: a client error, a server error
         // (after its retries) and a rate limit.

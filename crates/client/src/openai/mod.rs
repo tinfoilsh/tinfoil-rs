@@ -182,6 +182,22 @@ pub(crate) async fn embed_batch(
 /// which has up to three attempts and two waits and so can take several
 /// times the `timeout`.
 ///
+/// `async_openai` reads response bodies into memory, so the client bounds
+/// them. A body beyond its limit is not cut short: the read fails with a
+/// network error of this crate, which [`Error::from_openai`] finds (except
+/// in a typed stream).
+///
+/// | response | read into memory up to |
+/// |---|---|
+/// | an error response (any status outside `2xx`) of a typed or relaxed call | 1 MiB |
+/// | a successful response of a typed call, streamed or not, and of `chat_relaxed().create` | 64 MiB |
+/// | a stream of `chat_relaxed().create_stream` | 16 MiB per line and per event; no limit on the whole stream |
+///
+/// Within the 64 MiB of a typed stream, `async_openai` holds each event
+/// until it ends and reads ahead of the caller, without a limit of its
+/// own. To download more than 64 MiB, a file's content for example, send
+/// the request through `http_client()` and read the body as a stream.
+///
 /// Every call of the `async_openai` API goes through the attested client,
 /// streaming and multipart calls included. The API base of the
 /// configuration is replaced with the attested route, so a configuration

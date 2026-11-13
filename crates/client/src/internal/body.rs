@@ -44,6 +44,92 @@ pub(crate) fn guard(response: Response, deadline: Option<Instant>) -> Response {
     ))
 }
 
+/// The client's error for a response body that is longer than `limit`
+/// bytes.
+#[cfg(feature = "openai")]
+pub(crate) fn too_large(limit: usize) -> Error {
+    Error::network(format!("the response body is larger than {limit} bytes"))
+}
+
+/// `response` with a body that fails once it has delivered `limit` bytes
+/// and more follow: the read then ends with a `reqwest` error whose source
+/// is the client's network error ([`too_large`]), and nothing more is
+/// read. A body of at most `limit` bytes is delivered whole, so a reader
+/// never takes a longer body for a shorter one.
+///
+/// It is for the responses that a library reads into memory on the
+/// caller's behalf: whoever answers does not decide how much memory that
+/// takes.
+#[cfg(feature = "openai")]
+pub(crate) fn limit(response: Response, limit: usize) -> Response {
+    let (parts, body) = http::Response::<reqwest::Body>::from(response).into_parts();
+    let limited = Limited {
+        inner: body,
+        limit,
+        left: limit,
+        failed: false,
+    };
+    Response::from(http::Response::from_parts(
+        parts,
+        reqwest::Body::wrap(limited),
+    ))
+}
+
+/// A response body, the bytes that it may deliver, how many of them are
+/// left, and whether it has failed.
+#[cfg(feature = "openai")]
+struct Limited {
+    inner: reqwest::Body,
+    limit: usize,
+    left: usize,
+    failed: bool,
+}
+
+#[cfg(feature = "openai")]
+impl Body for Limited {
+    type Data = <reqwest::Body as Body>::Data;
+    type Error = Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        if this.failed {
+            return Poll::Ready(None);
+        }
+        match Pin::new(&mut this.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                let length = frame.data_ref().map_or(0, |data| data.len());
+                match this.left.checked_sub(length) {
+                    Some(left) => {
+                        this.left = left;
+                        Poll::Ready(Some(Ok(frame)))
+                    }
+                    None => {
+                        this.failed = true;
+                        Poll::Ready(Some(Err(too_large(this.limit))))
+                    }
+                }
+            }
+            Poll::Ready(Some(Err(error))) => {
+                this.failed = true;
+                Poll::Ready(Some(Err(classify(error))))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.failed || self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
 /// A response body, its deadline, and whether it has failed.
 struct Guarded {
     inner: reqwest::Body,

@@ -18,14 +18,11 @@ use reqwest::{Method, Response, Url};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
-use crate::openai::service::{MAX_ERROR_BODY_BYTES, Sender, read_within};
+use crate::openai::service::{MAX_ERROR_BODY_BYTES, MAX_RESPONSE_BYTES, Sender, read_within};
 use crate::request::Execute;
 
 /// The path of the chat-completion endpoint under an OpenAI base URL.
 pub(crate) const CHAT_COMPLETIONS_PATH: &str = "chat/completions";
-
-/// The largest response that [`RelaxedChat::create`] reads into memory.
-pub(crate) const MAX_RESPONSE_BYTES: usize = 64 << 20;
 
 /// The handle that an OpenAI client's `chat_relaxed` returns.
 ///

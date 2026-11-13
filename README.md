@@ -149,6 +149,16 @@ The base URL must be absolute and use HTTPS (`http://` is accepted for `localhos
 - **EHBP mode does not authenticate the end of a response.** Each part of a sealed response body is authenticated, and so is the order of the parts, so the content cannot be forged, altered or reordered. Nothing marks the last part, though: whoever controls the connection (a proxy, for example) can end a sealed response early between two parts, or return one with no parts at all, and the read ends without an error. A response that is cut inside a part is an error. If you need to know that a response is complete, check its own terminator: that the JSON document is whole, or that the final event of a stream arrived. The SSE parser (`chat_relaxed().create_stream`, `sse::parse_event_stream`) reports a stream that is cut inside an event, and a stream that ends after a complete event without `[DONE]` ends without an error.
 - **In EHBP mode a request without a body is sent as it is**, and its response is returned as it arrives: neither is encrypted or authenticated. An error response (a status outside `2xx`) to a sealed request that is not sealed itself is passed through as received, because a proxy may refuse a request before it reaches the enclave; its status, headers and body are not authenticated either. There are exceptions, none of which returns a response. A `2xx` response to a sealed request that is not sealed is refused. The enclave's key rejection (a `422` with the protocol's key-configuration problem) is not returned either: it is an attestation error, and after a new verification the client sends the request once more if its body can be sent again. A request whose streamed body turns out to be empty goes out unsealed but is held to the rules of a sealed one: a `2xx` response, any response that claims to be sealed, and the key-configuration problem are attestation errors (the last without a replay).
 - **Requests without a cache secret share one prompt-cache namespace** with every other request that carries none. No secret is added by an enclave client whose `user_cache_secret` option is unset; to a request that is not a `POST` with a body to a path ending in `/chat/completions`, `/completions` or `/responses`; to a body that is not a single JSON object; to a body in which `user_cache_secret` appears more than once or with a value that is not a string, which is sent as it is; or, on a router client without the option, the environment variable or a stored secret, when the operating system supplies no random bytes for a new one. A non-empty `user_cache_secret` string in the body is kept.
+- **The OpenAI clients bound the responses that are read into memory for you.** async-openai reads a response whole, and in EHBP mode an error response, or the response to a request without a body, can come from a proxy. A body beyond its limit is not cut short: the read fails with a network error (`Error::from_openai` finds it, except in a typed stream, whose errors hold a message only).
+
+  | response | read into memory up to |
+  |---|---|
+  | an error response (any status outside `2xx`) of a typed or relaxed call | 1 MiB |
+  | a successful response of a typed call, streamed or not, and of `chat_relaxed().create` | 64 MiB |
+  | a stream of `chat_relaxed().create_stream` or `sse::parse_event_stream` | 16 MiB per line and per event; no limit on the whole stream |
+  | a response of the HTTP clients | no limit: the caller reads the body |
+
+  Within the 64 MiB of a typed stream, async-openai holds each event until it ends and reads ahead of the caller, without a limit of its own; `chat_relaxed().create_stream` bounds each event. To download something larger than 64 MiB (a file's content, for example), send the request through `http_client()` and read the body as a stream.
 - **The router list is not trusted.** The list that `RouterHttpClient` discovers routers from is fetched over ordinary HTTPS and is only a list of candidates: every router is verified like any other enclave before it is used. A wrong list can cause failed attempts within the 30 seconds that discovery may take, after which `inference.tinfoil.sh` is verified; it cannot make the client use an enclave that does not pass verification.
 
 ## What verification covers
@@ -267,6 +277,7 @@ These bounds are fixed:
 | fetching an attestation document | 30 seconds, 32 MiB |
 | router discovery (the list and every router that is tried) | 30 seconds in all; then `inference.tinfoil.sh` is verified |
 | an event of a relaxed chat stream | 16 MiB per line and per event |
+| a response body on the OpenAI clients | 1 MiB for an error response, 64 MiB for a successful one (see [Limits of the protection](#limits-of-the-protection)) |
 
 **Retries.**
 
