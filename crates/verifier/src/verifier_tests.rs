@@ -25,7 +25,7 @@ use crate::verifier::freshness_expiration;
 use crate::{
     CRYPTO_MATERIAL_ID_HPKE, CRYPTO_MATERIAL_ID_TLS, ConfigEndorsement, CryptoMaterialItem,
     EmbeddedConfig, EmbeddedReferences, KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_SPKI_V1_FORMAT,
-    KEY_X25519_HPKE_V1_FORMAT, PUBLIC_REGISTRY_ID, PublicKey, RuntimeReference, Verifier,
+    KEY_X25519_HPKE_V1_FORMAT, PUBLIC_REGISTRY_ID, Pin, PublicKey, RuntimeReference, Verifier,
     crypto_material_data, parse_reference,
 };
 
@@ -627,7 +627,7 @@ fn the_last_embedded_references_replace_the_earlier_ones() {
 }
 
 #[test]
-fn a_repository_pin_is_checked_without_a_document() {
+fn a_project_pin_is_checked_without_a_document() {
     let inputs = Inputs::new();
     let digest = inputs.config_digest();
     let other_digest = "ab".repeat(32);
@@ -778,9 +778,14 @@ fn a_repository_pin_is_checked_without_a_document() {
         ),
     ];
     // In this table an empty text stands for no pin.
-    for (name, builder, repo, valid) in cases {
+    for (name, builder, project, valid) in cases {
         let verifier = builder.build().unwrap();
-        let result = verifier.check_repo_verifiability(pin(repo));
+        let pin = if project.is_empty() {
+            Pin::none()
+        } else {
+            Pin::project(project)
+        };
+        let result = verifier.check_pin_verifiability(&pin);
         if valid {
             result.unwrap_or_else(|error| panic!("{name}: {error}"));
         } else {
@@ -791,9 +796,154 @@ fn a_repository_pin_is_checked_without_a_document() {
     // pin.
     for builder in [Verifier::builder(), embedded(), authorizer()] {
         let verifier = builder.build().unwrap();
-        verifier.check_repo_verifiability(None).unwrap();
-        let message = usage(verifier.check_repo_verifiability(Some("")));
+        verifier.check_pin_verifiability(&Pin::none()).unwrap();
+        let message = usage(verifier.check_pin_verifiability(&Pin::repo("")));
         assert!(message.contains("repository pin is empty"), "{message}");
+        let message = usage(verifier.check_pin_verifiability(&Pin::project("")));
+        assert!(message.contains("project pin is empty"), "{message}");
+    }
+}
+
+#[test]
+fn a_repository_pin_alone_is_refused_where_only_registry_collateral_is_verified() {
+    const REGISTRY_ONLY: &str = "registry collateral only";
+    let inputs = Inputs::new();
+    let repo = Pin::repo("org/project");
+    let project = Pin::project("org/project");
+    let both = Pin::repo("Owner/My_Repo").with_project("org/project");
+
+    let defaults = Verifier::new();
+    for pin in [&repo, &project, &both, &Pin::none()] {
+        defaults.check_pin_verifiability(pin).unwrap();
+    }
+    // Either part is checked for its form, whatever the other holds.
+    for malformed in [
+        Pin::repo("not a reference"),
+        Pin::project("not a reference"),
+        Pin::repo("not a reference").with_project("org/project"),
+        Pin::repo("org/project").with_project("not a reference"),
+    ] {
+        usage(defaults.check_pin_verifiability(&malformed));
+    }
+
+    for (name, builder) in [
+        (
+            "embedded references",
+            Verifier::builder().embedded_references(inputs.all()),
+        ),
+        (
+            "embedded artifacts",
+            Verifier::builder().embedded_references(inputs.artifacts()),
+        ),
+        (
+            "config signing keys",
+            Verifier::builder().config_signing_keys(signing_keys()),
+        ),
+        (
+            "freshness signing keys",
+            Verifier::builder().freshness_signing_keys(signing_keys()),
+        ),
+        (
+            "registry IDs",
+            Verifier::builder().config_registry_ids(vec![PRIVATE_REGISTRY.to_owned()]),
+        ),
+    ] {
+        let verifier = builder.build().unwrap();
+        let message = usage(verifier.check_pin_verifiability(&repo));
+        assert!(message.contains(REGISTRY_ONLY), "{name}: {message}");
+        for pin in [&project, &both, &Pin::none()] {
+            verifier
+                .check_pin_verifiability(pin)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
+    }
+
+    // A config authorizer authenticates neither part.
+    let authorizer = Verifier::builder()
+        .config_authorizer(accept)
+        .build()
+        .unwrap();
+    let message = usage(authorizer.check_pin_verifiability(&repo));
+    assert!(message.contains(REGISTRY_ONLY), "{message}");
+    usage(authorizer.check_pin_verifiability(&project));
+    usage(authorizer.check_pin_verifiability(&both));
+    authorizer.check_pin_verifiability(&Pin::none()).unwrap();
+}
+
+#[test]
+fn the_collateral_of_the_document_selects_the_part_of_the_pin() {
+    const REPOSITORY_ONLY: &str =
+        "document carries config registry collateral, but only a GitHub repository is pinned";
+    const NO_REPOSITORY: &str =
+        "document carries GitHub repository collateral, but no GitHub repository is pinned";
+    const OTHER: &str = "other/name";
+
+    let fixture = Fixture::load();
+    let verify = |name: &str, pin: &Pin| {
+        let case = fixture.case(name);
+        let verifier = fixture.verifier(case).unwrap();
+        let document = fixture.document(text(case, "doc")).unwrap();
+        verifier.verify_at(&document, &Fixture::nonce(case), pin, instant(case))
+    };
+    let rejected = |name: &str, pin: &Pin, want: &str| match verify(name, pin) {
+        Err(Error::Verification(rejected)) => {
+            assert_eq!(rejected.layer(), Layer::Provenance, "{name} {pin:?}");
+            let message = rejected.to_string();
+            assert!(message.contains(want), "{name} {pin:?}: {message}");
+        }
+        other => panic!("{name} {pin:?}: want a rejection, got {other:?}"),
+    };
+    let accepted = |name: &str, pin: &Pin| {
+        verify(name, pin).unwrap_or_else(|error| panic!("{name} {pin:?}: {error}"));
+    };
+
+    // Repository collateral, named and unversioned: only the repository
+    // part is matched, and a project stands for no repository.
+    for name in ["legacy-sev/doc-format-v2", "legacy-sev/default"] {
+        let released = text(fixture.case(name), "repo");
+        accepted(name, &Pin::repo(released));
+        accepted(name, &Pin::repo(released).with_project(OTHER));
+        rejected(name, &Pin::project(released), NO_REPOSITORY);
+        rejected(name, &Pin::none(), NO_REPOSITORY);
+        rejected(
+            name,
+            &Pin::repo(OTHER).with_project(released),
+            "is not the expected workflow",
+        );
+    }
+
+    // Registry collateral: only the project part is matched, and a
+    // repository of the project's name does not stand for it.
+    let name = "config-sev/full-same";
+    let approved = text(fixture.case(name), "repo");
+    accepted(name, &Pin::project(approved));
+    accepted(name, &Pin::repo(OTHER).with_project(approved));
+    accepted(name, &Pin::none());
+    rejected(name, &Pin::repo(approved), REPOSITORY_ONLY);
+    rejected(
+        name,
+        &Pin::repo(approved).with_project(OTHER),
+        "does not match the pinned identity",
+    );
+
+    // Trust that requires registry collateral says so of a document that
+    // carries a code release, with or without a repository.
+    let name = "legacy-sev/v3-only-registry";
+    let released = text(fixture.case(name), "repo");
+    for pin in [Pin::none(), Pin::repo(released)] {
+        rejected(name, &pin, "configured trust requires");
+    }
+
+    // A malformed part is the caller's mistake whichever collateral the
+    // document carries.
+    for name in ["legacy-sev/default", "config-sev/full-same"] {
+        let named = text(fixture.case(name), "repo");
+        for malformed in [
+            Pin::repo("not a reference").with_project(named),
+            Pin::repo(named).with_project("not a reference"),
+        ] {
+            usage(verify(name, &malformed));
+        }
     }
 }
 
@@ -856,7 +1006,7 @@ fn arguments_are_checked_before_the_document() {
     let verifier = fixture.verifier(case).unwrap();
     let document = fixture.document(text(case, "doc")).unwrap();
     let nonce = Fixture::nonce(case);
-    let repo = pin(text(case, "repo"));
+    let repo = &pin(&fixture, case);
     let at = instant(case).to_system_time().unwrap();
     verifier.verify_v3_at(&document, &nonce, repo, at).unwrap();
 
@@ -872,16 +1022,25 @@ fn arguments_are_checked_before_the_document() {
     assert!(message.contains("verification time"), "{message}");
     // The repository pin is the caller's too, once the document carries the
     // code that it would be matched against.
-    usage(verifier.verify_v3_at(&document, &nonce, Some("not a reference"), at));
+    usage(verifier.verify_v3_at(&document, &nonce, &Pin::repo("not a reference"), at));
     // An empty pin is refused before the nonce and the document are read;
     // only `None` sets no pin.
-    for result in [
-        verifier.verify_v3_at(&document, &nonce, Some(""), at),
-        verifier.verify_v3_at(b"{", &nonce[..31], Some(""), at),
-        verifier.verify_v3(b"{", &nonce[..31], Some("")),
+    for (empty, part) in [
+        (Pin::repo(""), "repository pin is empty"),
+        (Pin::project(""), "project pin is empty"),
+        (
+            Pin::repo("owner/name").with_project(""),
+            "project pin is empty",
+        ),
     ] {
-        let message = usage(result);
-        assert!(message.contains("repository pin is empty"), "{message}");
+        for result in [
+            verifier.verify_v3_at(&document, &nonce, &empty, at),
+            verifier.verify_v3_at(b"{", &nonce[..31], &empty, at),
+            verifier.verify_v3(b"{", &nonce[..31], &empty),
+        ] {
+            let message = usage(result);
+            assert!(message.contains(part), "{message}");
+        }
     }
 }
 
@@ -895,7 +1054,7 @@ fn verify_v3_reads_the_clock_once_and_reports_it() {
     // not the recorded one.
     let before = SystemTime::now();
     let error = verifier
-        .verify_v3(&document, &Fixture::nonce(case), pin(text(case, "repo")))
+        .verify_v3(&document, &Fixture::nonce(case), &pin(&fixture, case))
         .unwrap_err();
     assert!(before > instant(case).to_system_time().unwrap());
     let Error::Verification(rejected) = error else {
@@ -905,12 +1064,7 @@ fn verify_v3_reads_the_clock_once_and_reports_it() {
 
     let at = instant(case).to_system_time().unwrap();
     let verified = verifier
-        .verify_v3_at(
-            &document,
-            &Fixture::nonce(case),
-            pin(text(case, "repo")),
-            at,
-        )
+        .verify_v3_at(&document, &Fixture::nonce(case), &pin(&fixture, case), at)
         .unwrap();
     assert_eq!(verified.metadata().verified_at, at);
     assert_eq!(verified.metadata().verifier.name, "tinfoil-rs");
@@ -928,7 +1082,7 @@ fn rejection(fixture: &Fixture, name: &str) -> crate::VerificationError {
     let result = verifier.verify_at(
         &document,
         &Fixture::nonce(case),
-        text(case, "repo"),
+        &pin(fixture, case),
         instant(case),
     );
     match result {
@@ -1017,7 +1171,12 @@ fn a_config_authorizer_never_chooses_the_kind_of_error() {
         verifier
     };
     let verify = |verifier: &Verifier| {
-        verifier.verify_at(&document, &Fixture::nonce(case), "", instant(case))
+        verifier.verify_at(
+            &document,
+            &Fixture::nonce(case),
+            &Pin::none(),
+            instant(case),
+        )
     };
 
     // Whatever the authorizer returns, even one of this crate's own usage
@@ -1097,7 +1256,12 @@ fn a_config_authorizer_sees_the_material_of_the_document() {
             .unwrap();
         verifier.embedded = embedded;
         let verified = verifier
-            .verify_at(&document, &Fixture::nonce(case), "", instant(case))
+            .verify_at(
+                &document,
+                &Fixture::nonce(case),
+                &Pin::none(),
+                instant(case),
+            )
             .unwrap();
 
         let seen = seen.lock().unwrap();
@@ -1187,7 +1351,12 @@ fn the_accepted_registries_are_never_left_open_by_default() {
         let case = fixture.case(name);
         let verifier = fixture.verifier(case).unwrap();
         let document = fixture.document(text(case, "doc")).unwrap();
-        let result = verifier.verify_at(&document, &Fixture::nonce(case), "", instant(case));
+        let result = verifier.verify_at(
+            &document,
+            &Fixture::nonce(case),
+            &Pin::none(),
+            instant(case),
+        );
         match result {
             Ok(verified) => {
                 assert!(accepted, "{name}");
@@ -1516,7 +1685,7 @@ fn the_record_of_a_real_verification_reads_back_as_json() {
             .verify_at(
                 &document,
                 &Fixture::nonce(case),
-                text(case, "repo"),
+                &pin(&fixture, case),
                 instant(case),
             )
             .unwrap();
@@ -1606,7 +1775,7 @@ mod serde_feature {
                 .verify_at(
                     &document,
                     &Fixture::nonce(case),
-                    text(case, "repo"),
+                    &pin(&fixture, case),
                     instant(case),
                 )
                 .unwrap();

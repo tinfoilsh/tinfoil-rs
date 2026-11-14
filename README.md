@@ -86,13 +86,13 @@ Every client:
 The HTTP clients send requests with `reqwest`'s types: `get`, `post`, `put`, `patch`, `delete`, `head` and `request` return a request builder, and `execute` takes a `reqwest::Request`. URLs are absolute.
 
 ```rust,no_run
-use tinfoil::EnclaveHttpClient;
+use tinfoil::{EnclaveHttpClient, Pin};
 
 async fn list_models(api_key: &str) -> Result<String, Box<dyn std::error::Error>> {
     // A host (not a URL), and the repository that its code must come from.
     let client = EnclaveHttpClient::connect(
         "inference.tinfoil.sh",
-        Some("tinfoilsh/confidential-model-router"),
+        Pin::repo("tinfoilsh/confidential-model-router"),
     )
     .await?;
 
@@ -108,6 +108,8 @@ async fn list_models(api_key: &str) -> Result<String, Box<dyn std::error::Error>
     Ok(response.text().await?)
 }
 ```
+
+A `Pin` names the workload in one namespace: `Pin::repo("owner/name")` is a GitHub repository and is satisfied only by that repository's signed release, and `Pin::project("org/project")` is a config registry project and is satisfied only by a registry approval. The same name can belong to different owners in each, so set the one that the enclave is published under; `Pin::repo(..).with_project(..)` accepts either.
 
 `RouterHttpClient::connect()` takes no host: it tries the routers of Tinfoil's published list in order and keeps the first that passes verification, or else `inference.tinfoil.sh`.
 
@@ -167,7 +169,7 @@ A verification passes only if all of the following hold. They are checked offlin
 
 - **The hardware evidence is authentic.** The AMD SEV-SNP report or Intel TDX quote is signed by a key that chains to the vendor's root, and it satisfies the platform policy.
 - **The evidence answers this request.** The document is bound to a fresh random nonce that the client sent.
-- **The enclave runs what the pin names.** The enclave's measurement matches reference values that are themselves authenticated, through signed endorsements and the Sigstore trusted root, for the repository that the client pins. Without a pin (`None` on an enclave client), the enclave must run a config that the verifier's policy authorizes, which by default is one that Tinfoil signed into the public registry.
+- **The enclave runs what the pin names.** The enclave's measurement matches reference values that are themselves authenticated, through signed endorsements and the Sigstore trusted root, for the GitHub repository or the config registry project that the client pins. Without a pin (`Pin::none()` on an enclave client), the enclave must run a config that the verifier's policy authorizes, which by default is one that Tinfoil signed into the public registry.
 - **The evidence is fresh.** The signed freshness proofs are no older than the freshness window (seven days by default), and the verification expires when they stop vouching for the document.
 - **The keys belong to the enclave.** The TLS key fingerprint and the HPKE key that the client binds its traffic to are part of what the hardware signed.
 

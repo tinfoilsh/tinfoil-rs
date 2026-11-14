@@ -94,21 +94,26 @@ let client = tinfoil::Client::new(
 
 ```rust,no_run
 // 0.3
-use tinfoil::EnclaveOpenAIClient;
 use tinfoil::async_openai::config::OpenAIConfig;
+use tinfoil::{EnclaveOpenAIClient, Pin};
 
 async fn connect(api_key: &str) -> Result<EnclaveOpenAIClient, tinfoil::Error> {
     EnclaveOpenAIClient::connect(
         "inference.tinfoil.sh",
-        Some("tinfoilsh/confidential-model-router"),
+        Pin::repo("tinfoilsh/confidential-model-router"),
         OpenAIConfig::new().with_api_key(api_key),
     )
     .await
 }
 ```
 
-The repository is an `Option<&str>`: `None` sets no pin, and `Some("")` is an
-error.
+The pin is a `Pin`, which names the workload in one namespace:
+`Pin::repo("owner/name")` is a GitHub repository and is satisfied only by that
+repository's signed release, and `Pin::project("org/project")` is a config
+registry project and is satisfied only by a registry approval. The same name
+can belong to different owners in each, so set the one that the enclave is
+published under; `Pin::repo(..).with_project(..)` accepts either. `Pin::none()`
+sets no pin, and an empty string in either part is an error.
 
 ### `Client::new_with_proxy(enclave, repo, api_key, proxy_url)`
 
@@ -122,7 +127,7 @@ let client = tinfoil::Client::new_with_proxy(enclave, repo, api_key, proxy_url).
 ```rust,no_run
 // 0.3
 use tinfoil::async_openai::config::OpenAIConfig;
-use tinfoil::{EnclaveOpenAIClient, TransportMode};
+use tinfoil::{EnclaveOpenAIClient, Pin, TransportMode};
 
 async fn connect(
     enclave: &str,
@@ -131,7 +136,7 @@ async fn connect(
     proxy_url: &str,
 ) -> Result<EnclaveOpenAIClient, tinfoil::Error> {
     let config = OpenAIConfig::new().with_api_key(api_key);
-    EnclaveOpenAIClient::builder(enclave, Some(repo), config)
+    EnclaveOpenAIClient::builder(enclave, Pin::repo(repo), config)
         .transport_mode(TransportMode::Ehbp)
         .base_url(proxy_url)
         .connect()
@@ -181,7 +186,7 @@ async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
 | `client.with_user_cache_secret(secret)` | `.user_cache_secret(secret)` on a builder, before `connect()`. An empty string is an error; leave the option unset for the default |
 | `client.secure_client()` | `client.http_client()`, which returns the attested HTTP client (`RouterHttpClient` or `EnclaveHttpClient`) |
 | `client.http_client()` → `Result<&OriginBoundClient>` | `client.http_client()`, infallible, and it works in EHBP mode too |
-| `client.enclave()`, `client.repo()` | `client.http_client().enclave()`, `.repo()` |
+| `client.enclave()`, `client.repo()` | `client.http_client().enclave()`, `.pin()` |
 
 ## `SecureClient`
 
@@ -190,8 +195,8 @@ async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
 
 | 0.2 | 0.3 |
 |---|---|
-| `SecureClient::new(host, repo, api_key)` + `verify()` | `EnclaveHttpClient::connect(host, Some(repo))` |
-| `SecureClient::new_with_proxy(host, repo, api_key, proxy_url)` + `verify()` | `EnclaveHttpClient::builder(host, Some(repo)).transport_mode(TransportMode::Ehbp).base_url(proxy_url).connect()` |
+| `SecureClient::new(host, repo, api_key)` + `verify()` | `EnclaveHttpClient::connect(host, Pin::repo(repo))` |
+| `SecureClient::new_with_proxy(host, repo, api_key, proxy_url)` + `verify()` | `EnclaveHttpClient::builder(host, Pin::repo(repo)).transport_mode(TransportMode::Ehbp).base_url(proxy_url).connect()` |
 | `SecureClient::new_default_client(api_key)` | `RouterHttpClient::connect()` |
 | `SecureClient::with_measurement(host, api_key, measurement)` | a `Verifier` with `pinned_registers(..)`; see below |
 | `is_verified()` | removed: a client is always verified. `current()` returns the last verification |
@@ -222,7 +227,7 @@ async fn models(
     repo: &str,
     api_key: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let client = tinfoil::EnclaveHttpClient::connect(host, Some(repo)).await?;
+    let client = tinfoil::EnclaveHttpClient::connect(host, tinfoil::Pin::repo(repo)).await?;
     let response = client
         .get(client.base_url().join("v1/models")?)
         .bearer_auth(api_key)
@@ -245,7 +250,7 @@ work in both modes; in `TransportMode::Ehbp` they seal the body.
 `with_measurement` skipped the provenance checks and compared one measurement.
 In 0.3 a pin is an additional check on top of the full verification, so the
 client is also given the repository that the enclave must run (`repo` below),
-or `None` to accept any config that the verifier's policy authorizes:
+or `Pin::none()` to accept any config that the verifier's policy authorizes:
 
 ```rust,ignore
 // 0.2
@@ -254,8 +259,8 @@ let secure = tinfoil::SecureClient::with_measurement(host, api_key, measurement)
 
 ```rust,no_run
 // 0.3
-use tinfoil::EnclaveHttpClient;
 use tinfoil::verifier::{Expected, Verifier};
+use tinfoil::{EnclaveHttpClient, Pin};
 
 /// `measurement` is the SEV-SNP launch digest in hexadecimal.
 async fn connect(
@@ -266,7 +271,7 @@ async fn connect(
     let verifier = Verifier::builder()
         .pinned_registers(Expected::parse_sev_snp(measurement)?)
         .build()?;
-    let client = EnclaveHttpClient::builder(host, Some(repo))
+    let client = EnclaveHttpClient::builder(host, Pin::repo(repo))
         .verifier(verifier)
         .connect()
         .await?;
@@ -274,7 +279,7 @@ async fn connect(
 }
 ```
 
-To verify against a config that you supply yourself rather than a repository,
+To verify against a config that you supply yourself rather than a pin,
 see `VerifierBuilder::embedded_references` and
 `VerifierBuilder::config_authorizer`.
 
@@ -340,10 +345,10 @@ the `tinfoil-verifier` crate:
 
 | 0.2 | 0.3 |
 |---|---|
-| fetch a document and verify it (`verifier::fetch`, `verify_full`, `verify_complete`) | connect a client, or fetch the document yourself and call `Verifier::verify_v3(&document, &nonce, repo)` |
+| fetch a document and verify it (`verifier::fetch`, `verify_full`, `verify_complete`) | connect a client, or fetch the document yourself and call `Verifier::verify_v3(&document, &nonce, &pin)` |
 | `verifier::github`, `verifier::sigstore`, the VCEK disk cache, the KDS and GitHub proxies | removed. The document carries its own collateral, and the verifier makes no request and writes no file |
 | `verifier::tls` (`OriginBoundClient`, certificate pinning helpers) | removed from the public API; the clients pin connections themselves |
-| `tinfoil::constants` (`ROUTER_URL`, `DEFAULT_ROUTER`, `DEFAULT_REPO`, `GITHUB_PROXY`, `KDS_PROXY`) | removed. `RouterHttpClient::repo()` returns the router repository |
+| `tinfoil::constants` (`ROUTER_URL`, `DEFAULT_ROUTER`, `DEFAULT_REPO`, `GITHUB_PROXY`, `KDS_PROXY`) | removed. `RouterHttpClient::pin()` returns the router pin |
 | `tinfoil::discovery::fetch_routers` | removed; `RouterHttpClient::connect()` discovers |
 
 ## Removed without replacement

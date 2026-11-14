@@ -1,8 +1,10 @@
 //! `live-verify`: verifies a running enclave as an application does.
 //!
-//! The command reads `{"host": "...", "repo": "..."}` on stdin and connects
-//! the client's [`EnclaveHttpClient`] to the host with the repository as
-//! its pin. The client fetches a document under a fresh nonce and verifies
+//! The command reads `{"host": "...", "repo": "...", "project": "..."}` on
+//! stdin and connects the client's [`EnclaveHttpClient`] to the host with
+//! the repository and the registry project as its pin; without a `project`
+//! member, `repo` stands for both. The client fetches a document under a
+//! fresh nonce and verifies
 //! it with the default verifier: the embedded roots, the current time, no
 //! test seam. One request is then sent through the client, whose TLS
 //! handshake succeeds only if the server's certificate carries the public
@@ -17,7 +19,7 @@ use std::error::Error as StdError;
 use std::time::Duration;
 
 use serde::Deserialize;
-use tinfoil::verifier::{Error as VerifierError, Layer};
+use tinfoil::verifier::{Error as VerifierError, Layer, Pin};
 use tinfoil::{EnclaveHttpClient, ErrorKind, TransportMode};
 
 use crate::{
@@ -44,19 +46,31 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 pub struct Request {
     /// The enclave's host, with an optional port.
     pub host: String,
-    /// The repository that the enclave's code must come from.
+    /// The GitHub repository that the enclave's code must come from.
     pub repo: String,
+    /// The config registry project that the enclave's config must be
+    /// approved in. Absent in requests where `repo` names the workload in
+    /// either namespace.
+    #[serde(deserialize_with = "crate::present")]
+    pub project: Option<String>,
 }
 
 impl Request {
     /// Decodes the request. `None` unless the input is one JSON object
-    /// that names a host and a repository.
+    /// that names a host and a repository, or a host and a `project`
+    /// member, with which the two names are taken as they are given.
     pub fn parse(stdin: &[u8]) -> Option<Self> {
         if !crate::is_object(stdin) {
             return None;
         }
         let request: Self = serde_json::from_slice(stdin).ok()?;
-        (!request.host.is_empty() && !request.repo.is_empty()).then_some(request)
+        let named = !request.repo.is_empty() || request.project.is_some();
+        (!request.host.is_empty() && named).then_some(request)
+    }
+
+    /// The pin that the request names.
+    pub fn pin(&self) -> Pin {
+        crate::pin(&self.repo, self.project.as_deref())
     }
 }
 
@@ -191,7 +205,7 @@ pub fn run(stdin: &[u8]) -> Outcome {
 
 async fn verify(request: &Request) -> Outcome {
     let host = &request.host;
-    let connected = EnclaveHttpClient::builder(host.as_str(), Some(&request.repo))
+    let connected = EnclaveHttpClient::builder(host.as_str(), request.pin())
         .transport_mode(TransportMode::Tls)
         .timeout(VERIFY_TIMEOUT)
         .connect()
@@ -247,11 +261,38 @@ mod tests {
             Some(Request {
                 host: "enclave.example".to_owned(),
                 repo: "owner/name".to_owned(),
+                project: None,
             })
+        );
+        assert_eq!(
+            request.map(|request| request.pin()),
+            Some(Pin::repo("owner/name").with_project("owner/name"))
         );
         // A member that the command does not know is ignored.
         let extended = br#"{"host":"h","repo":"o/r","note":1}"#;
         assert!(Request::parse(extended).is_some());
+    }
+
+    #[test]
+    fn a_request_with_a_project_names_each_part_as_given() {
+        let pin = |input: &str| Request::parse(input.as_bytes()).map(|request| request.pin());
+        assert_eq!(
+            pin(r#"{"host":"h","repo":"o/r","project":"o/p"}"#),
+            Some(Pin::repo("o/r").with_project("o/p"))
+        );
+        assert_eq!(
+            pin(r#"{"host":"h","repo":"o/r","project":""}"#),
+            Some(Pin::repo("o/r"))
+        );
+        assert_eq!(
+            pin(r#"{"host":"h","project":"o/p"}"#),
+            Some(Pin::project("o/p"))
+        );
+        assert_eq!(
+            pin(r#"{"host":"h","repo":"","project":""}"#),
+            Some(Pin::none())
+        );
+        assert_eq!(pin(r#"{"host":"h","repo":"o/r","project":null}"#), None);
     }
 
     #[test]
@@ -389,7 +430,7 @@ mod tests {
         let nonce = tinfoil::verifier::random_nonce().expect("the random source");
         // Not a document at all: the envelope layer rejects it.
         let rejection = Verifier::new()
-            .verify_v3(b"{}", &nonce, Some("owner/name"))
+            .verify_v3(b"{}", &nonce, &Pin::repo("owner/name"))
             .unwrap_err();
         assert!(matches!(rejection, VerifierError::Verification(_)));
         let wrapped = Wrapper(Box::new(Wrapper(Box::new(rejection))));
@@ -397,7 +438,7 @@ mod tests {
 
         // A usage error is not a rejection, and neither is another error.
         let usage = Verifier::new()
-            .verify_v3(b"{}", &nonce, Some(""))
+            .verify_v3(b"{}", &nonce, &Pin::repo(""))
             .unwrap_err();
         assert!(matches!(usage, VerifierError::Usage(_)));
         assert_eq!(rejecting_layer(&Wrapper(Box::new(usage))), None);
