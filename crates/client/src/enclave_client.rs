@@ -12,7 +12,7 @@ use crate::internal::transport::base_url;
 use crate::internal::{enclave, system_clock};
 use crate::options::{RouteOptions, Secret, TransportMode};
 use crate::request::http_request_methods;
-use crate::verifier::{BoxError, Verification, Verifier};
+use crate::verifier::{BoxError, Pin, Verification, Verifier};
 
 /// An HTTP client whose requests reach only one attested enclave.
 ///
@@ -42,41 +42,48 @@ pub struct EnclaveHttpClient {
 }
 
 impl EnclaveHttpClient {
-    /// Verifies the enclave at `host` against `repo` and returns a client
+    /// Verifies the enclave at `host` against `pin` and returns a client
     /// for it, with the default options.
     ///
-    /// `host` is a host with an optional port, not a URL. `repo` is the
-    /// repository that the enclave's code or config must come from, as
-    /// `Some("owner/name[@tag][@sha256:digest]")`. `None` sets no pin: the
-    /// enclave must then run a config that the verifier's own policy
-    /// authorizes, which for the default verifier is one signed into the
-    /// public registry. An empty string is not "no pin": `Some("")` is a
-    /// configuration error.
+    /// `host` is a host with an optional port, not a URL. `pin` names what
+    /// the enclave must run: [`Pin::repo`] is the GitHub repository that
+    /// its code must be released from, as `owner/name[@tag][@sha256:digest]`,
+    /// and [`Pin::project`] is the config registry project that its config
+    /// must be approved in, as `org/project[@revision][@sha256:digest]`.
+    /// The two namespaces are unrelated, so a repository is never satisfied
+    /// by a registry project of the same name, nor a project by a
+    /// repository; a pin with both accepts either. [`Pin::none`] sets no
+    /// pin: the enclave must then run a config that the verifier's own
+    /// policy authorizes, which for the default verifier is one signed into
+    /// the public registry. An empty string is not "no pin": it is a
+    /// configuration error in either part.
     ///
     /// ```no_run
     /// # async fn run() -> Result<(), tinfoil::Error> {
-    /// use tinfoil::EnclaveHttpClient;
+    /// use tinfoil::{EnclaveHttpClient, Pin};
     ///
-    /// let pinned = EnclaveHttpClient::connect("enclave.example.com", Some("owner/name")).await?;
-    /// let unpinned = EnclaveHttpClient::connect("enclave.example.com", None).await?;
-    /// # let _ = (pinned, unpinned);
+    /// let repo = EnclaveHttpClient::connect("enclave.example.com", Pin::repo("owner/name")).await?;
+    /// let project =
+    ///     EnclaveHttpClient::connect("enclave.example.com", Pin::project("org/project")).await?;
+    /// let unpinned = EnclaveHttpClient::connect("enclave.example.com", Pin::none()).await?;
+    /// # let _ = (repo, project, unpinned);
     /// # Ok(())
     /// # }
     /// ```
     ///
     /// See [`EnclaveHttpClientBuilder::connect`] for the checks, the errors
     /// and cancel safety.
-    pub async fn connect(host: impl Into<String>, repo: Option<&str>) -> Result<Self, Error> {
-        Self::builder(host, repo).connect().await
+    pub async fn connect(host: impl Into<String>, pin: Pin) -> Result<Self, Error> {
+        Self::builder(host, pin).connect().await
     }
 
-    /// Starts a client for the enclave at `host`, verified against `repo`,
+    /// Starts a client for the enclave at `host`, verified against `pin`,
     /// to be configured before it connects. The arguments are those of
     /// [`connect`](Self::connect).
-    pub fn builder(host: impl Into<String>, repo: Option<&str>) -> EnclaveHttpClientBuilder {
+    pub fn builder(host: impl Into<String>, pin: Pin) -> EnclaveHttpClientBuilder {
         EnclaveHttpClientBuilder {
             host: host.into(),
-            repo: repo.map(str::to_owned),
+            pin,
             options: RouteOptions::default(),
         }
     }
@@ -94,10 +101,11 @@ impl EnclaveHttpClient {
         self.inner.enclave()
     }
 
-    /// The repository pin that the enclave is verified against, with any
-    /// tag or digest. `None` when the client was created without a pin.
-    pub fn repo(&self) -> Option<&str> {
-        self.inner.repo()
+    /// The repository and the registry project that the enclave is
+    /// verified against, with any revision or digest. Neither is set when
+    /// the client was created without a pin.
+    pub fn pin(&self) -> &Pin {
+        self.inner.pin()
     }
 
     /// The transport mode that the client was created with.
@@ -172,7 +180,7 @@ impl fmt::Debug for EnclaveHttpClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EnclaveHttpClient")
             .field("enclave", &self.enclave())
-            .field("repo", &self.repo())
+            .field("pin", &self.pin())
             .field("base_url", &self.base_url().as_str())
             .field("transport_mode", &self.transport_mode())
             .finish_non_exhaustive()
@@ -191,7 +199,7 @@ impl fmt::Debug for EnclaveHttpClient {
 #[must_use = "a builder does nothing until `connect` is called"]
 pub struct EnclaveHttpClientBuilder {
     host: String,
-    repo: Option<String>,
+    pin: Pin,
     options: RouteOptions,
 }
 
@@ -303,11 +311,12 @@ impl EnclaveHttpClientBuilder {
     ///    URL), a query string or a fragment; or it uses `http://` for a
     ///    host other than `localhost` or a loopback IP address.
     /// 3. `user_cache_secret` is empty, or `timeout` is zero.
-    /// 4. `host` is not a host with an optional port; `repo` is
-    ///    `Some("")`, or is not a repository reference, or the verifier
-    ///    cannot verify against it: a verifier with a config authorizer
-    ///    takes no pin, and one with an embedded config takes only a
-    ///    matching one.
+    /// 4. `host` is not a host with an optional port; a part of the pin
+    ///    is `Some("")`, or is not a reference, or the verifier cannot
+    ///    verify against the pin: a verifier with a config authorizer
+    ///    takes no pin, one with an embedded config takes only a matching
+    ///    project, and one that verifies registry collateral only takes no
+    ///    repository alone.
     /// 5. The mode is [`TransportMode::Tls`] and `base_url` is on another
     ///    origin than the enclave: that is a proxy, which requires
     ///    [`TransportMode::Ehbp`].
@@ -347,7 +356,7 @@ impl EnclaveHttpClientBuilder {
         let common = self.options.common;
         let checked = enclave::Config {
             host: self.host,
-            repo: self.repo,
+            pin: self.pin,
             verifier: common.verifier,
             verification_check: common.verification_check,
         }

@@ -8,21 +8,21 @@
 //!
 //! # Verifying a document
 //!
-//! A [`Verifier`] holds the policy: which repository or config to accept,
+//! A [`Verifier`] holds the policy: which configs to accept,
 //! how old a freshness proof may be, and optional register pins. Its
 //! [`verify_v3`](Verifier::verify_v3) takes the document, the nonce that the
-//! caller sent with its request, and a repository pin, and returns a
+//! caller sent with its request, and a [`Pin`], and returns a
 //! [`Verification`] with the endorsed keys to bind traffic to.
 //!
 //! ```no_run
-//! use tinfoil_verifier::{Error, Verifier, random_nonce};
+//! use tinfoil_verifier::{Error, Pin, Verifier, random_nonce};
 //!
 //! # fn fetch(_nonce: &[u8]) -> Vec<u8> { Vec::new() }
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let nonce = random_nonce()?;
 //! let document = fetch(&nonce);
 //! let verifier = Verifier::new();
-//! match verifier.verify_v3(&document, &nonce, Some("owner/repository")) {
+//! match verifier.verify_v3(&document, &nonce, &Pin::repo("owner/repository")) {
 //!     Ok(verified) => println!("TLS key: {:?}", verified.tls_public_key_fp()),
 //!     Err(Error::Verification(rejected)) => println!("rejected at {}", rejected.layer()),
 //!     Err(other) => return Err(other.into()),
@@ -135,7 +135,7 @@ pub use verification::{
     ArtifactVerification, ConfigVerification, ReferenceSource, SoftwareIdentity, Verification,
     VerificationMetadata, crypto_material_data,
 };
-pub use verifier::{Verifier, parse_reference};
+pub use verifier::{Pin, Verifier, parse_reference};
 
 /// Internal modules, exposed to the conformance adapter only. This module
 /// exists only in builds that pass `--cfg tinfoil_conformance`; it is not

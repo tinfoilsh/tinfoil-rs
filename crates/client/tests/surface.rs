@@ -19,7 +19,7 @@ use tinfoil::reqwest::header::{HeaderMap, HeaderValue};
 use tinfoil::reqwest::{Method, Request, Response, Url};
 use tinfoil::verifier::{BoxError, Verification, Verifier};
 use tinfoil::{
-    EnclaveHttpClient, EnclaveHttpClientBuilder, Error, ErrorKind, RequestBuilder,
+    EnclaveHttpClient, EnclaveHttpClientBuilder, Error, ErrorKind, Pin, RequestBuilder,
     RouterHttpClient, RouterHttpClientBuilder, TransportMode, VERSION,
 };
 
@@ -79,13 +79,13 @@ fn the_http_clients_are_handles() {
 fn the_accessors_have_their_signatures() {
     let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a Url = EnclaveHttpClient::base_url;
     let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a str = EnclaveHttpClient::enclave;
-    let _: for<'a> fn(&'a EnclaveHttpClient) -> Option<&'a str> = EnclaveHttpClient::repo;
+    let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a Pin = EnclaveHttpClient::pin;
     let _: fn(&EnclaveHttpClient) -> TransportMode = EnclaveHttpClient::transport_mode;
     let _: fn(&EnclaveHttpClient) -> Arc<Verification> = EnclaveHttpClient::current;
 
     let _: for<'a> fn(&'a RouterHttpClient) -> &'a Url = RouterHttpClient::base_url;
     let _: for<'a> fn(&'a RouterHttpClient) -> &'a str = RouterHttpClient::enclave;
-    let _: for<'a> fn(&'a RouterHttpClient) -> &'a str = RouterHttpClient::repo;
+    let _: for<'a> fn(&'a RouterHttpClient) -> &'a Pin = RouterHttpClient::pin;
     let _: fn(&RouterHttpClient) -> TransportMode = RouterHttpClient::transport_mode;
     let _: fn(&RouterHttpClient) -> Arc<Verification> = RouterHttpClient::current;
     let _: fn() -> RouterHttpClientBuilder = RouterHttpClient::builder;
@@ -93,7 +93,7 @@ fn the_accessors_have_their_signatures() {
 
 #[test]
 fn a_builder_does_no_io_and_prints_no_secret() {
-    let builder = EnclaveHttpClient::builder("enclave.example.com", Some("org/repo"))
+    let builder = EnclaveHttpClient::builder("enclave.example.com", Pin::repo("org/repo"))
         .transport_mode(TransportMode::Ehbp)
         .base_url("https://user:hunter2@proxy.example.com/")
         .verifier(Verifier::new())
@@ -109,28 +109,33 @@ fn a_builder_does_no_io_and_prints_no_secret() {
 async fn enclave_client(verifier: Arc<Verifier>) -> Result<(), Box<dyn StdError>> {
     let client: EnclaveHttpClient = send(EnclaveHttpClient::connect(
         "enclave.example.com",
-        Some("org/repo"),
+        Pin::repo("org/repo"),
     ))
     .await?;
 
-    let builder: EnclaveHttpClientBuilder =
-        EnclaveHttpClient::builder(String::from("enclave.example.com"), Some("org/repo@v1.2.3"))
-            .transport_mode(TransportMode::Ehbp)
-            .base_url("https://proxy.example.com/")
-            .verifier(verifier)
-            .verification_check(|verified: &Verification| {
-                if verified.code_tag().is_empty() {
-                    return Err("untagged release".into());
-                }
-                Ok(())
-            })
-            .user_cache_secret("opaque-random-value")
-            .timeout(Duration::from_secs(30));
+    let builder: EnclaveHttpClientBuilder = EnclaveHttpClient::builder(
+        String::from("enclave.example.com"),
+        Pin::repo("org/repo@v1.2.3"),
+    )
+    .transport_mode(TransportMode::Ehbp)
+    .base_url("https://proxy.example.com/")
+    .verifier(verifier)
+    .verification_check(|verified: &Verification| {
+        if verified.code_tag().is_empty() {
+            return Err("untagged release".into());
+        }
+        Ok(())
+    })
+    .user_cache_secret("opaque-random-value")
+    .timeout(Duration::from_secs(30));
     let configured: EnclaveHttpClient = send(builder.connect()).await?;
 
-    let unpinned: EnclaveHttpClient =
-        send(EnclaveHttpClient::connect("enclave.example.com", None)).await?;
-    let _: Option<&str> = unpinned.repo();
+    let unpinned: EnclaveHttpClient = send(EnclaveHttpClient::connect(
+        "enclave.example.com",
+        Pin::none(),
+    ))
+    .await?;
+    let _: &Pin = unpinned.pin();
 
     let current: Arc<Verification> = configured.current();
     let valid: Arc<Verification> = send(configured.ensure_verified()).await?;
@@ -209,19 +214,19 @@ async fn router_refusal(builder: RouterHttpClientBuilder) -> String {
 
 #[tokio::test]
 async fn an_enclave_client_checks_its_options_before_any_io() {
-    let builder = || EnclaveHttpClient::builder("enclave.invalid", Some("owner/name"));
+    let builder = || EnclaveHttpClient::builder("enclave.invalid", Pin::repo("owner/name"));
     let ehbp = || builder().transport_mode(TransportMode::Ehbp);
     let cases: Vec<(EnclaveHttpClientBuilder, &str)> = vec![
         (
-            EnclaveHttpClient::builder("", Some("owner/name")),
+            EnclaveHttpClient::builder("", Pin::repo("owner/name")),
             "enclave host",
         ),
         (
-            EnclaveHttpClient::builder("https://enclave.invalid", Some("owner/name")),
+            EnclaveHttpClient::builder("https://enclave.invalid", Pin::repo("owner/name")),
             "enclave host",
         ),
         (
-            EnclaveHttpClient::builder("enclave.invalid/v1", Some("owner/name")),
+            EnclaveHttpClient::builder("enclave.invalid/v1", Pin::repo("owner/name")),
             "enclave host",
         ),
         (ehbp().base_url(""), "invalid base URL"),
@@ -244,11 +249,11 @@ async fn an_enclave_client_checks_its_options_before_any_io() {
         ),
         (builder().timeout(Duration::ZERO), "timeout is zero"),
         (
-            EnclaveHttpClient::builder("enclave.invalid", Some("")),
+            EnclaveHttpClient::builder("enclave.invalid", Pin::repo("")),
             "repository pin is empty",
         ),
         (
-            EnclaveHttpClient::builder("enclave.invalid", Some("not a reference")),
+            EnclaveHttpClient::builder("enclave.invalid", Pin::repo("not a reference")),
             "",
         ),
         // A proxy needs sealed bodies: the default mode pins connections.
@@ -273,13 +278,14 @@ async fn an_enclave_client_checks_its_options_before_any_io() {
 #[tokio::test]
 async fn an_enclave_client_reports_its_options_in_the_documented_order() {
     // Each builder is wrong in two ways; the earlier check answers.
-    let message =
-        enclave_refusal(EnclaveHttpClient::builder("", Some("")).base_url("ftp://proxy.invalid/"))
-            .await;
+    let message = enclave_refusal(
+        EnclaveHttpClient::builder("", Pin::repo("")).base_url("ftp://proxy.invalid/"),
+    )
+    .await;
     assert!(message.contains("enclave host"), "{message}");
 
     let message = enclave_refusal(
-        EnclaveHttpClient::builder("enclave.invalid", Some(""))
+        EnclaveHttpClient::builder("enclave.invalid", Pin::repo(""))
             .base_url("ftp://proxy.invalid/")
             .timeout(Duration::ZERO),
     )
@@ -287,13 +293,14 @@ async fn an_enclave_client_reports_its_options_in_the_documented_order() {
     assert!(message.contains("invalid base URL"), "{message}");
 
     let message = enclave_refusal(
-        EnclaveHttpClient::builder("enclave.invalid", Some("")).timeout(Duration::ZERO),
+        EnclaveHttpClient::builder("enclave.invalid", Pin::repo("")).timeout(Duration::ZERO),
     )
     .await;
     assert!(message.contains("timeout is zero"), "{message}");
 
     let message = enclave_refusal(
-        EnclaveHttpClient::builder("enclave.invalid", Some("")).base_url("https://proxy.invalid/"),
+        EnclaveHttpClient::builder("enclave.invalid", Pin::repo(""))
+            .base_url("https://proxy.invalid/"),
     )
     .await;
     assert!(message.contains("repository pin is empty"), "{message}");
@@ -337,7 +344,7 @@ async fn an_enclave_that_serves_no_attestation_document_is_a_network_error_after
     let (host, accepted) = plain_server(b"HTTP/1.1 200 OK\r\n\r\nnot a TLS server").await;
     for mode in [TransportMode::Tls, TransportMode::Ehbp] {
         let before = accepted.load(Ordering::SeqCst);
-        let connect = EnclaveHttpClient::builder(host.as_str(), Some("owner/name"))
+        let connect = EnclaveHttpClient::builder(host.as_str(), Pin::repo("owner/name"))
             .transport_mode(mode)
             .connect();
         let error = tokio::time::timeout(PATIENCE, connect)
@@ -357,7 +364,7 @@ async fn an_enclave_that_serves_no_attestation_document_is_a_network_error_after
 async fn connecting_to_an_enclave_that_never_answers_ends_at_the_timeout() {
     let (host, accepted) = plain_server(b"").await;
     let started = std::time::Instant::now();
-    let connect = EnclaveHttpClient::builder(host.as_str(), None)
+    let connect = EnclaveHttpClient::builder(host.as_str(), Pin::none())
         .timeout(Duration::from_millis(300))
         .connect();
     let error = tokio::time::timeout(PATIENCE, connect)
@@ -410,7 +417,7 @@ async fn a_router_client_checks_its_options_before_any_io() {
 async fn an_empty_repository_pin_is_refused_before_any_io() {
     // `.invalid` never resolves, so a connection attempt could not pass
     // for the refusal.
-    let error = EnclaveHttpClient::connect("enclave.invalid", Some(""))
+    let error = EnclaveHttpClient::connect("enclave.invalid", Pin::repo(""))
         .await
         .expect_err("an empty pin is refused");
     assert_eq!(error.kind(), ErrorKind::Configuration);
@@ -419,7 +426,7 @@ async fn an_empty_repository_pin_is_refused_before_any_io() {
         "{error}"
     );
 
-    let error = EnclaveHttpClient::builder("enclave.invalid", Some(""))
+    let error = EnclaveHttpClient::builder("enclave.invalid", Pin::repo(""))
         .connect()
         .await
         .expect_err("an empty pin is refused");
@@ -487,9 +494,10 @@ mod openai {
 
     #[tokio::test]
     async fn an_empty_repository_pin_is_refused_by_the_openai_client() {
-        let error = EnclaveOpenAIClient::connect("enclave.invalid", Some(""), OpenAIConfig::new())
-            .await
-            .expect_err("an empty pin is refused");
+        let error =
+            EnclaveOpenAIClient::connect("enclave.invalid", Pin::repo(""), OpenAIConfig::new())
+                .await
+                .expect_err("an empty pin is refused");
         assert_eq!(error.kind(), ErrorKind::Configuration);
         assert!(
             error.to_string().contains("repository pin is empty"),
@@ -500,13 +508,14 @@ mod openai {
     #[test]
     fn an_openai_builder_prints_no_api_key() {
         let config = OpenAIConfig::new().with_api_key("sk-secret-key");
-        let builder = EnclaveOpenAIClient::builder("enclave.example.com", Some("org/repo"), config)
-            .transport_mode(TransportMode::Tls)
-            .base_url("https://enclave.example.com/api/")
-            .verifier(Verifier::new())
-            .verification_check(check)
-            .user_cache_secret("cache-scope-value")
-            .timeout(Duration::from_secs(30));
+        let builder =
+            EnclaveOpenAIClient::builder("enclave.example.com", Pin::repo("org/repo"), config)
+                .transport_mode(TransportMode::Tls)
+                .base_url("https://enclave.example.com/api/")
+                .verifier(Verifier::new())
+                .verification_check(check)
+                .user_cache_secret("cache-scope-value")
+                .timeout(Duration::from_secs(30));
         let printed = format!("{builder:?}");
         assert!(!printed.contains("sk-secret-key"), "{printed}");
         assert!(!printed.contains("cache-scope-value"), "{printed}");
@@ -615,15 +624,18 @@ mod openai {
         let config = OpenAIConfig::new().with_api_key(&key);
         let enclave: EnclaveOpenAIClient = send(EnclaveOpenAIClient::connect(
             "enclave.example.com",
-            Some("org/repo"),
+            Pin::repo("org/repo"),
             config.clone(),
         ))
         .await?;
         let _: &EnclaveHttpClient = enclave.http_client();
-        let builder: EnclaveOpenAIClientBuilder =
-            EnclaveOpenAIClient::builder("enclave.example.com", Some("org/repo"), config.clone())
-                .transport_mode(TransportMode::Ehbp)
-                .base_url("https://proxy.example.com/v1/");
+        let builder: EnclaveOpenAIClientBuilder = EnclaveOpenAIClient::builder(
+            "enclave.example.com",
+            Pin::repo("org/repo"),
+            config.clone(),
+        )
+        .transport_mode(TransportMode::Ehbp)
+        .base_url("https://proxy.example.com/v1/");
         let _: EnclaveOpenAIClient = send(builder.connect()).await?;
 
         // The router, configured.

@@ -16,8 +16,8 @@ use crate::internal::{BoxFuture, Clock, fetch};
 use crate::options::{Check, VerificationCheck};
 use crate::verifier::{
     BoxError, CRYPTO_MATERIAL_ID_HPKE, CRYPTO_MATERIAL_ID_TLS, CryptoMaterialItem,
-    KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT, NONCE_SIZE, Verification, Verifier,
-    random_nonce,
+    KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT, NONCE_SIZE, Pin, Verification,
+    Verifier, random_nonce,
 };
 
 /// The pause before the one retry of a failed verification.
@@ -75,9 +75,10 @@ pub(crate) type Fetch = Arc<
 pub(crate) struct Config {
     /// The enclave: a host with an optional port.
     pub(crate) host: String,
-    /// The repository pin, `org/project[@revision][@sha256:digest]`, or
-    /// `None` to accept a config that the verifier authorizes.
-    pub(crate) repo: Option<String>,
+    /// The GitHub repository, the registry project, or both, that the
+    /// enclave is verified against; with neither, a config that the
+    /// verifier authorizes is accepted.
+    pub(crate) pin: Pin,
     /// The policy; `None` selects the default verifier.
     pub(crate) verifier: Option<Arc<Verifier>>,
     /// The caller's veto.
@@ -87,7 +88,7 @@ pub(crate) struct Config {
 /// One enclave and the policy that its attestation is verified against.
 pub(crate) struct Enclave<V = Verification> {
     host: String,
-    repo: Option<String>,
+    pin: Pin,
     #[cfg(test)]
     verifier: Option<Arc<Verifier>>,
     source: Source<V>,
@@ -98,7 +99,7 @@ pub(crate) struct Enclave<V = Verification> {
 /// A [`Config`] that passed its checks, with the verifier that it selects.
 pub(crate) struct Checked {
     host: String,
-    repo: Option<String>,
+    pin: Pin,
     verifier: Arc<Verifier>,
     verification_check: Option<VerificationCheck>,
 }
@@ -129,21 +130,21 @@ impl Config {
     /// order:
     ///
     /// 1. the host is not a host with an optional port;
-    /// 2. the repository pin is `Some("")` ([`check_pin`]);
+    /// 2. a part of the pin is `Some("")` ([`check_pin`]);
     /// 3. the verifier cannot verify against the pin
-    ///    (`Verifier::check_repo_verifiability`): the pin is not a
-    ///    repository reference, or the verifier's own configuration rules
-    ///    it out. The verifier's usage error is the source.
+    ///    (`Verifier::check_pin_verifiability`): a part of the pin is not
+    ///    a reference, or the verifier's own configuration rules it out.
+    ///    The verifier's usage error is the source.
     pub(crate) fn check(self) -> Result<Checked, Error> {
         authority_url(&self.host)?;
-        check_pin(self.repo.as_deref())?;
+        check_pin(&self.pin)?;
         let verifier = self.verifier.unwrap_or_else(|| Arc::new(Verifier::new()));
         verifier
-            .check_repo_verifiability(self.repo.as_deref())
+            .check_pin_verifiability(&self.pin)
             .map_err(from_verifier)?;
         Ok(Checked {
             host: self.host,
-            repo: self.repo,
+            pin: self.pin,
             verifier,
             verification_check: self.verification_check,
         })
@@ -174,17 +175,17 @@ impl Enclave<Verification> {
     pub(crate) fn from_checked(checked: Checked, clock: Clock, fetch: Fetch) -> Self {
         let verifier = checked.verifier;
         let source: Source<Verification> = {
-            let (host, repo) = (checked.host.clone(), checked.repo.clone());
+            let (host, pin) = (checked.host.clone(), checked.pin.clone());
             let verifier = Arc::clone(&verifier);
             Arc::new(move || {
-                let (host, repo) = (host.clone(), repo.clone());
+                let (host, pin) = (host.clone(), pin.clone());
                 let (verifier, fetch) = (Arc::clone(&verifier), Arc::clone(&fetch));
                 Box::pin(async move {
                     let nonce =
                         random_nonce().map_err(|error| Error::wrap(ErrorKind::Network, error))?;
                     let document = fetch(host, nonce).await?;
                     let verification = verifier
-                        .verify_v3(&document, &nonce, repo.as_deref())
+                        .verify_v3(&document, &nonce, &pin)
                         .map_err(from_verifier)?;
                     validate_transport_keys(&verification)?;
                     Ok(verification)
@@ -193,7 +194,7 @@ impl Enclave<Verification> {
         };
         Self {
             host: checked.host,
-            repo: checked.repo,
+            pin: checked.pin,
             #[cfg(test)]
             verifier: Some(verifier),
             source,
@@ -221,7 +222,7 @@ impl<V: Evidence> Enclave<V> {
     ) -> Self {
         Self {
             host: host.to_owned(),
-            repo: None,
+            pin: Pin::none(),
             #[cfg(test)]
             verifier: None,
             source,
@@ -235,9 +236,10 @@ impl<V: Evidence> Enclave<V> {
         &self.host
     }
 
-    /// The repository pin, with any tag or digest; `None` without one.
-    pub(crate) fn repo(&self) -> Option<&str> {
-        self.repo.as_deref()
+    /// The repository and the registry project that the enclave is
+    /// verified against, with any revision or digest.
+    pub(crate) fn pin(&self) -> &Pin {
+        &self.pin
     }
 
     /// The clock that the enclave judges freshness by.
@@ -372,16 +374,21 @@ fn retryable(error: &Error) -> bool {
     !vetoed && matches!(error.kind(), ErrorKind::Network | ErrorKind::Attestation)
 }
 
-/// Refuses an empty repository pin. "No pin" is `None`; `Some("")` is a
-/// configuration error, so that an empty string from a caller's own
+/// Refuses an empty part of a pin. An unset part is `None`; `Some("")` is
+/// a configuration error, so that an empty string from a caller's own
 /// configuration never silently removes the pin.
-pub(crate) fn check_pin(repo: Option<&str>) -> Result<(), Error> {
-    match repo {
-        Some("") => Err(Error::configuration(
-            "the repository pin is empty; pass `None` to verify without a repository pin",
-        )),
-        _ => Ok(()),
+pub(crate) fn check_pin(pin: &Pin) -> Result<(), Error> {
+    if pin.repo.as_deref() == Some("") {
+        return Err(Error::configuration(
+            "the repository pin is empty; leave it unset to verify without a repository pin",
+        ));
     }
+    if pin.project.as_deref() == Some("") {
+        return Err(Error::configuration(
+            "the project pin is empty; leave it unset to verify without a project pin",
+        ));
+    }
+    Ok(())
 }
 
 /// Requires the keys that a transport binds traffic to. An attestation
@@ -447,7 +454,7 @@ mod tests {
     #[test]
     fn a_usage_error_is_a_configuration_error_and_keeps_its_source() {
         let usage = Verifier::new()
-            .check_repo_verifiability(Some("not a reference"))
+            .check_pin_verifiability(&Pin::repo("not a reference"))
             .expect_err("an invalid reference is refused");
         let error = from_verifier(usage);
         assert_eq!(error.kind(), ErrorKind::Configuration);
@@ -457,11 +464,25 @@ mod tests {
 
     #[test]
     fn an_empty_pin_is_refused_and_an_absent_one_is_not() {
-        let error = check_pin(Some("")).expect_err("an empty pin is refused");
-        assert_eq!(error.kind(), ErrorKind::Configuration);
-        assert!(error.to_string().contains("repository pin is empty"));
-        assert!(check_pin(None).is_ok());
-        assert!(check_pin(Some("owner/name")).is_ok());
+        for (pin, part) in [
+            (Pin::repo(""), "repository pin is empty"),
+            (Pin::project(""), "project pin is empty"),
+            (
+                Pin::repo("owner/name").with_project(""),
+                "project pin is empty",
+            ),
+            (
+                Pin::project("org/project").with_repo(""),
+                "repository pin is empty",
+            ),
+        ] {
+            let error = check_pin(&pin).expect_err("an empty pin is refused");
+            assert_eq!(error.kind(), ErrorKind::Configuration);
+            assert!(error.to_string().contains(part), "{error}");
+        }
+        assert!(check_pin(&Pin::none()).is_ok());
+        assert!(check_pin(&Pin::repo("owner/name")).is_ok());
+        assert!(check_pin(&Pin::project("org/project")).is_ok());
     }
 
     use std::sync::Mutex;
@@ -775,10 +796,10 @@ mod tests {
         assert_eq!(script.calls(), 2);
     }
 
-    fn config(host: &str, repo: Option<&str>) -> Config {
+    fn config(host: &str, pin: Pin) -> Config {
         Config {
             host: host.to_owned(),
-            repo: repo.map(str::to_owned),
+            pin,
             verifier: None,
             verification_check: None,
         }
@@ -803,20 +824,23 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_enclave_that_cannot_be_verified_is_refused_before_any_fetch() {
         for (config, reason) in [
-            (config("", Some("owner/name")), "enclave host"),
+            (config("", Pin::repo("owner/name")), "enclave host"),
             (
-                config("https://enclave.example.com", Some("owner/name")),
+                config("https://enclave.example.com", Pin::repo("owner/name")),
                 "enclave host",
             ),
             (
-                config("enclave.example.com/x", Some("owner/name")),
+                config("enclave.example.com/x", Pin::repo("owner/name")),
                 "enclave host",
             ),
             (
-                config("enclave.example.com", Some("")),
+                config("enclave.example.com", Pin::repo("")),
                 "repository pin is empty",
             ),
-            (config("enclave.example.com", Some("not a reference")), ""),
+            (
+                config("enclave.example.com", Pin::repo("not a reference")),
+                "",
+            ),
         ] {
             let (fetch, fetched) = recording_fetch(Ok(Vec::new()));
             let error = Enclave::with_fetch(config, tokio_clock(), fetch)
@@ -832,7 +856,7 @@ mod tests {
     async fn a_pin_that_the_verifier_refuses_keeps_the_verifiers_error_as_its_source() {
         let (fetch, _) = recording_fetch(Ok(Vec::new()));
         let error = Enclave::with_fetch(
-            config("enclave.example.com", Some("not a reference")),
+            config("enclave.example.com", Pin::repo("not a reference")),
             tokio_clock(),
             fetch,
         )
@@ -849,13 +873,13 @@ mod tests {
     async fn each_attempt_fetches_with_a_fresh_nonce_and_a_rejected_document_is_tried_once_more() {
         let (fetch, fetched) = recording_fetch(Ok(b"not a document".to_vec()));
         let enclave = Enclave::with_fetch(
-            config("enclave.example.com:8443", Some("owner/name")),
+            config("enclave.example.com:8443", Pin::repo("owner/name")),
             tokio_clock(),
             fetch,
         )
         .expect("an enclave");
         assert_eq!(enclave.host(), "enclave.example.com:8443");
-        assert_eq!(enclave.repo(), Some("owner/name"));
+        assert_eq!(enclave.pin(), &Pin::repo("owner/name"));
 
         let error = enclave
             .verify()
@@ -882,9 +906,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_failed_fetch_is_reported_as_it_is_and_tried_once_more() {
         let (fetch, fetched) = recording_fetch(Err(Error::network("HTTP 503")));
-        let enclave =
-            Enclave::with_fetch(config("enclave.example.com", None), tokio_clock(), fetch)
-                .expect("an enclave");
+        let enclave = Enclave::with_fetch(
+            config("enclave.example.com", Pin::none()),
+            tokio_clock(),
+            fetch,
+        )
+        .expect("an enclave");
         let error = enclave.verify().await.expect_err("the fetch fails");
         assert_eq!(error.to_string(), "network error: HTTP 503");
         assert_eq!(fetched.lock().unwrap().len(), 2);

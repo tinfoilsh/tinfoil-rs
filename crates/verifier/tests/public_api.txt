@@ -39,6 +39,8 @@ field ConfigVerification.source
 field EmbeddedReferences.config
 field EmbeddedReferences.platform
 field EmbeddedReferences.runtime
+field Pin.project
+field Pin.repo
 field Reference.digest
 field Reference.repo
 field Reference.tag
@@ -57,6 +59,11 @@ fn Expected::parse_sev_snp
 fn Expected::parse_tdx
 fn Layer::as_str
 fn Measurement::expected
+fn Pin::none
+fn Pin::project
+fn Pin::repo
+fn Pin::with_project
+fn Pin::with_repo
 fn PublicKey::from_pem
 fn PublicKey::from_spki_der
 fn PublicKey::to_spki_der
@@ -81,7 +88,7 @@ fn Verification::to_json
 fn VerificationError::layer
 fn Verifier::builder
 fn Verifier::caller_authorizes_config
-fn Verifier::check_repo_verifiability
+fn Verifier::check_pin_verifiability
 fn Verifier::freshness_max_age
 fn Verifier::new
 fn Verifier::pinned_registers
@@ -104,6 +111,7 @@ struct ArtifactVerification
 struct ConfigEndorsement
 struct ConfigVerification
 struct EmbeddedReferences
+struct Pin
 struct PublicKey
 struct Reference
 struct Register

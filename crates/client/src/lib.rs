@@ -203,6 +203,7 @@ pub use openai::{
 pub use options::TransportMode;
 pub use request::RequestBuilder;
 pub use router_client::{RouterHttpClient, RouterHttpClientBuilder};
+pub use tinfoil_verifier::Pin;
 
 // Compiles the examples of the repository's README as documentation tests,
 // so that they cannot drift from the API.

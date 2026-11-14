@@ -38,7 +38,7 @@ use tinfoil_verifier::{
     CRYPTO_MATERIAL_ID_TLS, CRYPTO_MATERIAL_V1_FORMAT, ConfigEndorsement, ConfigVerification,
     CryptoMaterialItem, DEVICE_EVIDENCE_V1_FORMAT, EmbeddedConfig, EmbeddedReferences, Error,
     Expected, KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_SPKI_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT, Layer,
-    Measurement, NONCE_SIZE, NVIDIA_GPU_EVIDENCE_V1_FORMAT, PUBLIC_REGISTRY_ID, PublicKey,
+    Measurement, NONCE_SIZE, NVIDIA_GPU_EVIDENCE_V1_FORMAT, PUBLIC_REGISTRY_ID, Pin, PublicKey,
     REGISTER_SIZE, REPORT_DATA_V1_ALGORITHM, Reference, ReferenceSource, Register,
     RuntimeReference, SEV_SNP_REPORT_V1_FORMAT, SoftwareIdentity, TDX_QUOTE_V1_FORMAT, UsageError,
     Verification, VerificationError, VerificationMetadata, Verifier, VerifierBuilder,
@@ -51,11 +51,18 @@ fn every_public_name_is_importable_and_has_its_signature() {
     let _: fn() -> Verifier = Verifier::new;
     let _: fn() -> Verifier = Verifier::default;
     let _: fn() -> VerifierBuilder = Verifier::builder;
-    let _: fn(&Verifier, &[u8], &[u8], Option<&str>) -> Result<Verification, Error> =
-        Verifier::verify_v3;
-    let _: fn(&Verifier, &[u8], &[u8], Option<&str>, SystemTime) -> Result<Verification, Error> =
+    let _: fn(&Verifier, &[u8], &[u8], &Pin) -> Result<Verification, Error> = Verifier::verify_v3;
+    let _: fn(&Verifier, &[u8], &[u8], &Pin, SystemTime) -> Result<Verification, Error> =
         Verifier::verify_v3_at;
-    let _: fn(&Verifier, Option<&str>) -> Result<(), Error> = Verifier::check_repo_verifiability;
+    let _: fn(&Verifier, &Pin) -> Result<(), Error> = Verifier::check_pin_verifiability;
+    let _: fn() -> Pin = Pin::none;
+    let _: fn(&'static str) -> Pin = Pin::repo;
+    let _: fn(String) -> Pin = Pin::project;
+    let _: fn(Pin, &'static str) -> Pin = Pin::with_repo;
+    let _: fn(Pin, String) -> Pin = Pin::with_project;
+    let pin = Pin::repo("owner/name").with_project("org/project");
+    let _: (&Option<String>, &Option<String>) = (&pin.repo, &pin.project);
+    assert_eq!(Pin::none(), Pin::default());
     let _: fn(&Verifier) -> bool = Verifier::caller_authorizes_config;
     let _: for<'a> fn(&'a Verifier) -> Option<&'a Expected> = Verifier::pinned_registers;
     let _: fn(&Verifier) -> Duration = Verifier::freshness_max_age;
@@ -219,7 +226,7 @@ fn every_public_name_is_importable_and_has_its_signature() {
 
     // Errors.
     let error: Error = verifier
-        .verify_v3(b"{}", &[0; NONCE_SIZE], None)
+        .verify_v3(b"{}", &[0; NONCE_SIZE], &Pin::none())
         .unwrap_err();
     let _: Option<&(dyn StdError + 'static)> = error.source();
     match error {
@@ -247,7 +254,7 @@ fn every_public_name_is_importable_and_has_its_signature() {
         "envelope provenance quote policy"
     );
     let usage: Error = verifier
-        .verify_v3(b"{}", &[0; NONCE_SIZE - 1], None)
+        .verify_v3(b"{}", &[0; NONCE_SIZE - 1], &Pin::none())
         .unwrap_err();
     assert!(matches!(usage, Error::Usage(_)));
     fn assert_error<T: StdError + Send + Sync + 'static>() {}

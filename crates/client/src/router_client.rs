@@ -12,7 +12,7 @@ use crate::internal::enclave::{self, Enclave};
 use crate::internal::{cachesecret, router, system_clock};
 use crate::options::{RouteOptions, Secret, TransportMode};
 use crate::request::http_request_methods;
-use crate::verifier::{BoxError, Verification, Verifier};
+use crate::verifier::{BoxError, Pin, Verification, Verifier};
 
 /// An HTTP client whose requests reach only the attested router that it
 /// discovered.
@@ -59,12 +59,11 @@ impl RouterHttpClient {
         self.inner.enclave()
     }
 
-    /// The repository that the router is verified against. A router is
-    /// always pinned to Tinfoil's router repository.
-    pub fn repo(&self) -> &str {
-        self.inner
-            .repo()
-            .unwrap_or(crate::internal::router::ROUTER_REPO)
+    /// The pin that the router is verified against. A router is always
+    /// pinned to Tinfoil's router, as a GitHub repository and as a registry
+    /// project.
+    pub fn pin(&self) -> &Pin {
+        self.inner.pin()
     }
 
     /// The transport mode that the client was created with.
@@ -101,7 +100,7 @@ impl fmt::Debug for RouterHttpClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RouterHttpClient")
             .field("enclave", &self.enclave())
-            .field("repo", &self.repo())
+            .field("pin", &self.pin())
             .field("base_url", &self.base_url().as_str())
             .field("transport_mode", &self.transport_mode())
             .finish_non_exhaustive()
@@ -243,13 +242,13 @@ impl RouterHttpClientBuilder {
         let (fallback, settings) = self.prepare()?;
         let mode = mode_for(settings.mode)?;
         // Every router is verified under the policy that was checked, and
-        // against the router repository.
+        // against the router pin.
         let verifier = Arc::clone(fallback.verifier());
         let check = fallback.verification_check().cloned();
         let enclave_for = move |host: &str| {
             let checked = enclave::Config {
                 host: host.to_owned(),
-                repo: Some(router::ROUTER_REPO.to_owned()),
+                pin: router::router_pin(),
                 verifier: Some(Arc::clone(&verifier)),
                 verification_check: check.clone(),
             }
@@ -298,7 +297,7 @@ impl RouterHttpClientBuilder {
         }
         let fallback = enclave::Config {
             host: router::FALLBACK_ROUTER.to_owned(),
-            repo: Some(router::ROUTER_REPO.to_owned()),
+            pin: router::router_pin(),
             verifier: common.verifier,
             verification_check: common.verification_check,
         }

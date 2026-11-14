@@ -14,14 +14,20 @@ use crate::internal::fetch;
 use crate::internal::transport::base_url::authority_url;
 use crate::internal::transport::{Mode, Transport};
 use crate::options::Secret;
+use crate::verifier::Pin;
 
 #[cfg(test)]
 #[path = "router_tests.rs"]
 mod tests;
 
-/// The repository that every router is verified against. No option
-/// changes it.
-pub(crate) const ROUTER_REPO: &str = "tinfoilsh/confidential-model-router";
+/// The name that every router is verified against. No option changes it.
+pub(crate) const ROUTER_NAME: &str = "tinfoilsh/confidential-model-router";
+
+/// The pin of every router. The router is published under one name in both
+/// namespaces, each owned by Tinfoil.
+pub(crate) fn router_pin() -> Pin {
+    Pin::repo(ROUTER_NAME).with_project(ROUTER_NAME)
+}
 
 /// Where the list of routers is published.
 pub(crate) const ROUTER_LIST_URL: &str = "https://atc.tinfoil.sh/routers";
@@ -46,7 +52,7 @@ pub(crate) const MAX_ROUTER_LIST_BYTES: usize = 32 << 20;
 ///    are tried one at a time, in the order of the list, as often as they
 ///    appear in it. Nothing is shuffled.
 /// 2. `enclave_for` makes the enclave of a host, under the caller's policy
-///    and the router repository. A host that it refuses is skipped.
+///    and the router pin. A host that it refuses is skipped.
 /// 3. A probe is one verification without a retry, followed by binding
 ///    `mode` to its keys, so that a router whose keys the mode cannot use
 ///    is skipped as well. Whatever makes a probe fail (the network, the

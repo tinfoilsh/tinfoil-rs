@@ -20,6 +20,7 @@
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
 
 use serde::{Deserialize, Serialize};
+use tinfoil_verifier::Pin;
 
 /// The document was accepted; [`Output::outputs`] carries the verified facts.
 pub const EXIT_ACCEPTED: i32 = 0;
@@ -100,8 +101,12 @@ pub struct Input {
     pub document_b64: String,
     /// The verifier's nonce, lowercase hex. Never the document's echoed nonce.
     pub nonce_hex: String,
-    /// The pinned repository.
+    /// The pinned GitHub repository.
     pub repo: String,
+    /// The pinned config registry project. Absent in inputs where `repo`
+    /// names the workload in either namespace.
+    #[serde(deserialize_with = "present")]
+    pub project: Option<String>,
 
     /// The Sigstore bundle JSON, base64 (approval stage).
     pub bundle_json_b64: String,
@@ -126,6 +131,34 @@ pub struct Input {
     /// The appraisal time in seconds since the epoch, before it when
     /// negative; zero means now.
     pub verification_time_unix: i64,
+}
+
+/// Decodes a member that is present as a string, so that only an absent
+/// member is `None`.
+fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
+
+/// The pin of an input that names `repo` and, when the member is present,
+/// `project`. Without the member, `repo` stands for both parts. An empty
+/// name leaves its part unset.
+fn pin(repo: &str, project: Option<&str>) -> Pin {
+    let part = |name: &str| {
+        Some(name)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+    };
+    Pin {
+        repo: part(repo),
+        project: part(project.unwrap_or(repo)),
+    }
+}
+
+impl Input {
+    /// The pin that the input names.
+    pub fn pin(&self) -> Pin {
+        pin(&self.repo, self.project.as_deref())
+    }
 }
 
 /// The stdout JSON of one adapter run.
@@ -392,6 +425,7 @@ mod tests {
                 r#"{"schema_version":"1","repo":"a","repo":"b"}"#,
             ),
             ("null member", r#"{"schema_version":"1","repo":null}"#),
+            ("null project", r#"{"schema_version":"1","project":null}"#),
             (
                 "mistyped member",
                 r#"{"schema_version":"1","signing_keys_pem":"x"}"#,
@@ -416,6 +450,28 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn an_input_without_a_project_pins_its_repository_in_both_namespaces() {
+        let pin = |input: &str| serde_json::from_str::<Input>(input).unwrap().pin();
+        assert_eq!(pin(MINIMAL), Pin::none());
+        assert_eq!(
+            pin(r#"{"schema_version":"1","repo":"o/r"}"#),
+            Pin::repo("o/r").with_project("o/r")
+        );
+        assert_eq!(
+            pin(r#"{"schema_version":"1","repo":"o/r","project":"o/p"}"#),
+            Pin::repo("o/r").with_project("o/p")
+        );
+        assert_eq!(
+            pin(r#"{"schema_version":"1","repo":"o/r","project":""}"#),
+            Pin::repo("o/r")
+        );
+        assert_eq!(
+            pin(r#"{"schema_version":"1","project":"o/p"}"#),
+            Pin::project("o/p")
+        );
     }
 
     #[test]

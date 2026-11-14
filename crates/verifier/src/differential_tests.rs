@@ -32,14 +32,15 @@ use base64::engine::general_purpose::STANDARD;
 use sha2::{Digest, Sha256};
 
 use crate::canonical::{decode_hex, encode_lower_hex};
+use crate::document::collateral::FORMAT_V2;
 use crate::error::{BoxError, Error};
 use crate::instant::Instant;
 use crate::json::{self, Object, Value};
 use crate::measurement::{Expected, Measurement, Register};
 use crate::verification::{ArtifactVerification, ConfigVerification, Verification};
 use crate::{
-    ConfigEndorsement, EmbeddedConfig, EmbeddedReferences, PublicKey, RuntimeReference, Verifier,
-    x509,
+    ConfigEndorsement, EmbeddedConfig, EmbeddedReferences, Pin, PublicKey, RuntimeReference,
+    Verifier, x509,
 };
 
 const CASES: &[u8] = include_bytes!("../tests/data/verifier/integration_differential.json");
@@ -65,10 +66,27 @@ pub(crate) fn member<'a>(object: &'a Object, name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("member {name} is missing"))
 }
 
-/// The repository pin of a recorded case, where the empty text records
-/// that there is none.
-pub(crate) fn pin(repo: &str) -> Option<&str> {
-    Some(repo).filter(|repo| !repo.is_empty())
+/// The pin of a recorded case. A case records one name, which pins the
+/// GitHub repository when its document carries repository collateral and
+/// the registry project otherwise; the empty text records that there is
+/// no pin.
+pub(crate) fn pin(fixture: &Fixture, case: &Object) -> Pin {
+    let name = text(case, "repo");
+    if name.is_empty() {
+        return Pin::none();
+    }
+    let format = Some(text(case, "doc"))
+        .filter(|document| !document.is_empty())
+        .and_then(|document| fixture.document(document))
+        .and_then(|document| json::parse(&document).ok())
+        .and_then(|document| {
+            let format = text(document.as_object()?, "collateral_format");
+            Some(format.to_owned())
+        });
+    match format.as_deref() {
+        Some("" | FORMAT_V2) => Pin::repo(name),
+        _ => Pin::project(name),
+    }
 }
 
 pub(crate) fn text<'a>(object: &'a Object, name: &str) -> &'a str {
@@ -530,8 +548,8 @@ fn replay(fixture: &Fixture, case: &Object) -> Outcome {
         (Err(error), false) => return Outcome::Stricter(format!("build fails: {error}")),
         (Ok(_), true) => return Outcome::Differs("build succeeds".to_owned()),
     };
-    let repo = text(case, "repo");
-    let repo_check = verifier.check_repo_verifiability(pin(repo));
+    let pin = pin(fixture, case);
+    let repo_check = verifier.check_pin_verifiability(&pin);
     if let Err(error) = &repo_check
         && !matches!(error, Error::Usage(_))
     {
@@ -557,7 +575,7 @@ fn replay(fixture: &Fixture, case: &Object) -> Outcome {
     if instant(case).to_system_time().is_none() {
         return Outcome::Skipped;
     }
-    let result = verifier.verify_at(&document, &nonce, repo, instant(case));
+    let result = verifier.verify_at(&document, &nonce, &pin, instant(case));
     let verdict = text(recorded, "verdict");
     let got = match &result {
         Ok(_) => "accept".to_owned(),

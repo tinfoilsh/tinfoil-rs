@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use tinfoil::{EnclaveHttpClient, ErrorKind, TransportMode};
+use tinfoil::{EnclaveHttpClient, ErrorKind, Pin, TransportMode};
 
 const ENCLAVE: &str = "inference.tinfoil.sh";
 const REPO: &str = "tinfoilsh/confidential-model-router";
@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = api_key()?;
 
     // The enclave is verified before `connect` returns.
-    let client = EnclaveHttpClient::connect(ENCLAVE, Some(REPO)).await?;
+    let client = EnclaveHttpClient::connect(ENCLAVE, Pin::repo(REPO)).await?;
 
     let verified = client.current();
     println!("enclave:     {}", client.enclave());
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("set TINFOIL_PROXY_URL to send a sealed request through a proxy");
         return Ok(());
     };
-    let proxied = EnclaveHttpClient::builder(ENCLAVE, Some(REPO))
+    let proxied = EnclaveHttpClient::builder(ENCLAVE, Pin::repo(REPO))
         .transport_mode(TransportMode::Ehbp)
         .base_url(proxy_url)
         .timeout(Duration::from_secs(60))
