@@ -875,7 +875,7 @@ fn the_collateral_of_the_document_selects_the_part_of_the_pin() {
     const REPOSITORY_ONLY: &str =
         "document carries config registry collateral, but only a GitHub repository is pinned";
     const NO_REPOSITORY: &str =
-        "document carries GitHub repository collateral, but no GitHub repository is pinned";
+        "document carries GitHub repository collateral, but only a registry project is pinned";
     const OTHER: &str = "other/name";
 
     let fixture = Fixture::load();
@@ -904,7 +904,7 @@ fn the_collateral_of_the_document_selects_the_part_of_the_pin() {
         accepted(name, &Pin::repo(released));
         accepted(name, &Pin::repo(released).with_project(OTHER));
         rejected(name, &Pin::project(released), NO_REPOSITORY);
-        rejected(name, &Pin::none(), NO_REPOSITORY);
+        usage(verify(name, &Pin::none()));
         rejected(
             name,
             &Pin::repo(OTHER).with_project(released),

@@ -64,7 +64,11 @@ impl Request {
             return None;
         }
         let request: Self = serde_json::from_slice(stdin).ok()?;
-        let named = !request.repo.is_empty() || request.project.is_some();
+        let named = !request.repo.is_empty()
+            || request
+                .project
+                .as_deref()
+                .is_some_and(|project| !project.is_empty());
         (!request.host.is_empty() && named).then_some(request)
     }
 
@@ -288,10 +292,7 @@ mod tests {
             pin(r#"{"host":"h","project":"o/p"}"#),
             Some(Pin::project("o/p"))
         );
-        assert_eq!(
-            pin(r#"{"host":"h","repo":"","project":""}"#),
-            Some(Pin::none())
-        );
+        assert_eq!(pin(r#"{"host":"h","repo":"","project":""}"#), None);
         assert_eq!(pin(r#"{"host":"h","repo":"o/r","project":null}"#), None);
     }
 

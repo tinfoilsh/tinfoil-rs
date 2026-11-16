@@ -313,8 +313,8 @@ pub struct Pin {
     /// document that carries that repository's signed release satisfies it.
     pub repo: Option<String>,
     /// A config registry project, `org/project[@revision][@sha256:digest]`.
-    /// Only a document that carries a registry approval of that project
-    /// satisfies it.
+    /// Only a document that carries a registry approval of that project,
+    /// or a matching config that the caller embedded, satisfies it.
     pub project: Option<String>,
 }
 
@@ -570,9 +570,12 @@ impl Verifier {
                 self.config_references(trust, &document, pins, now)
             }
         } else if format == FORMAT_V2 {
-            if references.repo.is_empty() && !self.requires_config_collateral() {
+            if references.repo.is_empty()
+                && !references.project.is_empty()
+                && !self.requires_config_collateral()
+            {
                 Err(Refused::rejected(
-                    "document carries GitHub repository collateral, but no GitHub repository is pinned",
+                    "document carries GitHub repository collateral, but only a registry project is pinned",
                 ))
             } else {
                 self.code_references(trust, &document, references.repo, now)
