@@ -351,7 +351,7 @@
 {"id":"fixed/xfam-43","minimum":17,"quote":100,"reference":"ok","xfam":"4300000000000000"},
 {"id":"fixed/xfam-23","minimum":17,"quote":101,"reference":"ok","xfam":"2300000000000000"},
 {"id":"fixed/td-attributes-0","minimum":17,"quote":102,"reference":"ok","td_attributes":"0000000000000000"},
-{"id":"fixed/td-attributes-1","minimum":17,"quote":103,"reference":"ok","td_attributes":"0100000000000000"},
+{"id":"fixed/td-attributes-1","minimum":17,"quote":103,"reference":"validate","td_attributes":"0100000000000000"},
 {"id":"fixed/td-attributes-2","minimum":17,"quote":104,"reference":"validate","td_attributes":"0200000000000000"},
 {"id":"fixed/td-attributes-4","minimum":17,"quote":105,"reference":"validate","td_attributes":"0400000000000000"},
 {"id":"fixed/td-attributes-8000000","minimum":17,"quote":106,"reference":"validate","td_attributes":"0000000800000000"},
@@ -362,7 +362,7 @@
 {"id":"fixed/td-attributes-100000000","minimum":17,"quote":110,"reference":"validate","td_attributes":"0000000001000000"},
 {"id":"fixed/td-attributes-4000000000000000","minimum":17,"quote":111,"reference":"validate","td_attributes":"0000000000000040"},
 {"id":"fixed/td-attributes-8000000000000000","minimum":17,"quote":112,"reference":"ok","td_attributes":"0000000000000080"},
-{"id":"fixed/td-attributes-8000000050000001","minimum":17,"quote":113,"reference":"ok","td_attributes":"0100005000000080"},
+{"id":"fixed/td-attributes-8000000050000001","minimum":17,"quote":113,"reference":"validate","td_attributes":"0100005000000080"},
 {"id":"fixed/td-attributes-50000000","minimum":17,"quote":114,"reference":"ok","td_attributes":"0000005000000000"},
 {"id":"fixed/td-attributes-10000002","minimum":17,"quote":115,"reference":"validate","td_attributes":"0200001000000000"},
 {"id":"fixed/td-attributes-ffffffffffffffff","minimum":17,"quote":116,"reference":"validate","td_attributes":"ffffffffffffffff"}

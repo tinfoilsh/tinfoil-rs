@@ -9,6 +9,9 @@ use crate::policy::TdxPolicy;
 use crate::quote::AssemblyError;
 use crate::quote::resolve::MR_CONFIG_ID_SIZE;
 
+/// The DEBUG bit of TDATTRIBUTES, in its first byte.
+const TD_ATTRIBUTES_DEBUG: u8 = 1 << 0;
+
 /// The fully translated expected state of a TDX quote, resolved at assembly
 /// so that validation performs no translation and no lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,11 +109,15 @@ impl Expectations {
     /// Compares a quote against the expected state. This is the only TDX
     /// enforcement entry point, so no subset of the policy can be applied.
     ///
-    /// In order: the quote satisfies the options
+    /// In order: the quote does not report a debuggable TD, whatever the
+    /// options say; the quote satisfies the options
     /// ([`validate`](super::lib::validate::validate)); the quote's
     /// `tcbEvaluationDataNumber` is at least the minimum. A negative
     /// number is below every minimum.
     pub fn validate(&self, quote: &Quote) -> Result<(), AssemblyError> {
+        if quote.quote().body.td_attributes[0] & TD_ATTRIBUTES_DEBUG != 0 {
+            return Err(AssemblyError::new("TD quote reports a debuggable TD"));
+        }
         super::lib::validate::validate(quote.quote(), &self.options)?;
         let number = quote.tcb_evaluation_data_number();
         let reached = u64::try_from(number)

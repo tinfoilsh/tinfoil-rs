@@ -625,7 +625,11 @@ fn envelope<'a>(
 ) -> Result<Envelope<'a>, QuoteError> {
     let names = [member, SIGNATURE_MEMBER];
     let members = Members::new(parsed, member, &names)?;
-    if members.object.iter().any(|(name, _)| !names.contains(&name)) {
+    if members
+        .object
+        .iter()
+        .any(|(name, _)| !names.contains(&name))
+    {
         return Err(malformed(
             member,
             format!(

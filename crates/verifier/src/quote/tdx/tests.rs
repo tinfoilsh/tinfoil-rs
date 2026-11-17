@@ -1661,6 +1661,19 @@ fn every_dimension_of_the_policy_is_enforced() {
         assert!(error.contains(name), "{field}: {error}");
     }
 
+    // A debuggable TD is refused even when the policy states its attributes.
+    let mut debuggable = bytes.clone();
+    debuggable[168] |= 1;
+    let debuggable = Quote::unauthenticated(&debuggable, 5).unwrap();
+    let (debug_policy, ..) = matching(debuggable.quote());
+    assert_eq!(debug_policy.td_attributes, flipped(&policy.td_attributes));
+    let error = assemble(&debug_policy, &measurement, &report_data, &config_id)
+        .unwrap()
+        .validate(&debuggable)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "TD quote reports a debuggable TD");
+
     // A collateral floor above the observed number rejects.
     let stale = Quote::unauthenticated(&bytes, 4).unwrap();
     let error = expectations.validate(&stale).unwrap_err().to_string();

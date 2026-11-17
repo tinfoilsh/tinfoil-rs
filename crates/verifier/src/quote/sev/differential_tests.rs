@@ -430,10 +430,10 @@ fn recorded_policies_stop_where_they_are_recorded_to_stop() {
     assert_eq!(
         stops,
         [
-            ("accept", 369),
+            ("accept", 365),
             ("assemble", 193),
             ("authenticate", 6),
-            ("validate", 714)
+            ("validate", 718)
         ]
     );
 }
