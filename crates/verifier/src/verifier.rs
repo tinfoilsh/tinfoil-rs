@@ -507,7 +507,9 @@ impl Verifier {
         pin: &Pin,
         now: Instant,
     ) -> Result<Verification, Error> {
+        // A malformed pin is a usage error for any document.
         let references = pin.references()?;
+        let pins = self.check_references(references)?;
         let trust = self.trust.as_ref().map_err(|cause| {
             UsageError::new(format!("embedded trust material is unusable: {cause}"))
         })?;
@@ -524,9 +526,6 @@ impl Verifier {
                 rejected_at(Layer::Envelope)(cause.into())
             }
         })?;
-
-        // A malformed pin is a usage error for any document.
-        let pins = self.check_references(references)?;
 
         // Reference values and CPU evidence are appraised at one instant.
         let format = document.collateral_format();

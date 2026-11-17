@@ -110,7 +110,7 @@ async fn list_models(api_key: &str) -> Result<String, Box<dyn std::error::Error>
 }
 ```
 
-A `Pin` names the workload: `Pin::repo("owner/name")` for a GitHub repository, `Pin::project("org/project")` for a config registry project, or `Pin::repo(..).with_project(..)` to accept either. Neither is satisfied by the other's collateral.
+A `Pin` names the workload: `Pin::repo("owner/name")` for a GitHub repository, `Pin::project("org/project")` for a config registry project, or `Pin::repo(..).with_project(..)` to accept either. The same name can belong to different owners in each, so neither is satisfied by the other's collateral; a project is also satisfied by a matching config that the caller embedded.
 
 `RouterHttpClient::connect()` takes no host: it tries the routers of Tinfoil's published list in order and keeps the first that passes verification, or else `inference.tinfoil.sh`.
 
