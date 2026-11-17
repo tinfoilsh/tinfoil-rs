@@ -121,7 +121,11 @@ fn an_entry_that_is_not_a_host_is_left_out_and_the_others_stay() {
 fn the_constants_are_the_published_ones() {
     assert_eq!(ROUTER_LIST_URL, "https://atc.tinfoil.sh/routers");
     assert_eq!(FALLBACK_ROUTER, "inference.tinfoil.sh");
-    assert_eq!(ROUTER_REPO, "tinfoilsh/confidential-model-router");
+    assert_eq!(ROUTER_NAME, "tinfoilsh/confidential-model-router");
+    assert_eq!(
+        router_pin(),
+        Pin::repo(ROUTER_NAME).with_project(ROUTER_NAME)
+    );
     assert_eq!(DISCOVERY_BUDGET, Duration::from_secs(30));
     assert_eq!(LIST_FETCH_TIMEOUT, Duration::from_secs(30));
     assert_eq!(MAX_ROUTER_LIST_BYTES, 32 * 1024 * 1024);

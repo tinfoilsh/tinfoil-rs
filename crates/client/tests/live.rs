@@ -27,7 +27,7 @@ async fn the_router_is_discovered_verified_and_reached_over_a_pinned_connection(
         .unwrap();
 
     let verified = client.current();
-    assert_eq!(verified.config_repo(), client.repo());
+    assert_eq!(Some(verified.config_repo()), client.pin().repo.as_deref());
     assert!(verified.tls_public_key_fp().is_some());
     assert!(verified.freshness_expires_at().is_some());
 

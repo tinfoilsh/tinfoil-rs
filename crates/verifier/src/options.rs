@@ -326,7 +326,7 @@ impl VerifierBuilder {
     /// be called from several threads at once. Runtime, platform and
     /// hardware checks still apply; an authorized config has no
     /// authenticated registry name or approval time, and such a verifier
-    /// accepts no repository pin.
+    /// accepts no pin.
     pub fn config_authorizer(
         mut self,
         authorize: impl Fn(&ConfigEndorsement) -> Result<(), BoxError> + Send + Sync + 'static,

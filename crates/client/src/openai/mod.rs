@@ -15,7 +15,7 @@ use crate::enclave_client::{EnclaveHttpClient, EnclaveHttpClientBuilder};
 use crate::error::Error;
 use crate::options::TransportMode;
 use crate::router_client::{RouterHttpClient, RouterHttpClientBuilder};
-use crate::verifier::{BoxError, Verification, Verifier};
+use crate::verifier::{BoxError, Pin, Verification, Verifier};
 
 pub(crate) mod relaxed;
 pub(crate) mod retry;
@@ -286,16 +286,16 @@ pub struct EnclaveOpenAIClient {
 }
 
 impl EnclaveOpenAIClient {
-    /// Verifies the enclave at `host` against `repo`, as
-    /// [`EnclaveHttpClient::connect`] does (`None` sets no repository pin),
+    /// Verifies the enclave at `host` against `pin`, as
+    /// [`EnclaveHttpClient::connect`] does ([`Pin::none`] sets no pin),
     /// and returns an OpenAI client over it. `config` is applied first; then the API base and the HTTP
     /// client are set, so that `config` cannot replace them.
     pub async fn connect(
         host: impl Into<String>,
-        repo: Option<&str>,
+        pin: Pin,
         config: OpenAIConfig,
     ) -> Result<Self, Error> {
-        Self::builder(host, repo, config).connect().await
+        Self::builder(host, pin, config).connect().await
     }
 
     /// Starts an OpenAI client for the enclave at `host`, to be configured
@@ -303,11 +303,11 @@ impl EnclaveOpenAIClient {
     /// [`EnclaveHttpClientBuilder`].
     pub fn builder(
         host: impl Into<String>,
-        repo: Option<&str>,
+        pin: Pin,
         config: OpenAIConfig,
     ) -> EnclaveOpenAIClientBuilder {
         EnclaveOpenAIClientBuilder {
-            http: EnclaveHttpClient::builder(host, repo),
+            http: EnclaveHttpClient::builder(host, pin),
             config,
         }
     }

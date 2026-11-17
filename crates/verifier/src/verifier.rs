@@ -153,7 +153,7 @@ impl StdError for AuthorizerRefusal {
     }
 }
 
-/// The pins that a repository reference sets on a config endorsement.
+/// The pins that a project reference sets on a config endorsement.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Pins {
     pub(crate) identity: Option<String>,
@@ -288,15 +288,88 @@ pub fn parse_reference(reference: &str) -> Result<Reference, Error> {
     endorsement::parse_reference(reference).map_err(|cause| UsageError::new(cause).into())
 }
 
-/// The caller's repository pin as the reference text that verification
-/// matches, where the empty text is the absence of a pin. A pin that is
-/// itself empty is refused, so that only `None` sets no pin.
-fn pin_reference(repo: Option<&str>) -> Result<&str, UsageError> {
-    match repo {
+/// Names the workload that a caller trusts. The repository and the project
+/// are separate namespaces with unrelated owners, so neither is satisfied by
+/// the other's collateral. Setting both accepts either; [`Pin::none`] accepts
+/// any config that the verifier's trust authorizes.
+///
+/// ```
+/// use tinfoil_verifier::Pin;
+///
+/// let repo = Pin::repo("owner/name@v1.2.3");
+/// let project = Pin::project("org/project");
+/// let either = Pin::repo("owner/name").with_project("org/project");
+/// assert_eq!(either.repo.as_deref(), Some("owner/name"));
+/// assert_eq!(either.project.as_deref(), Some("org/project"));
+/// assert_ne!(repo, project);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pin {
+    /// A GitHub repository, `owner/name[@tag][@sha256:digest]`.
+    pub repo: Option<String>,
+    /// A config registry project, `org/project[@revision][@sha256:digest]`.
+    pub project: Option<String>,
+}
+
+impl Pin {
+    /// A pin that names nothing.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// A pin on the GitHub repository `repo`.
+    pub fn repo(repo: impl Into<String>) -> Self {
+        Self::none().with_repo(repo)
+    }
+
+    /// A pin on the config registry project `project`.
+    pub fn project(project: impl Into<String>) -> Self {
+        Self::none().with_project(project)
+    }
+
+    /// This pin with the GitHub repository `repo`.
+    pub fn with_repo(mut self, repo: impl Into<String>) -> Self {
+        self.repo = Some(repo.into());
+        self
+    }
+
+    /// This pin with the config registry project `project`.
+    pub fn with_project(mut self, project: impl Into<String>) -> Self {
+        self.project = Some(project.into());
+        self
+    }
+
+    /// The two parts as reference texts, empty when unset. `Some("")` is
+    /// refused, so that only `None` leaves a part unset.
+    fn references(&self) -> Result<PinReferences<'_>, UsageError> {
+        Ok(PinReferences {
+            repo: part_reference(
+                &self.repo,
+                "repository pin is empty; leave it unset to set no pin",
+            )?,
+            project: part_reference(
+                &self.project,
+                "project pin is empty; leave it unset to set no pin",
+            )?,
+        })
+    }
+}
+
+/// The reference texts of a [`Pin`], each empty when that part is unset.
+#[derive(Debug, Clone, Copy)]
+struct PinReferences<'a> {
+    repo: &'a str,
+    project: &'a str,
+}
+
+/// The reference text of one part of a pin.
+fn part_reference<'a>(
+    part: &'a Option<String>,
+    empty: &'static str,
+) -> Result<&'a str, UsageError> {
+    match part.as_deref() {
         None => Ok(""),
-        Some("") => Err(UsageError::new(
-            "repository pin is empty; pass None to set no pin",
-        )),
+        Some("") => Err(UsageError::new(empty)),
         Some(reference) => Ok(reference),
     }
 }
@@ -325,8 +398,8 @@ impl Verifier {
     }
 
     /// Whether the caller supplies the config, with an embedded config, or
-    /// authorizes it, with a config authorizer, in place of a repository
-    /// pin that authenticates it.
+    /// authorizes it, with a config authorizer, in place of a pin that
+    /// authenticates it.
     pub fn caller_authorizes_config(&self) -> bool {
         self.embedded.config.is_some() || self.config_authorizer.is_some()
     }
@@ -336,47 +409,48 @@ impl Verifier {
         self.pinned_registers.as_ref()
     }
 
-    /// Reports whether this verifier can verify an enclave against the
-    /// repository pin `repo`, without a document or any I/O, so that a
-    /// caller can refuse a pin before it fetches a document.
-    ///
-    /// Without a pin, `None`, the verifier accepts the configs that the
-    /// configured registry trust authorizes, or the config that the caller
-    /// embeds or authorizes. [`verify_v3`](Self::verify_v3) rejects every
-    /// `repo` that this method rejects, whatever the document. It can
-    /// still reject one that passes here: v3 collateral also requires the
-    /// repository and the revision to be valid parts of a config identity,
-    /// such as lowercase slugs, and v2 collateral does not, so that check
-    /// waits for the document.
+    /// Reports, without a document or any I/O, a pin that
+    /// [`verify_v3`](Self::verify_v3) rejects whatever the document, so that
+    /// a caller can refuse it before it fetches one. A pin that passes can
+    /// still be rejected once the document shows that the project is not a
+    /// valid config identity.
     ///
     /// # Errors
     ///
-    /// [`Error::Usage`] when:
-    ///
-    /// - `repo` is a pin that is not an
-    ///   `org/project[@revision][@sha256:digest]` reference; the empty
-    ///   string is not one, and `None` is how a caller sets no pin;
-    /// - `repo` is a pin and the verifier has a config authorizer, which
-    ///   cannot authenticate a repository pin;
-    /// - the verifier has an embedded config whose name or digest `repo`
-    ///   does not match.
-    pub fn check_repo_verifiability(&self, repo: Option<&str>) -> Result<(), Error> {
-        let reference = pin_reference(repo)?;
-        self.reference_pins(reference)
+    /// [`Error::Usage`] when a part is `Some("")` or not a reference, when
+    /// `pin.repo` is set alone and the verifier verifies registry collateral
+    /// only, or when `pin.project` is one that the verifier's config
+    /// authorizer or embedded config cannot match.
+    pub fn check_pin_verifiability(&self, pin: &Pin) -> Result<(), Error> {
+        let references = pin.references()?;
+        if !references.repo.is_empty() {
+            endorsement::parse_reference(references.repo).map_err(UsageError::new)?;
+            if references.project.is_empty() && self.requires_config_collateral() {
+                return Err(UsageError::new(
+                    "configured trust verifies registry collateral only, which a GitHub repository pin cannot match",
+                )
+                .into());
+            }
+        }
+        self.reference_pins(references.project)
             .map(|_| ())
             .map_err(Error::Usage)
+    }
+
+    /// The checks of a pin that do not depend on the document, and the
+    /// pins that its project sets on a config endorsement.
+    fn check_references(&self, references: PinReferences<'_>) -> Result<Pins, UsageError> {
+        if !references.repo.is_empty() {
+            endorsement::parse_reference(references.repo).map_err(UsageError::new)?;
+        }
+        self.reference_pins(references.project)
     }
 
     /// Appraises a nonce-bound v3 attestation document at the current
     /// time, which is read from the system clock once.
     ///
-    /// `nonce` is the challenge that the caller generated, and `repo` pins
-    /// the expected repository or registry project as
-    /// `org/project[@revision][@sha256:digest]`. Without a pin, `None`,
-    /// the verifier accepts what the configured registry trust authorizes;
-    /// an embedded config authorizes its exact bytes instead; a config
-    /// authorizer requires `None` and owns the authorization of the config.
-    /// The empty string is not a pin: `Some("")` is an error.
+    /// `nonce` is the challenge that the caller generated. The document's
+    /// collateral decides which part of `pin` applies.
     ///
     /// On success the caller must bind its traffic to the returned keys
     /// and enforce
@@ -390,18 +464,13 @@ impl Verifier {
     ///
     /// # Errors
     ///
-    /// [`Error::Usage`] for a `repo` of `Some("")`, a nonce of the wrong length,
-    /// a `repo` that this verifier cannot verify against, or a clock outside the years
+    /// [`Error::Usage`] for a pin part of `Some("")`, a nonce of the wrong length,
+    /// a malformed pin or a project that this verifier cannot verify against, or a clock outside the years
     /// 0000 to 9999; [`Error::Verification`], with the layer that rejected
     /// it, for a document that must not be trusted.
-    pub fn verify_v3(
-        &self,
-        doc: &[u8],
-        nonce: &[u8],
-        repo: Option<&str>,
-    ) -> Result<Verification, Error> {
+    pub fn verify_v3(&self, doc: &[u8], nonce: &[u8], pin: &Pin) -> Result<Verification, Error> {
         // The only clock read.
-        self.verify_v3_at(doc, nonce, repo, SystemTime::now())
+        self.verify_v3_at(doc, nonce, pin, SystemTime::now())
     }
 
     /// [`verify_v3`](Self::verify_v3) for an archived document:
@@ -420,25 +489,27 @@ impl Verifier {
         &self,
         doc: &[u8],
         nonce: &[u8],
-        repo: Option<&str>,
+        pin: &Pin,
         verification_time: SystemTime,
     ) -> Result<Verification, Error> {
-        let reference = pin_reference(repo)?;
+        pin.references()?;
         let now = Instant::from_system_time(verification_time)
             .ok_or_else(|| UsageError::new("verification time is out of range"))?;
-        self.verify_at(doc, nonce, reference, now)
+        self.verify_at(doc, nonce, pin, now)
     }
 
     /// Verifies a document at an instant of the verifier's own time type,
-    /// which keeps nanoseconds on every platform. An empty `repo` is the
-    /// absence of a pin.
+    /// which keeps nanoseconds on every platform.
     pub(crate) fn verify_at(
         &self,
         doc: &[u8],
         nonce: &[u8],
-        repo: &str,
+        pin: &Pin,
         now: Instant,
     ) -> Result<Verification, Error> {
+        // A malformed pin is a usage error for any document.
+        let references = pin.references()?;
+        let pins = self.check_references(references)?;
         let trust = self.trust.as_ref().map_err(|cause| {
             UsageError::new(format!("embedded trust material is unusable: {cause}"))
         })?;
@@ -459,9 +530,24 @@ impl Verifier {
         // Reference values and CPU evidence are appraised at one instant.
         let format = document.collateral_format();
         let endorsed = if format == FORMAT_V3 {
-            self.config_references(trust, &document, repo, now)
+            if references.project.is_empty() && !references.repo.is_empty() {
+                Err(Refused::rejected(
+                    "document carries config registry collateral, but only a GitHub repository is pinned",
+                ))
+            } else {
+                self.config_references(trust, &document, pins, now)
+            }
         } else if format == FORMAT_V2 {
-            self.code_references(trust, &document, repo, now)
+            if references.repo.is_empty()
+                && !references.project.is_empty()
+                && !self.requires_config_collateral()
+            {
+                Err(Refused::rejected(
+                    "document carries GitHub repository collateral, but only a registry project is pinned",
+                ))
+            } else {
+                self.code_references(trust, &document, references.repo, now)
+            }
         } else {
             Err(Refused::rejected(format!(
                 "unsupported collateral format {format:?}"
@@ -632,7 +718,7 @@ impl Verifier {
     /// an empty `reference` is the absence of a pin, or a
     /// usage error if verification rejects `reference` whatever the
     /// document. Every check of that kind belongs here, so that
-    /// [`check_repo_verifiability`](Self::check_repo_verifiability) makes
+    /// [`check_pin_verifiability`](Self::check_pin_verifiability) makes
     /// it too.
     pub(crate) fn reference_pins(&self, reference: &str) -> Result<Pins, UsageError> {
         let mut pins = Pins {
@@ -679,10 +765,9 @@ impl Verifier {
         &self,
         trust: &Trust,
         document: &Document,
-        reference: &str,
+        pins: Pins,
         now: Instant,
     ) -> Result<Endorsed, Refused> {
-        let pins = self.reference_pins(reference).map_err(Refused::Usage)?;
         let policy = ConfigPolicy {
             identity: pins.identity,
             revision: pins.revision,
