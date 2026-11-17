@@ -288,14 +288,10 @@ pub fn parse_reference(reference: &str) -> Result<Reference, Error> {
     endorsement::parse_reference(reference).map_err(|cause| UsageError::new(cause).into())
 }
 
-/// Names the workload that a caller trusts and the namespace that vouches
-/// for it: a GitHub repository, a config registry project, or both.
-///
-/// The two namespaces are unrelated: the same name can belong to different
-/// owners in each, so a pin in one is never satisfied by the other. Setting
-/// both accepts a document that satisfies either. A pin with neither set,
-/// [`Pin::none`], accepts any config that the verifier's registry trust,
-/// embedded config or config authorizer authorizes.
+/// Names the workload that a caller trusts. The repository and the project
+/// are separate namespaces with unrelated owners, so neither is satisfied by
+/// the other's collateral. Setting both accepts either; [`Pin::none`] accepts
+/// any config that the verifier's trust authorizes.
 ///
 /// ```
 /// use tinfoil_verifier::Pin;
@@ -309,12 +305,9 @@ pub fn parse_reference(reference: &str) -> Result<Reference, Error> {
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Pin {
-    /// A GitHub repository, `owner/name[@tag][@sha256:digest]`. Only a
-    /// document that carries that repository's signed release satisfies it.
+    /// A GitHub repository, `owner/name[@tag][@sha256:digest]`.
     pub repo: Option<String>,
     /// A config registry project, `org/project[@revision][@sha256:digest]`.
-    /// Only a document that carries a registry approval of that project,
-    /// or a matching config that the caller embedded, satisfies it.
     pub project: Option<String>,
 }
 
@@ -346,10 +339,8 @@ impl Pin {
         self
     }
 
-    /// The repository and the project as the reference texts that
-    /// verification matches, where the empty text is the absence of that
-    /// part. A part that is itself empty is refused, so that only `None`
-    /// leaves it unset.
+    /// The two parts as reference texts, empty when unset. `Some("")` is
+    /// refused, so that only `None` leaves a part unset.
     fn references(&self) -> Result<PinReferences<'_>, UsageError> {
         Ok(PinReferences {
             repo: part_reference(
@@ -418,32 +409,18 @@ impl Verifier {
         self.pinned_registers.as_ref()
     }
 
-    /// Reports whether this verifier can verify an enclave against `pin`,
-    /// without a document or any I/O, so that a caller can refuse a pin
-    /// before it fetches a document.
-    ///
-    /// With neither part set, the verifier accepts the configs that the
-    /// configured registry trust authorizes, or the config that the caller
-    /// embeds or authorizes. [`verify_v3`](Self::verify_v3) rejects every
-    /// pin that this method rejects, whatever the document. It can still
-    /// reject one that passes here: registry collateral also requires the
-    /// project and the revision to be valid parts of a config identity,
-    /// such as lowercase slugs, so that check waits for the document.
+    /// Reports, without a document or any I/O, a pin that
+    /// [`verify_v3`](Self::verify_v3) rejects whatever the document, so that
+    /// a caller can refuse it before it fetches one. A pin that passes can
+    /// still be rejected once the document shows that the project is not a
+    /// valid config identity.
     ///
     /// # Errors
     ///
-    /// [`Error::Usage`] when:
-    ///
-    /// - `pin.repo` or `pin.project` is set and is not a reference of its
-    ///   form; the empty string is not one, and `None` is how a caller
-    ///   leaves a part unset;
-    /// - `pin.repo` is set alone and the verifier verifies registry
-    ///   collateral only, through an embedded reference, explicit signing
-    ///   keys, registry IDs or a config authorizer;
-    /// - `pin.project` is set and the verifier has a config authorizer,
-    ///   which cannot authenticate a project pin;
-    /// - the verifier has an embedded config whose name or digest
-    ///   `pin.project` does not match.
+    /// [`Error::Usage`] when a part is `Some("")` or not a reference, when
+    /// `pin.repo` is set alone and the verifier verifies registry collateral
+    /// only, or when `pin.project` is one that the verifier's config
+    /// authorizer or embedded config cannot match.
     pub fn check_pin_verifiability(&self, pin: &Pin) -> Result<(), Error> {
         let references = pin.references()?;
         if !references.repo.is_empty() {
@@ -472,15 +449,8 @@ impl Verifier {
     /// Appraises a nonce-bound v3 attestation document at the current
     /// time, which is read from the system clock once.
     ///
-    /// `nonce` is the challenge that the caller generated, and `pin` names
-    /// the expected GitHub repository, registry project, or both. The
-    /// document's collateral decides which part applies, and a document
-    /// whose collateral `pin` does not cover is rejected. With neither part
-    /// set, the verifier accepts what the configured registry trust
-    /// authorizes; an embedded config authorizes its exact bytes instead; a
-    /// config authorizer requires `pin.project` to be unset and owns the
-    /// authorization of the config. The empty string is not a pin:
-    /// `Some("")` in either part is an error.
+    /// `nonce` is the challenge that the caller generated. The document's
+    /// collateral decides which part of `pin` applies.
     ///
     /// On success the caller must bind its traffic to the returned keys
     /// and enforce
@@ -555,8 +525,7 @@ impl Verifier {
             }
         })?;
 
-        // A malformed pin is the caller's mistake whichever collateral the
-        // document carries.
+        // A malformed pin is a usage error for any document.
         let pins = self.check_references(references)?;
 
         // Reference values and CPU evidence are appraised at one instant.

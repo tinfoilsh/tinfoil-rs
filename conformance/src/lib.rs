@@ -103,8 +103,7 @@ pub struct Input {
     pub nonce_hex: String,
     /// The pinned GitHub repository.
     pub repo: String,
-    /// The pinned config registry project. Absent in inputs where `repo`
-    /// names the workload in either namespace.
+    /// The pinned config registry project. When absent, `repo` names both.
     #[serde(deserialize_with = "present")]
     pub project: Option<String>,
 
@@ -139,9 +138,8 @@ fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<S
     String::deserialize(deserializer).map(Some)
 }
 
-/// The pin of an input that names `repo` and, when the member is present,
-/// `project`. Without the member, `repo` stands for both parts. An empty
-/// name leaves its part unset.
+/// The pin of an input. Without a `project`, `repo` names both parts; an
+/// empty name leaves its part unset.
 fn pin(repo: &str, project: Option<&str>) -> Pin {
     let part = |name: &str| {
         Some(name)

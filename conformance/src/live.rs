@@ -49,16 +49,14 @@ pub struct Request {
     /// The GitHub repository that the enclave's code must come from.
     pub repo: String,
     /// The config registry project that the enclave's config must be
-    /// approved in. Absent in requests where `repo` names the workload in
-    /// either namespace.
+    /// approved in. When absent, `repo` names both.
     #[serde(deserialize_with = "crate::present")]
     pub project: Option<String>,
 }
 
 impl Request {
     /// Decodes the request. `None` unless the input is one JSON object
-    /// that names a host and a repository, or a host and a `project`
-    /// member, with which the two names are taken as they are given.
+    /// that names a host and a repository or a project.
     pub fn parse(stdin: &[u8]) -> Option<Self> {
         if !crate::is_object(stdin) {
             return None;

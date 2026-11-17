@@ -46,17 +46,9 @@ impl EnclaveHttpClient {
     /// for it, with the default options.
     ///
     /// `host` is a host with an optional port, not a URL. `pin` names what
-    /// the enclave must run: [`Pin::repo`] is the GitHub repository that
-    /// its code must be released from, as `owner/name[@tag][@sha256:digest]`,
-    /// and [`Pin::project`] is the config registry project that its config
-    /// must be approved in, as `org/project[@revision][@sha256:digest]`.
-    /// The two namespaces are unrelated, so a repository is never satisfied
-    /// by a registry project of the same name, nor a project by a
-    /// repository; a pin with both accepts either. [`Pin::none`] sets no
-    /// pin: the enclave must then run a config that the verifier's own
-    /// policy authorizes, which for the default verifier is one signed into
-    /// the public registry. An empty string is not "no pin": it is a
-    /// configuration error in either part.
+    /// the enclave must run. [`Pin::none`] sets no pin: the enclave must
+    /// then run a config that the verifier's own policy authorizes, which
+    /// for the default verifier is one signed into the public registry.
     ///
     /// ```no_run
     /// # async fn run() -> Result<(), tinfoil::Error> {
@@ -101,9 +93,7 @@ impl EnclaveHttpClient {
         self.inner.enclave()
     }
 
-    /// The repository and the registry project that the enclave is
-    /// verified against, with any revision or digest. Neither is set when
-    /// the client was created without a pin.
+    /// The pin that the enclave is verified against.
     pub fn pin(&self) -> &Pin {
         self.inner.pin()
     }
@@ -313,10 +303,7 @@ impl EnclaveHttpClientBuilder {
     /// 3. `user_cache_secret` is empty, or `timeout` is zero.
     /// 4. `host` is not a host with an optional port; a part of the pin
     ///    is `Some("")`, or is not a reference, or the verifier cannot
-    ///    verify against the pin: a verifier with a config authorizer
-    ///    takes no pin, one with an embedded config takes only a matching
-    ///    project, and one that verifies registry collateral only takes no
-    ///    repository alone.
+    ///    verify against the pin.
     /// 5. The mode is [`TransportMode::Tls`] and `base_url` is on another
     ///    origin than the enclave: that is a proxy, which requires
     ///    [`TransportMode::Ehbp`].

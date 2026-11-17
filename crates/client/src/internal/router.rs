@@ -23,8 +23,8 @@ mod tests;
 /// The name that every router is verified against. No option changes it.
 pub(crate) const ROUTER_NAME: &str = "tinfoilsh/confidential-model-router";
 
-/// The pin of every router. The router is published under one name in both
-/// namespaces, each owned by Tinfoil.
+/// The pin of every router. Tinfoil owns the router's name in both
+/// namespaces.
 pub(crate) fn router_pin() -> Pin {
     Pin::repo(ROUTER_NAME).with_project(ROUTER_NAME)
 }

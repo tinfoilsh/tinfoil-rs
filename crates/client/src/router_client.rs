@@ -59,9 +59,8 @@ impl RouterHttpClient {
         self.inner.enclave()
     }
 
-    /// The pin that the router is verified against. A router is always
-    /// pinned to Tinfoil's router, as a GitHub repository and as a registry
-    /// project.
+    /// The pin that the router is verified against, which is always
+    /// Tinfoil's router.
     pub fn pin(&self) -> &Pin {
         self.inner.pin()
     }

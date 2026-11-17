@@ -75,9 +75,7 @@ pub(crate) type Fetch = Arc<
 pub(crate) struct Config {
     /// The enclave: a host with an optional port.
     pub(crate) host: String,
-    /// The GitHub repository, the registry project, or both, that the
-    /// enclave is verified against; with neither, a config that the
-    /// verifier authorizes is accepted.
+    /// What the enclave is verified against.
     pub(crate) pin: Pin,
     /// The policy; `None` selects the default verifier.
     pub(crate) verifier: Option<Arc<Verifier>>,
@@ -236,8 +234,7 @@ impl<V: Evidence> Enclave<V> {
         &self.host
     }
 
-    /// The repository and the registry project that the enclave is
-    /// verified against, with any revision or digest.
+    /// The pin that the enclave is verified against.
     pub(crate) fn pin(&self) -> &Pin {
         &self.pin
     }

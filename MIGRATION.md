@@ -107,14 +107,11 @@ async fn connect(api_key: &str) -> Result<EnclaveOpenAIClient, tinfoil::Error> {
 }
 ```
 
-The pin is a `Pin`, which names the workload in one namespace:
-`Pin::repo("owner/name")` is a GitHub repository and is satisfied only by that
-repository's signed release, and `Pin::project("org/project")` is a config
-registry project and is satisfied only by a registry approval of it, or by a
-matching config that the caller embedded. The same name
-can belong to different owners in each, so set the one that the enclave is
-published under; `Pin::repo(..).with_project(..)` accepts either. `Pin::none()`
-sets no pin, and an empty string in either part is an error.
+The pin is a `Pin`: `Pin::repo("owner/name")` for a GitHub repository,
+`Pin::project("org/project")` for a config registry project, or
+`Pin::repo(..).with_project(..)` to accept either. Neither is satisfied by the
+other's collateral. `Pin::none()` sets no pin, and an empty string in either
+part is an error.
 
 ### `Client::new_with_proxy(enclave, repo, api_key, proxy_url)`
 
