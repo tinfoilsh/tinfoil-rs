@@ -604,6 +604,9 @@ fn raw_member<'a>(object: &'a [u8], name: &str) -> Option<&'a [u8]> {
         .map(|(_, value)| value)
 }
 
+/// The member of a response body that holds the signature.
+const SIGNATURE_MEMBER: &str = "signature";
+
 /// A response body: the signed member and the signature.
 struct Envelope<'a> {
     /// The decoded signed member.
@@ -614,17 +617,27 @@ struct Envelope<'a> {
 }
 
 /// Takes a response body apart: `{"<member>": {...}, "signature": "..."}`.
+/// The body has exactly these two members.
 fn envelope<'a>(
     body: &'a [u8],
     parsed: &'a Value,
     member: &'a str,
 ) -> Result<Envelope<'a>, QuoteError> {
-    let members = Members::new(parsed, member, &[member, "signature"])?;
+    let names = [member, SIGNATURE_MEMBER];
+    let members = Members::new(parsed, member, &names)?;
+    if members.object.iter().any(|(name, _)| !names.contains(&name)) {
+        return Err(malformed(
+            member,
+            format!(
+                "the response must contain exactly the {member:?} and {SIGNATURE_MEMBER:?} members"
+            ),
+        ));
+    }
     let document = members.required(member)?;
     let signature: [u8; 64] = members
-        .hex("signature")?
+        .hex(SIGNATURE_MEMBER)?
         .try_into()
-        .map_err(|_| members.error("signature", "is not 64 bytes"))?;
+        .map_err(|_| members.error(SIGNATURE_MEMBER, "is not 64 bytes"))?;
     let signed_bytes = raw_member(body, member)
         .ok_or_else(|| malformed(member, "cannot be located in the response body"))?;
     Ok(Envelope {
@@ -653,8 +666,9 @@ fn parse_body(body: &[u8], document: &str) -> Result<Value, QuoteError> {
 /// signature is 64 bytes in hex of either case.
 ///
 /// Member names are exact. A member whose name differs from a defined one
-/// only in letter case is an error wherever a defined member could stand;
-/// other unknown members are ignored.
+/// only in letter case is an error wherever a defined member could stand.
+/// The body has no member other than `tcbInfo` and `signature`; unknown
+/// members inside `tcbInfo` are ignored.
 ///
 /// Required, each with its type and never `null`:
 ///
