@@ -101,8 +101,8 @@ fn a_builder_does_no_io_and_prints_no_secret() {
         .user_cache_secret("cache-scope-value")
         .timeout(Duration::from_secs(30));
     let printed = format!("{builder:?}");
-    assert!(!printed.contains("cache-scope-value"), "{printed}");
-    assert!(!printed.contains("hunter2"), "{printed}");
+    assert!(!printed.contains("cache-scope-value"));
+    assert!(!printed.contains("hunter2"));
 }
 
 /// The enclave client, as a caller writes it.
@@ -517,8 +517,8 @@ mod openai {
                 .user_cache_secret("cache-scope-value")
                 .timeout(Duration::from_secs(30));
         let printed = format!("{builder:?}");
-        assert!(!printed.contains("sk-secret-key"), "{printed}");
-        assert!(!printed.contains("cache-scope-value"), "{printed}");
+        assert!(!printed.contains("sk-secret-key"));
+        assert!(!printed.contains("cache-scope-value"));
     }
 
     #[test]

@@ -225,8 +225,9 @@ fn every_public_name_is_importable_and_has_its_signature() {
     assert!(expected.to_string().starts_with("TDX"));
 
     // Errors.
+    let challenge = random_nonce().unwrap();
     let error: Error = verifier
-        .verify_v3(b"{}", &[0; NONCE_SIZE], &Pin::none())
+        .verify_v3(b"{}", &challenge, &Pin::none())
         .unwrap_err();
     let _: Option<&(dyn StdError + 'static)> = error.source();
     match error {
@@ -254,7 +255,7 @@ fn every_public_name_is_importable_and_has_its_signature() {
         "envelope provenance quote policy"
     );
     let usage: Error = verifier
-        .verify_v3(b"{}", &[0; NONCE_SIZE - 1], &Pin::none())
+        .verify_v3(b"{}", &challenge[..NONCE_SIZE - 1], &Pin::none())
         .unwrap_err();
     assert!(matches!(usage, Error::Usage(_)));
     fn assert_error<T: StdError + Send + Sync + 'static>() {}
