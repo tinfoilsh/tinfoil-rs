@@ -2,9 +2,8 @@
 //!
 //! The command reads `{"host": "...", "repo": "...", "project": "..."}` on
 //! stdin and connects the client's [`EnclaveHttpClient`] to the host with
-//! the repository and the registry project as its pin; without a `project`
-//! member, `repo` stands for both. The client fetches a document under a
-//! fresh nonce and verifies
+//! the repository and the registry project as its pin. The client fetches
+//! a document under a fresh nonce and verifies
 //! it with the default verifier: the embedded roots, the current time, no
 //! test seam. One request is then sent through the client, whose TLS
 //! handshake succeeds only if the server's certificate carries the public
@@ -49,7 +48,7 @@ pub struct Request {
     /// The GitHub repository that the enclave's code must come from.
     pub repo: String,
     /// The config registry project that the enclave's config must be
-    /// approved in. When absent, `repo` names both.
+    /// approved in.
     #[serde(deserialize_with = "crate::present")]
     pub project: Option<String>,
 }
@@ -268,7 +267,7 @@ mod tests {
         );
         assert_eq!(
             request.map(|request| request.pin()),
-            Some(Pin::repo("owner/name").with_project("owner/name"))
+            Some(Pin::repo("owner/name"))
         );
         // A member that the command does not know is ignored.
         let extended = br#"{"host":"h","repo":"o/r","note":1}"#;

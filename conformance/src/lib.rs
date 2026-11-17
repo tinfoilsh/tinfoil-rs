@@ -103,7 +103,7 @@ pub struct Input {
     pub nonce_hex: String,
     /// The pinned GitHub repository.
     pub repo: String,
-    /// The pinned config registry project. When absent, `repo` names both.
+    /// The pinned config registry project.
     #[serde(deserialize_with = "present")]
     pub project: Option<String>,
 
@@ -138,8 +138,7 @@ fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<S
     String::deserialize(deserializer).map(Some)
 }
 
-/// The pin of an input. Without a `project`, `repo` names both parts; an
-/// empty name leaves its part unset.
+/// The pin of an input. An absent or empty name leaves its part unset.
 fn pin(repo: &str, project: Option<&str>) -> Pin {
     let part = |name: &str| {
         Some(name)
@@ -148,7 +147,7 @@ fn pin(repo: &str, project: Option<&str>) -> Pin {
     };
     Pin {
         repo: part(repo),
-        project: part(project.unwrap_or(repo)),
+        project: part(project.unwrap_or_default()),
     }
 }
 
@@ -451,12 +450,12 @@ mod tests {
     }
 
     #[test]
-    fn an_input_without_a_project_pins_its_repository_in_both_namespaces() {
+    fn an_input_names_each_namespace_only_by_its_own_member() {
         let pin = |input: &str| serde_json::from_str::<Input>(input).unwrap().pin();
         assert_eq!(pin(MINIMAL), Pin::none());
         assert_eq!(
             pin(r#"{"schema_version":"1","repo":"o/r"}"#),
-            Pin::repo("o/r").with_project("o/r")
+            Pin::repo("o/r")
         );
         assert_eq!(
             pin(r#"{"schema_version":"1","repo":"o/r","project":"o/p"}"#),
