@@ -48,8 +48,9 @@ const CASES: &[u8] = include_bytes!("../tests/data/verifier/integration_differen
 /// The environment variable that names a checkout of the shared vectors.
 const VECTORS_ENV: &str = "TINFOIL_CONFORMANCE_VECTORS";
 
-/// Cases that the other implementation accepts and this crate turns down,
-/// each with the rule that makes this crate the stricter one.
+/// Cases whose document or pin the other implementation accepts and this
+/// crate turns down, each with the rule that makes this crate the stricter
+/// one.
 const STRICTER: &[(&str, &str)] = &[
     ("build/artifacts-embedded/", NEEDS_A_PIN),
     ("build/defaults-empty-pin", NEEDS_A_PIN),
@@ -594,7 +595,7 @@ fn recorded_artifact(value: &Value) -> Option<ArtifactFacts> {
 enum Outcome {
     Agree,
     Skipped,
-    /// The record accepts and this crate does not.
+    /// The record accepts the document or its pin and this crate does not.
     Stricter(String),
     /// Any other difference, which is a failure.
     Differs(String),

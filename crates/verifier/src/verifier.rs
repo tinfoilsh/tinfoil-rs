@@ -418,7 +418,8 @@ impl Verifier {
     ///
     /// # Errors
     ///
-    /// [`Error::Usage`] when a part is `Some("")` or not a reference, when
+    /// [`Error::Usage`] when the pin names nothing under default config
+    /// trust, when a part is `Some("")` or not a reference, when
     /// `pin.repo` is set alone and the verifier verifies registry collateral
     /// only, or when `pin.project` is one that the verifier's config
     /// authorizer or embedded config cannot match.

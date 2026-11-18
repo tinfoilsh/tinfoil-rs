@@ -1022,6 +1022,9 @@ fn arguments_are_checked_before_the_document() {
     // The repository pin is the caller's too, once the document carries the
     // code that it would be matched against.
     usage(verifier.verify_v3_at(&document, &nonce, &Pin::repo("not a reference"), at));
+    // So is a pin that names nothing, under default config trust.
+    let message = usage(verifier.verify_v3_at(&document, &nonce, &Pin::none(), at));
+    assert!(message.contains("pin names nothing"), "{message}");
     // An empty pin is refused before the nonce and the document are read;
     // only `None` sets no pin.
     for (empty, part) in [
