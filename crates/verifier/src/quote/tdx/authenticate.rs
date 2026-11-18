@@ -588,6 +588,7 @@ fn trust_anchor(pem: &[u8]) -> Result<Certificate, QuoteError> {
         pem_blocks(pem).map_err(|error| QuoteError::new(format!("Intel SGX root PEM: {error}")))?;
     let block = blocks
         .first()
+        .filter(|block| block.label == "CERTIFICATE")
         .ok_or_else(|| QuoteError::new("Intel SGX root PEM carries no certificate"))?;
     Certificate::from_der(&block.contents)
         .map_err(|error| QuoteError::new(format!("parsing Intel SGX root certificate: {error}")))

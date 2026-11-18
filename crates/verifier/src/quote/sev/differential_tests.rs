@@ -11,9 +11,9 @@
 //! same rules. Where the two differ this crate is the stricter one, and the
 //! case names the `class` of the difference.
 //!
-//! `validation_differential.json` holds minted evidence that authenticates,
-//! each case with a policy, and records where the second implementation
-//! stops: at assembly, at validation, or not at all.
+//! `validation_differential.json` holds minted evidence, each case with a
+//! policy, and records where the second implementation stops: at
+//! authentication, at assembly, at validation, or not at all.
 
 use std::collections::BTreeMap;
 
@@ -416,14 +416,7 @@ fn recorded_policies_stop_where_they_are_recorded_to_stop() {
                 },
             },
         };
-        // A case stops where the record says, unless it names an earlier
-        // stop of its own; that is only ever for evidence that the record
-        // lets through.
-        let here = case.get("here").and_then(Value::as_str);
-        if here.is_some() {
-            assert_eq!(text(case, "reference"), "accept", "{name}");
-        }
-        assert_eq!(stop, here.unwrap_or(text(case, "reference")), "{name}");
+        assert_eq!(stop, text(case, "reference"), "{name}");
         *stops.entry(stop).or_default() += 1;
     }
     let stops: Vec<(&str, usize)> = stops.into_iter().collect();
