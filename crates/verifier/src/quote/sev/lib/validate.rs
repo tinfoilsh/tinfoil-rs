@@ -21,9 +21,11 @@ pub struct Options {
     pub guest_policy: GuestPolicy,
     /// The lowest acceptable guest SVN.
     pub minimum_guest_svn: u32,
-    /// The lowest acceptable firmware build number.
+    /// The build of the lowest acceptable firmware version, within
+    /// `minimum_version`.
     pub minimum_build: u8,
-    /// The lowest acceptable firmware API version, major in the high byte.
+    /// The API version of the lowest acceptable firmware version, major in
+    /// the high byte.
     pub minimum_version: u16,
     /// The floor of the reported TCB.
     pub minimum_tcb: TcbParts,
@@ -266,25 +268,29 @@ fn check_tcb(
 }
 
 fn check_firmware(report: &Report, options: &Options, problems: &mut Vec<String>) {
-    if options.minimum_build > report.current_build {
+    // AMD orders firmware by API major, then minor, then the build within
+    // that API version.
+    let [minimum_major, minimum_minor] = options.minimum_version.to_be_bytes();
+    let minimum = (minimum_major, minimum_minor, options.minimum_build);
+    if (
+        report.current_major,
+        report.current_minor,
+        report.current_build,
+    ) < minimum
+    {
         problems.push(format!(
-            "firmware build number {} is less than the required minimum {}",
-            report.current_build, options.minimum_build
+            "firmware version {}.{} build {} is below the endorsed minimum {}.{} build {}",
+            report.current_major,
+            report.current_minor,
+            report.current_build,
+            minimum_major,
+            minimum_minor,
+            options.minimum_build
         ));
         return;
     }
     let current = u16::from_be_bytes([report.current_major, report.current_minor]);
     let committed = u16::from_be_bytes([report.committed_major, report.committed_minor]);
-    if options.minimum_version > current {
-        problems.push(format!(
-            "firmware API version ({}.{}) is less than the required minimum ({}.{})",
-            report.current_major,
-            report.current_minor,
-            options.minimum_version >> 8,
-            options.minimum_version & 0xff
-        ));
-        return;
-    }
     let (build_ok, version_ok) = if options.permit_provisional_firmware {
         (
             report.committed_build <= report.current_build,
@@ -360,9 +366,10 @@ fn check_chip_id(chip_id: &[u8; CHIP_ID_SIZE], hwid: &[u8]) -> Result<(), Assemb
 ///      the reported TCB is at least its floor. "At most" is
 ///      [`TcbParts::all_at_most`]; "equals" also requires that both sides
 ///      are valid TCB versions ([`TcbParts::compose`]);
-///    - firmware: the current build and API version are at least the
-///      minimums; the committed build and API version equal the current
-///      ones, or with provisional firmware permitted are at most them;
+///    - firmware: the current version, ordered by API major, minor, then
+///      build, is at least the minimum; the committed build and API
+///      version equal the current ones, or with provisional firmware
+///      permitted are at most them;
 ///    - platform info: SMT, TSME and SEV-TIO are enabled only if the
 ///      bound has them; ECC, RAPL disabled, ciphertext hiding, alias check
 ///      complete and IOMMU write-safe are present if the bound has them;
@@ -602,30 +609,35 @@ mod tests {
     }
 
     #[test]
-    fn the_firmware_build_and_version_are_floors() {
+    fn the_firmware_floor_orders_the_api_version_before_the_build() {
+        // The report is firmware 1.49 build 2.
         let base = report(|_| {});
-        rejected(
+        let floor = |version: u16, build: u8| {
             check(&base, &genoa_extensions(), |options| {
-                options.minimum_build = 3
-            }),
-            "firmware build number 2 is less than the required minimum 3",
-        );
-        rejected(
-            check(&base, &genoa_extensions(), |options| {
-                options.minimum_version = 0xff00;
-            }),
-            "firmware API version (1.49) is less than the required minimum (255.0)",
-        );
-        for (version, accepted) in [
-            (0x0131, true),
-            (0x0132, false),
-            (0x00ff, true),
-            (0x0200, false),
-        ] {
-            let result = check(&base, &genoa_extensions(), |options| {
                 options.minimum_version = version;
-            });
-            assert_eq!(result.is_ok(), accepted, "{version:#x}");
+                options.minimum_build = build;
+            })
+        };
+        rejected(
+            floor(0x0131, 3),
+            "firmware version 1.49 build 2 is below the endorsed minimum 1.49 build 3",
+        );
+        rejected(
+            floor(0xff00, 0),
+            "firmware version 1.49 build 2 is below the endorsed minimum 255.0 build 0",
+        );
+        for (version, build, accepted) in [
+            (0x0131, 2, true),
+            (0x0130, 255, true),
+            (0x00ff, 255, true),
+            (0x0132, 0, false),
+            (0x0200, 0, false),
+        ] {
+            assert_eq!(
+                floor(version, build).is_ok(),
+                accepted,
+                "{version:#x} build {build}"
+            );
         }
     }
 
