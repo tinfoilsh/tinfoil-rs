@@ -669,7 +669,7 @@ fn a_project_pin_is_checked_without_a_document() {
             "Org/My_Repo",
             true,
         ),
-        ("defaults without a pin", Verifier::builder(), "", true),
+        ("defaults without a pin", Verifier::builder(), "", false),
         (
             "defaults with a malformed pin",
             Verifier::builder(),
@@ -796,7 +796,6 @@ fn a_project_pin_is_checked_without_a_document() {
     // pin.
     for builder in [Verifier::builder(), embedded(), authorizer()] {
         let verifier = builder.build().unwrap();
-        verifier.check_pin_verifiability(&Pin::none()).unwrap();
         let message = usage(verifier.check_pin_verifiability(&Pin::repo("")));
         assert!(message.contains("repository pin is empty"), "{message}");
         let message = usage(verifier.check_pin_verifiability(&Pin::project("")));
@@ -813,7 +812,7 @@ fn a_repository_pin_alone_is_refused_where_only_registry_collateral_is_verified(
     let both = Pin::repo("Owner/My_Repo").with_project("org/project");
 
     let defaults = Verifier::new();
-    for pin in [&repo, &project, &both, &Pin::none()] {
+    for pin in [&repo, &project, &both] {
         defaults.check_pin_verifiability(pin).unwrap();
     }
     // Either part is checked for its form, whatever the other holds.
@@ -851,7 +850,7 @@ fn a_repository_pin_alone_is_refused_where_only_registry_collateral_is_verified(
         let verifier = builder.build().unwrap();
         let message = usage(verifier.check_pin_verifiability(&repo));
         assert!(message.contains(REGISTRY_ONLY), "{name}: {message}");
-        for pin in [&project, &both, &Pin::none()] {
+        for pin in [&project, &both] {
             verifier
                 .check_pin_verifiability(pin)
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -1023,6 +1022,9 @@ fn arguments_are_checked_before_the_document() {
     // The repository pin is the caller's too, once the document carries the
     // code that it would be matched against.
     usage(verifier.verify_v3_at(&document, &nonce, &Pin::repo("not a reference"), at));
+    // So is a pin that names nothing, under default config trust.
+    let message = usage(verifier.verify_v3_at(&document, &nonce, &Pin::none(), at));
+    assert!(message.contains("pin names nothing"), "{message}");
     // An empty pin is refused before the nonce and the document are read;
     // only `None` sets no pin.
     for (empty, part) in [
@@ -1338,10 +1340,6 @@ fn the_accepted_registries_are_never_left_open_by_default() {
     // the caller lists that registry.
     let fixture = Fixture::load();
     for (name, accepted) in [
-        (
-            "config-sev/certified-private-with-config-default-ids/",
-            false,
-        ),
         (
             "config-sev/certified-private-with-config-public-only/",
             false,

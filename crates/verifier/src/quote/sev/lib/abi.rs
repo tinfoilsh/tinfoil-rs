@@ -44,6 +44,8 @@ const CPUID_STEPPING_MASK: u8 = 0x0F;
 
 /// Bit 17 of the guest policy is reserved and always set.
 const POLICY_RESERVED_ONE_BIT: u32 = 17;
+/// Bit 19 of the guest policy allows the guest to be debugged.
+const POLICY_DEBUG_BIT: u32 = 19;
 /// The highest defined bit of the guest policy.
 const POLICY_HIGHEST_BIT: u32 = 25;
 /// The highest defined bit of PLATFORM_INFO.
@@ -269,7 +271,7 @@ impl GuestPolicy {
             abi_major,
             smt: bit(16),
             migrate_ma: bit(18),
-            debug: bit(19),
+            debug: bit(POLICY_DEBUG_BIT),
             single_socket: bit(20),
             cxl_allowed: bit(21),
             mem_aes256_xts: bit(22),

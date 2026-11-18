@@ -524,9 +524,14 @@ fn tcb_info_with(changes: &[(&str, &str)]) -> Result<(), String> {
 
 #[test]
 fn the_signed_bytes_are_the_top_level_member_as_written() {
-    let document = tcb_info(&[]).replace(',', " ,\n\t").replace("\":", "\" : ");
+    let document = tcb_info(&[
+        ("tcbInfo", r#"{"id":"decoy"}"#),
+        ("y", r#""\"tcbInfo\":{}""#),
+    ])
+    .replace(',', " ,\n\t")
+    .replace("\":", "\" : ");
     let body = format!(
-        "\n {{ \"x\" : {{\"tcbInfo\":{{\"id\":\"decoy\"}}}}, \"y\":\"\\\"tcbInfo\\\":{{}}\", \"tcbInfo\" :\t{document} , \"signature\" : \"{}\" }}\r\n",
+        "\n {{ \"tcbInfo\" :\t{document} , \"signature\" : \"{}\" }}\r\n",
         "AB".repeat(64)
     );
     let decoded = parse_tcb_info(body.as_bytes()).unwrap();
@@ -557,7 +562,13 @@ fn a_collateral_body_is_strict_json() {
         format!(r#"{{"tcbInfo":{good},"tcbInfo":{{}},"signature":"{signature}"}}"#),
         format!(r#"{{"tcbInfo":{good},"signature":"{signature}","signature":"{signature}"}}"#),
         // A repeated name deep inside a member that is not read.
-        format!(r#"{{"tcbInfo":{good},"signature":"{signature}","x":[{{"a":{{"b":1,"b":2}}}}]}}"#),
+        format!(
+            r#"{{"tcbInfo":{},"signature":"{signature}"}}"#,
+            tcb_info(&[("x", r#"[{"a":{"b":1,"b":2}}]"#)])
+        ),
+        // A member other than the signed one and the signature.
+        format!(r#"{{"tcbInfo":{good},"signature":"{signature}","x":[1,{{"y":null}}]}}"#),
+        format!(r#"{{"tcbInfo":{good},"signature":"{signature}","enclaveIdentity":{{}}}}"#),
         // Data after the value, and values that are not the object.
         format!(r#"{{"tcbInfo":{good},"signature":"{signature}"}} x"#),
         format!(r#"[{{"tcbInfo":{good},"signature":"{signature}"}}]"#),
@@ -587,9 +598,7 @@ fn a_collateral_body_is_strict_json() {
         .unwrap();
     invalid_utf8[at + 1] = 0xff;
     assert!(parse_tcb_info(&invalid_utf8).is_err());
-    // Unknown members are ignored, at the top level and inside.
-    let extra = format!(r#"{{"tcbInfo":{good},"signature":"{signature}","x":[1,{{"y":null}}]}}"#);
-    assert!(parse_tcb_info(extra.as_bytes()).is_ok());
+    // Unknown members inside the signed member are ignored.
     assert_eq!(tcb_info_with(&[("nextThing", r#"{"a":[1]}"#)]), Ok(()));
 }
 
@@ -870,6 +879,7 @@ fn a_qe_identity_states_every_appraised_member() {
         (r#""issueDate":"2023-06-08T07:24:59Z","#, ""),
         (r#""nextUpdate":"2023-07-08T07:24:59Z","#, ""),
         (r#""tcbEvaluationDataNumber":15,"#, ""),
+        (r#"{"enclaveIdentity""#, r#"{"x":1,"enclaveIdentity""#),
     ] {
         assert!(text.contains(from), "{from}");
         let changed = text.replacen(from, to, 1);
@@ -1650,6 +1660,19 @@ fn every_dimension_of_the_policy_is_enforced() {
         let error = expectations.validate(&quote).unwrap_err().to_string();
         assert!(error.contains(name), "{field}: {error}");
     }
+
+    // A debuggable TD is refused even when the policy states its attributes.
+    let mut debuggable = bytes.clone();
+    debuggable[168] |= 1;
+    let debuggable = Quote::unauthenticated(&debuggable, 5).unwrap();
+    let (debug_policy, ..) = matching(debuggable.quote());
+    assert_eq!(debug_policy.td_attributes, flipped(&policy.td_attributes));
+    let error = assemble(&debug_policy, &measurement, &report_data, &config_id)
+        .unwrap()
+        .validate(&debuggable)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "TD quote reports a debuggable TD");
 
     // A collateral floor above the observed number rejects.
     let stale = Quote::unauthenticated(&bytes, 4).unwrap();

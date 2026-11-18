@@ -1012,6 +1012,12 @@ fn machines_are_keyed_by_identifiers_of_their_platform() {
         "machine 0123456789abcdef...: tdx identifier must be 32 hex chars, got 128"
     );
     assert!(parse(with_machine(&long, "amd").as_bytes()).is_ok());
+    for (zeros, policy) in [(128, "amd"), (32, "tdx")] {
+        assert_eq!(
+            rejection(&with_machine(&"0".repeat(zeros), policy)),
+            "machine 0000000000000000...: identifier must not be all zeros"
+        );
+    }
 }
 
 #[test]

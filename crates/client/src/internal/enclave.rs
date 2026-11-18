@@ -904,7 +904,7 @@ mod tests {
     async fn a_failed_fetch_is_reported_as_it_is_and_tried_once_more() {
         let (fetch, fetched) = recording_fetch(Err(Error::network("HTTP 503")));
         let enclave = Enclave::with_fetch(
-            config("enclave.example.com", Pin::none()),
+            config("enclave.example.com", Pin::repo("org/repo")),
             tokio_clock(),
             fetch,
         )

@@ -215,11 +215,13 @@ impl Expectations {
     /// 1. the report satisfies the options
     ///    ([`validate`]), which also binds
     ///    the report's reported TCB and CHIP_ID to the VCEK certificate;
-    /// 2. the report's guest policy equals the expected one in every flag;
+    /// 2. the report's guest policy does not allow debugging, whatever the
+    ///    expected one says;
+    /// 3. the report's guest policy equals the expected one in every flag;
     ///    the ABI version was already checked as a floor;
-    /// 3. the report's platform info equals the expected one in every
+    /// 4. the report's platform info equals the expected one in every
     ///    flag;
-    /// 4. the report was launched without an identity block: MASK_CHIP_KEY
+    /// 5. the report was launched without an identity block: MASK_CHIP_KEY
     ///    is clear, no author key is enabled, and the identity key digest and
     ///    author key digest are all zero.
     pub fn validate(&self, quote: &Quote) -> Result<(), AssemblyError> {
@@ -228,6 +230,11 @@ impl Expectations {
 
         let policy = GuestPolicy::parse(report.policy)
             .map_err(|cause| quote_error("parsing report guest policy", cause))?;
+        if policy.debug {
+            return Err(AssemblyError::new(
+                "SEV report allows the guest to be debugged",
+            ));
+        }
         let expected = GuestPolicy {
             abi_major: policy.abi_major,
             abi_minor: policy.abi_minor,
@@ -575,6 +582,28 @@ mod tests {
             });
             assert_eq!(floor.validate(&quote).is_ok(), accepted, "{svn}");
         }
+    }
+
+    #[test]
+    fn a_debuggable_guest_is_refused_whatever_the_policy_says() {
+        let (launch, report_data) = turin_inputs();
+        let debuggable = with_report(|report| report[0x0A] |= 1 << 3);
+        let mut policy = artifact_policy(TURIN_CHIP_ID);
+        policy.host_data = "00".repeat(32);
+        policy.guest_policy.debug = true;
+        let expectations = assemble(&policy, &debuggable, launch, &report_data).unwrap();
+        assert!(expectations.guest_policy.debug);
+        super::validate(
+            debuggable.report(),
+            debuggable.vcek_extensions(),
+            &expectations.options,
+        )
+        .unwrap();
+        let error = expectations.validate(&debuggable).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "SEV report allows the guest to be debugged"
+        );
     }
 
     #[test]

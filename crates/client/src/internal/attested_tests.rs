@@ -1570,7 +1570,7 @@ mod options {
 
         // A configured verifier is used as it is.
         let configured = Arc::new(Verifier::new());
-        let (checked, _) = EnclaveHttpClient::builder("enclave.example.com", Pin::none())
+        let (checked, _) = EnclaveHttpClient::builder("enclave.example.com", Pin::repo("org/repo"))
             .verifier(Arc::clone(&configured))
             .prepare()
             .unwrap();
@@ -1632,9 +1632,10 @@ mod options {
         assert_eq!(settings.secret.as_ref().map(Secret::expose), Some("opaque"));
         assert_eq!(settings.timeout, Some(Duration::from_secs(1)));
 
-        let (_, settings) = EnclaveHttpClient::builder("enclave.example.com", Pin::none())
-            .prepare()
-            .unwrap();
+        let (_, settings) =
+            EnclaveHttpClient::builder("enclave.example.com", Pin::repo("org/repo"))
+                .prepare()
+                .unwrap();
         assert_eq!(settings.mode, TransportMode::Tls);
         assert!(settings.base_url.is_none() && settings.secret.is_none());
         assert!(settings.timeout.is_none());

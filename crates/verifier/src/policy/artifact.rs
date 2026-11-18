@@ -275,7 +275,7 @@ fn validate_policy(
 }
 
 /// Checks one machine: its policy exists, and its identifier is lowercase
-/// hex of the length that the policy's platform uses.
+/// hex of the length that the policy's platform uses and not all zeros.
 fn validate_machine(
     identifier: &str,
     policy_name: &str,
@@ -286,6 +286,11 @@ fn validate_machine(
     };
     if identifier.is_empty() || !canonical::is_lower_hex(identifier) {
         return Err(PolicyError::new("identifier is not lowercase hex"));
+    }
+    // A host can zero an SEV-SNP CHIP_ID, so an all-zero identifier would
+    // match any chip instead of one machine.
+    if identifier.bytes().all(|digit| digit == b'0') {
+        return Err(PolicyError::new("identifier must not be all zeros"));
     }
     let (label, want) = match policy {
         Policy::SevSnp(_) => (PLATFORM_SEV_SNP, SEV_IDENTIFIER_HEX_LEN),
