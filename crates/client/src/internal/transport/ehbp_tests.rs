@@ -1285,10 +1285,11 @@ async fn a_sealed_success_without_any_frame_is_refused() {
             .await
             .expect("a response");
         assert_eq!(response.status(), StatusCode::OK);
-        tokio::time::timeout(PATIENCE, response.bytes())
+        let error = tokio::time::timeout(PATIENCE, response.bytes())
             .await
             .expect("the body ends")
             .expect_err("no frame authenticated");
+        assert_eq!(code_of(&error), Some(Code::FramingTruncated), "{error:?}");
     }
 }
 
