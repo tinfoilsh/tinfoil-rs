@@ -1169,7 +1169,7 @@ async fn a_plaintext_success_to_a_sealed_request_is_refused() {
 #[tokio::test]
 async fn a_plaintext_error_to_a_sealed_request_passes_through() {
     let key = key(1);
-    for status in [302, 400, 401, 429, 500, 502] {
+    for status in [400, 401, 429, 500, 502] {
         let server = serve(&key, move |_| {
             Reply::ok("bad gateway").status(status).plaintext()
         })
@@ -1267,10 +1267,10 @@ async fn limit_of_the_protocol_a_sealed_response_that_ends_at_a_frame_boundary_i
 }
 
 #[tokio::test]
-async fn limit_of_the_protocol_a_sealed_success_without_any_frame_is_accepted_as_empty() {
+async fn a_sealed_success_without_any_frame_is_refused() {
     let key = key(1);
-    // Nothing was sealed, or everything that was sealed is withheld: the
-    // client cannot tell the two apart.
+    // Nothing was sealed, or everything that was sealed is withheld: with no
+    // frame, nothing shows that the enclave answered.
     for withheld in [false, true] {
         let server = serve(&key, move |_| {
             Reply::parts(if withheld {
@@ -1285,11 +1285,11 @@ async fn limit_of_the_protocol_a_sealed_success_without_any_frame_is_accepted_as
             .await
             .expect("a response");
         assert_eq!(response.status(), StatusCode::OK);
-        let body = tokio::time::timeout(PATIENCE, response.bytes())
+        let error = tokio::time::timeout(PATIENCE, response.bytes())
             .await
             .expect("the body ends")
-            .expect("no error for an empty body");
-        assert!(body.is_empty());
+            .expect_err("no frame authenticated");
+        assert_eq!(code_of(&error), Some(Code::FramingTruncated), "{error:?}");
     }
 }
 
@@ -1493,7 +1493,7 @@ async fn the_local_server_leaves_no_stray_bytes_after_an_empty_unsealed_response
 // The carrier.
 
 #[tokio::test]
-async fn a_redirect_is_returned_and_not_followed() {
+async fn a_redirect_is_never_followed_and_fails_a_sealed_request() {
     let key = key(1);
     let server = serve(&key, |seen| {
         Reply::ok("")
@@ -1503,15 +1503,21 @@ async fn a_redirect_is_returned_and_not_followed() {
     .await;
     let bound = bound(&key);
 
-    for (request, status) in [
-        (get(server.url("/v1/models")), 302),
-        (post(server.url("/v1/chat"), "{}"), 307),
-    ] {
-        let response = bound.round_trip(request).await.expect("a response");
-        assert_eq!(response.status(), status);
-        assert_eq!(response.headers()["location"], "/elsewhere");
-        text(response).await;
-    }
+    // A request without a body is not sealed: its redirect is handed back.
+    let response = bound
+        .round_trip(get(server.url("/v1/models")))
+        .await
+        .expect("a response");
+    assert_eq!(response.status(), 302);
+    assert_eq!(response.headers()["location"], "/elsewhere");
+    text(response).await;
+
+    // Nothing authenticates where a redirect points, so one that answers a
+    // sealed request fails it.
+    let result = bound.round_trip(post(server.url("/v1/chat"), "{}")).await;
+    let error = ordinary(result, ErrorKind::Attestation);
+    assert_eq!(code_of(&error), Some(Code::UnexpectedRedirect), "{error}");
+
     let targets: Vec<String> = server.seen().into_iter().map(|seen| seen.target).collect();
     assert_eq!(targets, ["/v1/models", "/v1/chat"]);
 }

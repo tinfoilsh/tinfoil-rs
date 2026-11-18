@@ -103,7 +103,7 @@ rustls-webpki = { version = "0.103.16", default-features = false, features = ["r
 webpki-roots = "1.0.10"
 
 # Sealed bodies. `rustls-no-provider` for the same reason as reqwest's.
-tinfoil-ehbp = { version = "0.4.1", git = "https://github.com/tinfoilsh/encrypted-http-body-protocol", tag = "v0.4.1", default-features = false, features = ["rustls-no-provider"] }
+tinfoil-ehbp = { version = "0.6.0", git = "https://github.com/tinfoilsh/encrypted-http-body-protocol", tag = "v0.6.0", default-features = false, features = ["rustls-no-provider"] }
 
 # Timers and the locks that are held across an await. The clients need a
 # Tokio runtime, as reqwest does.

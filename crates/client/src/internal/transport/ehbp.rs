@@ -54,12 +54,13 @@ const MAX_PROBLEM_BYTES: usize = 64 * 1024;
 ///   problem, but it is no rejection: nothing was sealed to a key, so the
 ///   verification stays. Any other response passes through.
 /// - **Responses.** A response to a sealed request carries the protocol's
-///   response nonce, and is opened whatever its status. Without the nonce,
-///   a response with a status outside `2xx` passes through as an ordinary
-///   response, because a proxy may refuse a request before it reaches the
-///   enclave; its status, headers and body are not authenticated. A `2xx`
-///   response without the nonce, and any response with an invalid or
-///   repeated one, is an attestation error: its body is never returned.
+///   response nonce, and is opened whatever its status, a redirect apart.
+///   Without the nonce, a `4xx` or `5xx` response passes through as an
+///   ordinary response, because a proxy may refuse a request before it
+///   reaches the enclave; its status, headers and body are not
+///   authenticated. Any other response without the nonce, and any response
+///   with an invalid or repeated one, is an attestation error: its body is
+///   never returned.
 /// - **Body failures.** A frame that does not authenticate, or a body that
 ///   ends inside a frame, fails the read of the response body with a
 ///   `reqwest` error whose source is the protocol's error. The frames
@@ -71,7 +72,8 @@ const MAX_PROBLEM_BYTES: usize = 64 * 1024;
 ///   problem type, before its application sees the request. That is
 ///   reported as an attestation error marked
 ///   [`Failure::peer_lacks_key`]. Any other `422` is an ordinary response.
-/// - **Redirects** are not followed; a `3xx` is returned to the caller.
+/// - **Redirects** are not followed. A `3xx` that answers a sealed request
+///   fails it; one that answers a request without a body is returned.
 /// - **Network.** Each binding has carrier `reqwest::Client`s of its own,
 ///   with the standard certificate checks against the compiled-in roots on
 ///   the `ring` provider; they are not pinned, since the sealing is the
