@@ -71,7 +71,8 @@ const MAX_PROBLEM_BYTES: usize = 64 * 1024;
 ///   problem type, before its application sees the request. That is
 ///   reported as an attestation error marked
 ///   [`Failure::peer_lacks_key`]. Any other `422` is an ordinary response.
-/// - **Redirects** are not followed; a `3xx` is returned to the caller.
+/// - **Redirects** are not followed. A `3xx` that answers a sealed request
+///   fails it; one that answers a request without a body is returned.
 /// - **Network.** Each binding has carrier `reqwest::Client`s of its own,
 ///   with the standard certificate checks against the compiled-in roots on
 ///   the `ring` provider; they are not pinned, since the sealing is the

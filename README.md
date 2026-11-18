@@ -116,7 +116,7 @@ A `Pin` names the workload: `Pin::repo("owner/name")` for a GitHub repository, `
 
 On every client, `current()` returns the last successful verification without checking it, `ensure_verified()` returns one that is valid now (verifying first if needed), and `reverify()` verifies again unconditionally. On the OpenAI clients, `http_client()` returns the HTTP client underneath, for these methods and for raw requests.
 
-Redirects are not followed on attested requests: a `3xx` response is returned to the caller.
+Redirects are not followed on attested requests: a `3xx` response is returned to the caller, except in the EHBP mode, where one that answers a request with a body fails the request.
 
 ## Transport modes
 
