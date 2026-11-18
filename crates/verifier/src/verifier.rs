@@ -291,7 +291,8 @@ pub fn parse_reference(reference: &str) -> Result<Reference, Error> {
 /// Names the workload that a caller trusts. The repository and the project
 /// are separate namespaces with unrelated owners, so neither is satisfied by
 /// the other's collateral. Setting both accepts either; [`Pin::none`] accepts
-/// any config that the verifier's trust authorizes.
+/// any config that the verifier's trust authorizes, and is a usage error
+/// under default config trust.
 ///
 /// ```
 /// use tinfoil_verifier::Pin;
@@ -423,6 +424,7 @@ impl Verifier {
     /// authorizer or embedded config cannot match.
     pub fn check_pin_verifiability(&self, pin: &Pin) -> Result<(), Error> {
         let references = pin.references()?;
+        self.require_pin(&references)?;
         if !references.repo.is_empty() {
             endorsement::parse_reference(references.repo).map_err(UsageError::new)?;
             if references.project.is_empty() && self.requires_config_collateral() {
@@ -437,9 +439,27 @@ impl Verifier {
             .map_err(Error::Usage)
     }
 
+    /// Refuses a pin that names nothing under default config trust, which
+    /// would accept any config in the public registry.
+    fn require_pin(&self, references: &PinReferences<'_>) -> Result<(), UsageError> {
+        if !references.repo.is_empty()
+            || !references.project.is_empty()
+            || self.embedded.config.is_some()
+            || self.config_authorizer.is_some()
+            || self.config_keys_pinned
+            || self.config_registry_ids.is_some()
+        {
+            return Ok(());
+        }
+        Err(UsageError::new(
+            "pin names nothing: set a repository or project, or configure the verifier's config trust",
+        ))
+    }
+
     /// The checks of a pin that do not depend on the document, and the
     /// pins that its project sets on a config endorsement.
     fn check_references(&self, references: PinReferences<'_>) -> Result<Pins, UsageError> {
+        self.require_pin(&references)?;
         if !references.repo.is_empty() {
             endorsement::parse_reference(references.repo).map_err(UsageError::new)?;
         }

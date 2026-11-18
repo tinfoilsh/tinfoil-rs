@@ -364,7 +364,7 @@ async fn an_enclave_that_serves_no_attestation_document_is_a_network_error_after
 async fn connecting_to_an_enclave_that_never_answers_ends_at_the_timeout() {
     let (host, accepted) = plain_server(b"").await;
     let started = std::time::Instant::now();
-    let connect = EnclaveHttpClient::builder(host.as_str(), Pin::none())
+    let connect = EnclaveHttpClient::builder(host.as_str(), Pin::repo("org/repo"))
         .timeout(Duration::from_millis(300))
         .connect();
     let error = tokio::time::timeout(PATIENCE, connect)

@@ -170,7 +170,7 @@ A verification passes only if all of the following hold. They are checked offlin
 
 - **The hardware evidence is authentic.** The AMD SEV-SNP report or Intel TDX quote is signed by a key that chains to the vendor's root, and it satisfies the platform policy.
 - **The evidence answers this request.** The document is bound to a fresh random nonce that the client sent.
-- **The enclave runs what the pin names.** The enclave's measurement matches reference values that are themselves authenticated, through signed endorsements and the Sigstore trusted root, for the GitHub repository or the config registry project that the client pins. Without a pin (`Pin::none()` on an enclave client), the enclave must run a config that the verifier's policy authorizes, which by default is one that Tinfoil signed into the public registry.
+- **The enclave runs what the pin names.** The enclave's measurement matches reference values that are themselves authenticated, through signed endorsements and the Sigstore trusted root, for the GitHub repository or the config registry project that the client pins. Without a pin (`Pin::none()` on an enclave client), the enclave must run a config that the verifier's policy authorizes; under default config trust, `Pin::none()` is a usage error.
 - **The evidence is fresh.** The signed freshness proofs are no older than the freshness window (seven days by default), and the verification expires when they stop vouching for the document.
 - **The keys belong to the enclave.** The TLS key fingerprint and the HPKE key that the client binds its traffic to are part of what the hardware signed.
 

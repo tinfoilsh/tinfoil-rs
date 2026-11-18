@@ -50,7 +50,68 @@ const VECTORS_ENV: &str = "TINFOIL_CONFORMANCE_VECTORS";
 
 /// Cases that the other implementation accepts and this crate turns down,
 /// each with the rule that makes this crate the stricter one.
-const STRICTER: &[(&str, &str)] = &[];
+const STRICTER: &[(&str, &str)] = &[
+    ("build/artifacts-embedded/", NEEDS_A_PIN),
+    ("build/defaults-empty-pin", NEEDS_A_PIN),
+    ("build/embedded-platform-alone", NEEDS_A_PIN),
+    ("build/embedded-runtime-alone", NEEDS_A_PIN),
+    ("build/max-age", NEEDS_A_PIN),
+    ("build/ok-freshness-keys-runtime-embedded", NEEDS_A_PIN),
+    (
+        "config-sev/certified-private-digest-only-default-ids/",
+        NEEDS_A_PIN,
+    ),
+    (
+        "config-sev/certified-private-with-config-default-ids/",
+        NEEDS_A_PIN,
+    ),
+    (
+        "config-sev/certified-public-digest-only-default-ids/",
+        NEEDS_A_PIN,
+    ),
+    (
+        "config-sev/certified-public-with-config-default-ids/",
+        NEEDS_A_PIN,
+    ),
+    ("config-sev/defaults-no-collateral", NEEDS_A_PIN),
+    ("config-sev/embedded-artifacts-no-config", NEEDS_A_PIN),
+    ("config-sev/endorsed-v1-default-trust", NEEDS_A_PIN),
+    ("config-sev/endorsed-v2-keyed-registry-roots", NEEDS_A_PIN),
+    ("config-sev/plain-without-authorizer", NEEDS_A_PIN),
+    ("config-tdx/defaults-no-collateral", NEEDS_A_PIN),
+    ("config-tdx/embedded-artifacts-no-config", NEEDS_A_PIN),
+    ("config-tdx/plain-without-authorizer", NEEDS_A_PIN),
+    ("legacy-sev/repo-07", NEEDS_A_PIN),
+    (
+        "legacy-sev/v3-only-embedded-artifacts-empty-repo",
+        NEEDS_A_PIN,
+    ),
+    (
+        "legacy-sev/v3-only-embedded-platform-empty-repo",
+        NEEDS_A_PIN,
+    ),
+    (
+        "legacy-sev/v3-only-embedded-runtime-empty-repo",
+        NEEDS_A_PIN,
+    ),
+    ("legacy-sev/v3-only-freshness-keys-empty-repo", NEEDS_A_PIN),
+    ("legacy-tdx/repo-07", NEEDS_A_PIN),
+    (
+        "legacy-tdx/v3-only-embedded-artifacts-empty-repo",
+        NEEDS_A_PIN,
+    ),
+    (
+        "legacy-tdx/v3-only-embedded-platform-empty-repo",
+        NEEDS_A_PIN,
+    ),
+    (
+        "legacy-tdx/v3-only-embedded-runtime-empty-repo",
+        NEEDS_A_PIN,
+    ),
+    ("legacy-tdx/v3-only-freshness-keys-empty-repo", NEEDS_A_PIN),
+];
+
+const NEEDS_A_PIN: &str = "a pin that names nothing is refused under default config trust";
 
 pub(crate) struct Fixture {
     value: Value,
@@ -554,6 +615,9 @@ fn replay(fixture: &Fixture, case: &Object) -> Outcome {
         && !matches!(error, Error::Usage(_))
     {
         return Outcome::Differs(format!("repository check fails with {error}"));
+    }
+    if let (Err(error), true) = (&repo_check, flag(recorded, "repo_check")) {
+        return Outcome::Stricter(format!("repository check: {error}"));
     }
     if repo_check.is_ok() != flag(recorded, "repo_check") {
         return Outcome::Differs(format!("repository check: {repo_check:?}"));
