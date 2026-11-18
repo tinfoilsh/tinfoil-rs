@@ -189,7 +189,7 @@ jobs:
         with:
           repository: tinfoilsh/tinfoil-conformance
           # Pinned; bump deliberately when the vector suite changes.
-          ref: a90d0a51182992f5f62a5a147dee87b520e5d117
+          ref: 6b25cf529ae5e97dcb0f114d4a454afcf1881ecf
           path: tinfoil-conformance
           persist-credentials: false
 
