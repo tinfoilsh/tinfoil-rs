@@ -289,31 +289,25 @@ fn check_firmware(report: &Report, options: &Options, problems: &mut Vec<String>
         ));
         return;
     }
-    let current = u16::from_be_bytes([report.current_major, report.current_minor]);
-    let committed = u16::from_be_bytes([report.committed_major, report.committed_minor]);
-    let (build_ok, version_ok) = if options.permit_provisional_firmware {
-        (
-            report.committed_build <= report.current_build,
-            committed <= current,
-        )
+    let current = (
+        report.current_major,
+        report.current_minor,
+        report.current_build,
+    );
+    let committed = (
+        report.committed_major,
+        report.committed_minor,
+        report.committed_build,
+    );
+    let consistent = if options.permit_provisional_firmware {
+        committed <= current
     } else {
-        (
-            report.committed_build == report.current_build,
-            committed == current,
-        )
+        committed == current
     };
-    if !build_ok {
+    if !consistent {
         problems.push(format!(
-            "committed build number {} is not consistent with the current build number {}",
-            report.committed_build, report.current_build
-        ));
-    } else if !version_ok {
-        problems.push(format!(
-            "committed API version ({}.{}) is not consistent with the current API version ({}.{})",
-            report.committed_major,
-            report.committed_minor,
-            report.current_major,
-            report.current_minor
+            "committed firmware version {}.{} build {} is not consistent with the current version {}.{} build {}",
+            committed.0, committed.1, committed.2, current.0, current.1, current.2
         ));
     }
 }
@@ -367,9 +361,8 @@ fn check_chip_id(chip_id: &[u8; CHIP_ID_SIZE], hwid: &[u8]) -> Result<(), Assemb
 ///      [`TcbParts::all_at_most`]; "equals" also requires that both sides
 ///      are valid TCB versions ([`TcbParts::compose`]);
 ///    - firmware: the current version, ordered by API major, minor, then
-///      build, is at least the minimum; the committed build and API
-///      version equal the current ones, or with provisional firmware
-///      permitted are at most them;
+///      build, is at least the minimum; the committed version equals the
+///      current one, or with provisional firmware permitted is at most it;
 ///    - platform info: SMT, TSME and SEV-TIO are enabled only if the
 ///      bound has them; ECC, RAPL disabled, ciphertext hiding, alias check
 ///      complete and IOMMU write-safe are present if the bound has them;
@@ -686,11 +679,22 @@ mod tests {
 
     #[test]
     fn committed_firmware_older_than_current_needs_permission() {
-        let cases: [(Change<Vec<u8>>, &str); 3] = [
-            (|bytes| bytes[0x1EC] = 1, "committed build number 1"),
+        let cases: [(Change<Vec<u8>>, &str); 4] = [
+            (
+                |bytes| bytes[0x1EC] = 1,
+                "committed firmware version 1.49 build 1 is not consistent with the current version 1.49 build 2",
+            ),
             (
                 |bytes| bytes[0x1E9] = 51,
-                "committed API version (1.49) is not consistent with the current API version (1.51)",
+                "committed firmware version 1.49 build 2 is not consistent with the current version 1.51 build 2",
+            ),
+            (
+                // An earlier API version is earlier whatever its build.
+                |bytes| {
+                    bytes[0x1ED] = 48;
+                    bytes[0x1EC] = 255;
+                },
+                "committed firmware version 1.48 build 255 is not consistent with the current version 1.49 build 2",
             ),
             (
                 |bytes| {
