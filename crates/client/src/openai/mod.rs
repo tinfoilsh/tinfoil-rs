@@ -245,12 +245,14 @@ pub struct OpenAIOptions {
     /// [`Transport::Ehbp`](crate::Transport::Ehbp), or the enclave's
     /// origin. `None` selects `/v1/`.
     ///
-    /// It must be an absolute path (it starts with `/`, but not with
-    /// `//`), without a query, a fragment, an encoded slash, or a `.` or
-    /// `..` segment, percent-encoded or not. Whitespace, control
-    /// characters and backslashes are refused too, and so is a path that a
-    /// URL parser would rewrite. Each mistake, an empty string among them,
-    /// is a configuration error.
+    /// It must be an RFC 3986 absolute path: it starts with `/`, but not
+    /// with `//`, and holds only path characters (letters, digits,
+    /// `-._~!$&'()*+,;=:@`), `/` between segments and well-formed `%XX`
+    /// escapes. A `.` or `..` segment, an encoded slash (`%2F`) and an
+    /// encoded backslash (`%5C`) are refused, percent-encoded or not, and
+    /// so are a query and a fragment. Any other escape is accepted, also
+    /// one of a byte that is not UTF-8. Each mistake, an empty string among
+    /// them, is a configuration error.
     pub api_path: Option<String>,
 }
 

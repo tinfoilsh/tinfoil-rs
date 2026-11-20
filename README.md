@@ -307,7 +307,7 @@ These bounds are fixed:
 
 ## More on the OpenAI client
 
-The OpenAI client sets async-openai's API base itself, after your `OpenAIConfig`, so an API base in the configuration or in `OPENAI_BASE_URL` has no effect. The API base is the HTTP client's `base_url()` (the proxy URL, or `https://<enclave>/`) followed by `OpenAIOptions::api_path`, `/v1/` by default. An API path must be absolute, without a query, a fragment, an encoded slash, or a `.` or `..` segment.
+The OpenAI client sets async-openai's API base itself, after your `OpenAIConfig`, so an API base in the configuration or in `OPENAI_BASE_URL` has no effect. The API base is the HTTP client's `base_url()` (the proxy URL, or `https://<enclave>/`) followed by `OpenAIOptions::api_path`, `/v1/` by default. An API path must be an RFC 3986 absolute path of path characters (letters, digits, `-._~!$&'()*+,;=:@`, `/` and `%XX` escapes), without a query, a fragment, an encoded slash or backslash, or a `.` or `..` segment.
 
 
 - `chat_relaxed()` sends and returns raw JSON, for request fields and response events that async-openai's types do not model (web search, vendor events). Its stream ends at `[DONE]`, and fails if the response ends inside an event.
