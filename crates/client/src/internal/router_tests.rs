@@ -832,7 +832,7 @@ mod options {
     use super::*;
     use crate::RouterHttpClient;
     use crate::internal::cachesecret;
-    use crate::verifier::Verifier;
+    use crate::verifier::Policy;
 
     #[test]
     fn options_that_pass_every_check_describe_the_fallback_router_and_the_client() {
@@ -842,18 +842,22 @@ mod options {
         assert!(settings.base_url.is_none() && settings.secret.is_none());
         assert!(settings.timeout.is_none());
 
-        let verifier = Arc::new(Verifier::default());
+        let day = Duration::from_secs(24 * 60 * 60);
         let (fallback, settings) = RouterHttpClient::builder()
             .transport_mode(TransportMode::Ehbp)
             .base_url("https://proxy.example.com/tinfoil")
-            .verifier(Arc::clone(&verifier))
+            .policy(Policy {
+                freshness_max_age: day,
+                ..Policy::default()
+            })
             .verification_check(|_| Ok(()))
             .user_cache_secret("opaque")
             .timeout(Duration::from_secs(5))
             .prepare()
             .unwrap();
-        // The verifier of the fallback is the one for every router.
-        assert!(Arc::ptr_eq(fallback.verifier(), &verifier));
+        // The verifier of the fallback, which is the one for every router,
+        // applies the policy.
+        assert_eq!(fallback.verifier().freshness_max_age(), day);
         assert!(fallback.verification_check().is_some());
         assert_eq!(settings.mode, TransportMode::Ehbp);
         assert_eq!(
@@ -866,14 +870,9 @@ mod options {
 
     #[test]
     fn the_checks_run_in_the_documented_order() {
-        let authorizing = || {
-            let verifier = Verifier::new(
-                crate::verifier::ConfigTrust::Authorizer(crate::verifier::ConfigAuthorizer::new(
-                    |_| Ok(()),
-                )),
-                crate::verifier::Policy::default(),
-            );
-            Arc::new(verifier.expect("a verifier"))
+        let unbounded = || Policy {
+            freshness_max_age: Duration::MAX,
+            ..Policy::default()
         };
         let refusal = |builder: crate::RouterHttpClientBuilder| {
             let error = builder.prepare().err().expect("refused");
@@ -882,7 +881,7 @@ mod options {
         };
         let all_wrong = || {
             RouterHttpClient::builder()
-                .verifier(authorizing())
+                .policy(unbounded())
                 .timeout(Duration::ZERO)
         };
         let message = refusal(all_wrong().base_url("ftp://proxy.example/"));
@@ -891,8 +890,8 @@ mod options {
         assert!(message.contains("TransportMode::Ehbp"), "{message}");
         let message = refusal(all_wrong());
         assert!(message.contains("timeout is zero"), "{message}");
-        let message = refusal(RouterHttpClient::builder().verifier(authorizing()));
-        assert!(message.contains("explicit enclave"), "{message}");
+        let message = refusal(RouterHttpClient::builder().policy(unbounded()));
+        assert!(message.contains("out of range"), "{message}");
     }
 
     #[tokio::test(start_paused = true)]

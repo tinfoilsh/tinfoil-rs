@@ -8,7 +8,7 @@ use reqwest::Url;
 
 use crate::error::Error;
 use crate::internal::transport::base_url;
-use crate::verifier::{BoxError, Verification, Verifier};
+use crate::verifier::{BoxError, Policy, Verification};
 
 /// How a client protects its traffic to an enclave.
 ///
@@ -79,7 +79,7 @@ impl fmt::Debug for Secret {
 /// is called.
 #[derive(Clone, Default)]
 pub(crate) struct CommonOptions {
-    pub(crate) verifier: Option<Arc<Verifier>>,
+    pub(crate) policy: Policy,
     pub(crate) verification_check: Option<VerificationCheck>,
     pub(crate) user_cache_secret: Option<Secret>,
     pub(crate) timeout: Option<Duration>,
@@ -122,7 +122,7 @@ impl RouteOptions {
 impl fmt::Debug for CommonOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CommonOptions")
-            .field("verifier", &self.verifier)
+            .field("policy", &self.policy)
             .field("verification_check", &self.verification_check.is_some())
             .field("user_cache_secret", &self.user_cache_secret)
             .field("timeout", &self.timeout)

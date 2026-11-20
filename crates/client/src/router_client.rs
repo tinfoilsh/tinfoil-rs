@@ -12,7 +12,7 @@ use crate::internal::enclave::{self, Enclave};
 use crate::internal::{cachesecret, router, system_clock};
 use crate::options::{RouteOptions, Secret, TransportMode};
 use crate::request::http_request_methods;
-use crate::verifier::{BoxError, Pin, Verification, Verifier};
+use crate::verifier::{BoxError, ConfigTrust, Pin, Policy, Verification, Verifier};
 
 /// An HTTP client whose requests reach only the attested router that it
 /// discovered.
@@ -139,15 +139,15 @@ impl RouterHttpClientBuilder {
         self
     }
 
-    /// The verification policy for the router. Unset, it is
-    /// `Verifier::default()`. A verifier that supplies or authorizes the
-    /// config itself is refused: it needs an explicit enclave.
-    pub fn verifier(mut self, verifier: impl Into<Arc<Verifier>>) -> Self {
-        self.options.common.verifier = Some(verifier.into());
+    /// The verification policy that applies on top of the router's fixed
+    /// trust. Unset, it is [`Policy::default()`], which keeps every
+    /// default.
+    pub fn policy(mut self, policy: Policy) -> Self {
+        self.options.common.policy = policy;
         self
     }
 
-    /// A veto over each verification that passed the verifier: for each
+    /// A veto over each verification that passed the policy: for each
     /// router that discovery tries, and whenever the client verifies its
     /// router again.
     ///
@@ -212,8 +212,8 @@ impl RouterHttpClientBuilder {
     ///    [`EnclaveHttpClientBuilder::connect`](crate::EnclaveHttpClientBuilder::connect).
     /// 2. `base_url` is set and the mode is [`TransportMode::Tls`].
     /// 3. `user_cache_secret` is empty, or `timeout` is zero.
-    /// 4. The verifier supplies or authorizes the config itself
-    ///    (`Verifier::caller_authorizes_config`).
+    /// 4. The verifier cannot be built from the policy. The verifier's
+    ///    usage error is the source.
     ///
     /// Then discovery runs, for at most 30 seconds in all. The router list
     /// is fetched; a list that cannot be fetched or read counts as empty.
@@ -285,19 +285,12 @@ impl RouterHttpClientBuilder {
         }
         self.options.common.check()?;
         let common = self.options.common;
-        if common
-            .verifier
-            .as_ref()
-            .is_some_and(|verifier| verifier.caller_authorizes_config())
-        {
-            return Err(Error::configuration(
-                "a verifier that supplies or authorizes the config requires an explicit enclave",
-            ));
-        }
+        let verifier = Verifier::new(ConfigTrust::PublicRegistry, common.policy)
+            .map_err(enclave::from_verifier)?;
         let fallback = enclave::Config {
             host: router::FALLBACK_ROUTER.to_owned(),
             pin: router::router_pin(),
-            verifier: common.verifier,
+            verifier: Some(Arc::new(verifier)),
             verification_check: common.verification_check,
         }
         .check()?;

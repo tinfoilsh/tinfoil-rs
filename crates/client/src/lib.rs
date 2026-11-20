@@ -164,6 +164,7 @@ mod openai;
 mod options;
 mod request;
 mod router_client;
+mod trust;
 
 #[cfg(feature = "openai")]
 pub mod multimodal;
@@ -203,7 +204,7 @@ pub use openai::{
 pub use options::TransportMode;
 pub use request::RequestBuilder;
 pub use router_client::{RouterHttpClient, RouterHttpClientBuilder};
-pub use tinfoil_verifier::Pin;
+pub use trust::Trust;
 
 // Compiles the examples of the repository's README as documentation tests,
 // so that they cannot drift from the API.

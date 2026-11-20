@@ -86,14 +86,16 @@ Every client:
 The HTTP clients send requests with `reqwest`'s types: `get`, `post`, `put`, `patch`, `delete`, `head` and `request` return a request builder, and `execute` takes a `reqwest::Request`. URLs are absolute.
 
 ```rust,no_run
-use tinfoil::{EnclaveHttpClient, Pin};
+use tinfoil::{EnclaveHttpClient, Trust};
 
 async fn list_models(api_key: &str) -> Result<String, Box<dyn std::error::Error>> {
-    // A host (not a URL), and the repository that its code must come from.
+    // A host (not a URL), and who vouches for the code that it runs.
     let client = EnclaveHttpClient::connect(
         "inference.tinfoil.sh",
-        Pin::repo("tinfoilsh/confidential-model-router")
-            .with_project("tinfoilsh/confidential-model-router"),
+        Trust::EitherPin {
+            repo: "tinfoilsh/confidential-model-router".into(),
+            project: "tinfoilsh/confidential-model-router".into(),
+        },
     )
     .await?;
 
@@ -110,7 +112,18 @@ async fn list_models(api_key: &str) -> Result<String, Box<dyn std::error::Error>
 }
 ```
 
-A `Pin` names the workload: `Pin::repo("owner/name")` for a GitHub repository, `Pin::project("org/project")` for a config registry project, or `Pin::repo(..).with_project(..)` to accept either. The same name can belong to different owners in each, so neither is satisfied by the other's collateral; a project is also satisfied by a matching config that the caller embedded.
+The `Trust` argument names who vouches for the enclave's config. It is one of:
+
+| variant | accepts |
+|---|---|
+| `Trust::RepoPin { repo }`, or `Trust::repo(..)` | v2 collateral for a GitHub repository, `owner/name[@tag][@sha256:digest]` |
+| `Trust::ProjectPin { project, registry_ids }`, or `Trust::project(..)` | v3 collateral for a config registry project, `org/project[@revision][@sha256:digest]`, endorsed by the public registry (`registry_ids: None`) or by exactly the registries listed |
+| `Trust::SignedBy { keys, project }` | v3 configs whose endorsements your keys sign, optionally restricted to a project |
+| `Trust::AuthorizedBy(..)` | v3 configs that your own function authorizes |
+| `Trust::EmbeddedConfig { name, bytes }` | v3 collateral for exactly the config bytes that you supply |
+| `Trust::EitherPin { repo, project }` | either of the first two, for the migration from v2 to v3 collateral |
+
+The same name can belong to different owners as a repository and as a project, so neither is satisfied by the other's collateral. An empty repository or project, and an empty list of registry IDs, are configuration errors.
 
 `RouterHttpClient::connect()` takes no host: it tries the routers of Tinfoil's published list in order and keeps the first that passes verification, or else `inference.tinfoil.sh`.
 
@@ -170,7 +183,7 @@ A verification passes only if all of the following hold. They are checked offlin
 
 - **The hardware evidence is authentic.** The AMD SEV-SNP report or Intel TDX quote is signed by a key that chains to the vendor's root, and it satisfies the platform policy.
 - **The evidence answers this request.** The document is bound to a fresh random nonce that the client sent.
-- **The enclave runs what the pin names.** The enclave's measurement matches reference values that are themselves authenticated, through signed endorsements and the Sigstore trusted root, for the GitHub repository or the config registry project that the client pins. Without a pin (`Pin::none()` on an enclave client), the enclave must run a config that the verifier's policy authorizes; under default config trust, `Pin::none()` is a usage error.
+- **The enclave runs what the pin names.** The enclave's measurement matches reference values that are themselves authenticated, through signed endorsements and the Sigstore trusted root, for the GitHub repository or the config registry project that the trust argument names, or the config that it signs, authorizes or embeds.
 - **The evidence is fresh.** The signed freshness proofs are no older than the freshness window (seven days by default), and the verification expires when they stop vouching for the document.
 - **The keys belong to the enclave.** The TLS key fingerprint and the HPKE key that the client binds its traffic to are part of what the hardware signed.
 
@@ -178,14 +191,13 @@ The result is a `tinfoil::verifier::Verification`: the code digest and tag, the 
 
 ## Custom verification policy
 
-A `Verifier` holds the policy. Build one to pin measurement registers or to change the freshness window, and add a `verification_check` to veto a verification that the verifier accepted. One verifier can serve any number of clients.
+A `Policy` holds the checks that apply on top of the trust: pinned measurement registers, the freshness window, and how the runtime and platform artifacts are trusted. It is plain data, which the client builds its verifier from. Add a `verification_check` to veto a verification that the policy accepted.
 
 ```rust,no_run
-use std::sync::Arc;
 use std::time::Duration;
 
 use tinfoil::RouterHttpClient;
-use tinfoil::verifier::{ConfigTrust, Expected, Policy, Verifier};
+use tinfoil::verifier::{Expected, Policy};
 
 async fn connect_pinned(launch_digest: &str) -> Result<RouterHttpClient, Box<dyn std::error::Error>> {
     let policy = Policy {
@@ -195,10 +207,9 @@ async fn connect_pinned(launch_digest: &str) -> Result<RouterHttpClient, Box<dyn
         freshness_max_age: Duration::from_secs(3 * 24 * 60 * 60),
         ..Policy::default()
     };
-    let verifier = Arc::new(Verifier::new(ConfigTrust::default(), policy)?);
 
     let client = RouterHttpClient::builder()
-        .verifier(verifier)
+        .policy(policy)
         // Called for every verification that the client is about to rely
         // on. An error rejects the enclave.
         .verification_check(|verified| {
@@ -214,7 +225,7 @@ async fn connect_pinned(launch_digest: &str) -> Result<RouterHttpClient, Box<dyn
 }
 ```
 
-A verifier takes two values. The `ConfigTrust` selects who vouches for the config: the public registry (the default), `Registries` (the registries whose config endorsements are accepted, in place of the public one), `SigningKeys` (the keys that config endorsements must be signed with, in place of Tinfoil's), `Authorizer` (your own function decides which config is authorized, in place of endorsement verification), or `Embedded` (a config that you supply and trust yourself). Each is one value, so that two sources of trust that would conflict cannot be configured together. The `Policy` holds the register pins, the freshness window and the `ArtifactTrust`: artifacts that endorsements authenticate (the default, with Tinfoil's freshness keys or your own) or artifacts that you supply. None of them replaces the Sigstore, AMD or Intel roots. To verify a document that you fetched yourself, call `Verifier::verify_v3`.
+The `artifacts` of a policy are an `ArtifactTrust`: artifacts that endorsements authenticate (the default, with Tinfoil's freshness keys or your own) or artifacts that you supply. Nothing in the trust argument or the policy replaces the Sigstore, AMD or Intel roots. A policy mistake, such as an empty key list, is a configuration error before any network I/O. To verify a document that you fetched yourself, build a `tinfoil::verifier::Verifier` from a `ConfigTrust` and a `Policy` and call `Verifier::verify_v3`.
 
 ## Error handling
 

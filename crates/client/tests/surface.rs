@@ -17,10 +17,10 @@ use std::time::Duration;
 
 use tinfoil::reqwest::header::{HeaderMap, HeaderValue};
 use tinfoil::reqwest::{Method, Request, Response, Url};
-use tinfoil::verifier::{BoxError, Verification, Verifier};
+use tinfoil::verifier::{BoxError, Pin, Policy, Verification};
 use tinfoil::{
-    EnclaveHttpClient, EnclaveHttpClientBuilder, Error, ErrorKind, Pin, RequestBuilder,
-    RouterHttpClient, RouterHttpClientBuilder, TransportMode, VERSION,
+    EnclaveHttpClient, EnclaveHttpClientBuilder, Error, ErrorKind, RequestBuilder,
+    RouterHttpClient, RouterHttpClientBuilder, TransportMode, Trust, VERSION,
 };
 
 fn handle<T: Clone + Send + Sync + std::fmt::Debug + 'static>() {}
@@ -79,7 +79,7 @@ fn the_http_clients_are_handles() {
 fn the_accessors_have_their_signatures() {
     let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a Url = EnclaveHttpClient::base_url;
     let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a str = EnclaveHttpClient::enclave;
-    let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a Pin = EnclaveHttpClient::pin;
+    let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a Trust = EnclaveHttpClient::trust;
     let _: fn(&EnclaveHttpClient) -> TransportMode = EnclaveHttpClient::transport_mode;
     let _: fn(&EnclaveHttpClient) -> Arc<Verification> = EnclaveHttpClient::current;
 
@@ -93,10 +93,10 @@ fn the_accessors_have_their_signatures() {
 
 #[test]
 fn a_builder_does_no_io_and_prints_no_secret() {
-    let builder = EnclaveHttpClient::builder("enclave.example.com", Pin::repo("org/repo"))
+    let builder = EnclaveHttpClient::builder("enclave.example.com", Trust::repo("org/repo"))
         .transport_mode(TransportMode::Ehbp)
         .base_url("https://user:hunter2@proxy.example.com/")
-        .verifier(Verifier::default())
+        .policy(Policy::default())
         .verification_check(check)
         .user_cache_secret("cache-scope-value")
         .timeout(Duration::from_secs(30));
@@ -106,20 +106,20 @@ fn a_builder_does_no_io_and_prints_no_secret() {
 }
 
 /// The enclave client, as a caller writes it.
-async fn enclave_client(verifier: Arc<Verifier>) -> Result<(), Box<dyn StdError>> {
+async fn enclave_client(policy: Policy) -> Result<(), Box<dyn StdError>> {
     let client: EnclaveHttpClient = send(EnclaveHttpClient::connect(
         "enclave.example.com",
-        Pin::repo("org/repo"),
+        Trust::repo("org/repo"),
     ))
     .await?;
 
     let builder: EnclaveHttpClientBuilder = EnclaveHttpClient::builder(
         String::from("enclave.example.com"),
-        Pin::repo("org/repo@v1.2.3"),
+        Trust::repo("org/repo@v1.2.3"),
     )
     .transport_mode(TransportMode::Ehbp)
     .base_url("https://proxy.example.com/")
-    .verifier(verifier)
+    .policy(policy)
     .verification_check(|verified: &Verification| {
         if verified.code_tag().is_empty() {
             return Err("untagged release".into());
@@ -130,12 +130,12 @@ async fn enclave_client(verifier: Arc<Verifier>) -> Result<(), Box<dyn StdError>
     .timeout(Duration::from_secs(30));
     let configured: EnclaveHttpClient = send(builder.connect()).await?;
 
-    let unpinned: EnclaveHttpClient = send(EnclaveHttpClient::connect(
+    let project: EnclaveHttpClient = send(EnclaveHttpClient::connect(
         "enclave.example.com",
-        Pin::none(),
+        Trust::project("org/project"),
     ))
     .await?;
-    let _: &Pin = unpinned.pin();
+    let _: &Trust = project.trust();
 
     let current: Arc<Verification> = configured.current();
     let valid: Arc<Verification> = send(configured.ensure_verified()).await?;
@@ -174,7 +174,7 @@ async fn router_client() -> Result<(), Error> {
         RouterHttpClient::builder()
             .transport_mode(TransportMode::Ehbp)
             .base_url("https://proxy.example.com/")
-            .verifier(Arc::new(Verifier::default()))
+            .policy(Policy::default())
             .verification_check(check)
             .user_cache_secret("opaque-random-value")
             .timeout(Duration::from_secs(30))
@@ -214,19 +214,19 @@ async fn router_refusal(builder: RouterHttpClientBuilder) -> String {
 
 #[tokio::test]
 async fn an_enclave_client_checks_its_options_before_any_io() {
-    let builder = || EnclaveHttpClient::builder("enclave.invalid", Pin::repo("owner/name"));
+    let builder = || EnclaveHttpClient::builder("enclave.invalid", Trust::repo("owner/name"));
     let ehbp = || builder().transport_mode(TransportMode::Ehbp);
     let cases: Vec<(EnclaveHttpClientBuilder, &str)> = vec![
         (
-            EnclaveHttpClient::builder("", Pin::repo("owner/name")),
+            EnclaveHttpClient::builder("", Trust::repo("owner/name")),
             "enclave host",
         ),
         (
-            EnclaveHttpClient::builder("https://enclave.invalid", Pin::repo("owner/name")),
+            EnclaveHttpClient::builder("https://enclave.invalid", Trust::repo("owner/name")),
             "enclave host",
         ),
         (
-            EnclaveHttpClient::builder("enclave.invalid/v1", Pin::repo("owner/name")),
+            EnclaveHttpClient::builder("enclave.invalid/v1", Trust::repo("owner/name")),
             "enclave host",
         ),
         (ehbp().base_url(""), "invalid base URL"),
@@ -249,11 +249,11 @@ async fn an_enclave_client_checks_its_options_before_any_io() {
         ),
         (builder().timeout(Duration::ZERO), "timeout is zero"),
         (
-            EnclaveHttpClient::builder("enclave.invalid", Pin::repo("")),
-            "repository pin is empty",
+            EnclaveHttpClient::builder("enclave.invalid", Trust::repo("")),
+            "requires a repository",
         ),
         (
-            EnclaveHttpClient::builder("enclave.invalid", Pin::repo("not a reference")),
+            EnclaveHttpClient::builder("enclave.invalid", Trust::repo("not a reference")),
             "",
         ),
         // A proxy needs sealed bodies: the default mode pins connections.
@@ -279,13 +279,13 @@ async fn an_enclave_client_checks_its_options_before_any_io() {
 async fn an_enclave_client_reports_its_options_in_the_documented_order() {
     // Each builder is wrong in two ways; the earlier check answers.
     let message = enclave_refusal(
-        EnclaveHttpClient::builder("", Pin::repo("")).base_url("ftp://proxy.invalid/"),
+        EnclaveHttpClient::builder("", Trust::repo("")).base_url("ftp://proxy.invalid/"),
     )
     .await;
     assert!(message.contains("enclave host"), "{message}");
 
     let message = enclave_refusal(
-        EnclaveHttpClient::builder("enclave.invalid", Pin::repo(""))
+        EnclaveHttpClient::builder("enclave.invalid", Trust::repo(""))
             .base_url("ftp://proxy.invalid/")
             .timeout(Duration::ZERO),
     )
@@ -293,17 +293,17 @@ async fn an_enclave_client_reports_its_options_in_the_documented_order() {
     assert!(message.contains("invalid base URL"), "{message}");
 
     let message = enclave_refusal(
-        EnclaveHttpClient::builder("enclave.invalid", Pin::repo("")).timeout(Duration::ZERO),
+        EnclaveHttpClient::builder("enclave.invalid", Trust::repo("")).timeout(Duration::ZERO),
     )
     .await;
     assert!(message.contains("timeout is zero"), "{message}");
 
     let message = enclave_refusal(
-        EnclaveHttpClient::builder("enclave.invalid", Pin::repo(""))
+        EnclaveHttpClient::builder("enclave.invalid", Trust::repo(""))
             .base_url("https://proxy.invalid/"),
     )
     .await;
-    assert!(message.contains("repository pin is empty"), "{message}");
+    assert!(message.contains("requires a repository"), "{message}");
 }
 
 /// A local server that accepts connections, counts them, and answers each
@@ -344,7 +344,7 @@ async fn an_enclave_that_serves_no_attestation_document_is_a_network_error_after
     let (host, accepted) = plain_server(b"HTTP/1.1 200 OK\r\n\r\nnot a TLS server").await;
     for mode in [TransportMode::Tls, TransportMode::Ehbp] {
         let before = accepted.load(Ordering::SeqCst);
-        let connect = EnclaveHttpClient::builder(host.as_str(), Pin::repo("owner/name"))
+        let connect = EnclaveHttpClient::builder(host.as_str(), Trust::repo("owner/name"))
             .transport_mode(mode)
             .connect();
         let error = tokio::time::timeout(PATIENCE, connect)
@@ -364,7 +364,7 @@ async fn an_enclave_that_serves_no_attestation_document_is_a_network_error_after
 async fn connecting_to_an_enclave_that_never_answers_ends_at_the_timeout() {
     let (host, accepted) = plain_server(b"").await;
     let started = std::time::Instant::now();
-    let connect = EnclaveHttpClient::builder(host.as_str(), Pin::repo("org/repo"))
+    let connect = EnclaveHttpClient::builder(host.as_str(), Trust::repo("org/repo"))
         .timeout(Duration::from_millis(300))
         .connect();
     let error = tokio::time::timeout(PATIENCE, connect)
@@ -417,21 +417,21 @@ async fn a_router_client_checks_its_options_before_any_io() {
 async fn an_empty_repository_pin_is_refused_before_any_io() {
     // `.invalid` never resolves, so a connection attempt could not pass
     // for the refusal.
-    let error = EnclaveHttpClient::connect("enclave.invalid", Pin::repo(""))
+    let error = EnclaveHttpClient::connect("enclave.invalid", Trust::repo(""))
         .await
         .expect_err("an empty pin is refused");
     assert_eq!(error.kind(), ErrorKind::Configuration);
     assert!(
-        error.to_string().contains("repository pin is empty"),
+        error.to_string().contains("requires a repository"),
         "{error}"
     );
 
-    let error = EnclaveHttpClient::builder("enclave.invalid", Pin::repo(""))
+    let error = EnclaveHttpClient::builder("enclave.invalid", Trust::repo(""))
         .connect()
         .await
         .expect_err("an empty pin is refused");
     assert!(
-        error.to_string().contains("repository pin is empty"),
+        error.to_string().contains("requires a repository"),
         "{error}"
     );
 }
@@ -495,12 +495,12 @@ mod openai {
     #[tokio::test]
     async fn an_empty_repository_pin_is_refused_by_the_openai_client() {
         let error =
-            EnclaveOpenAIClient::connect("enclave.invalid", Pin::repo(""), OpenAIConfig::new())
+            EnclaveOpenAIClient::connect("enclave.invalid", Trust::repo(""), OpenAIConfig::new())
                 .await
                 .expect_err("an empty pin is refused");
         assert_eq!(error.kind(), ErrorKind::Configuration);
         assert!(
-            error.to_string().contains("repository pin is empty"),
+            error.to_string().contains("requires a repository"),
             "{error}"
         );
     }
@@ -509,10 +509,10 @@ mod openai {
     fn an_openai_builder_prints_no_api_key() {
         let config = OpenAIConfig::new().with_api_key("sk-secret-key");
         let builder =
-            EnclaveOpenAIClient::builder("enclave.example.com", Pin::repo("org/repo"), config)
+            EnclaveOpenAIClient::builder("enclave.example.com", Trust::repo("org/repo"), config)
                 .transport_mode(TransportMode::Tls)
                 .base_url("https://enclave.example.com/api/")
-                .verifier(Verifier::default())
+                .policy(Policy::default())
                 .verification_check(check)
                 .user_cache_secret("cache-scope-value")
                 .timeout(Duration::from_secs(30));
@@ -624,14 +624,14 @@ mod openai {
         let config = OpenAIConfig::new().with_api_key(&key);
         let enclave: EnclaveOpenAIClient = send(EnclaveOpenAIClient::connect(
             "enclave.example.com",
-            Pin::repo("org/repo"),
+            Trust::repo("org/repo"),
             config.clone(),
         ))
         .await?;
         let _: &EnclaveHttpClient = enclave.http_client();
         let builder: EnclaveOpenAIClientBuilder = EnclaveOpenAIClient::builder(
             "enclave.example.com",
-            Pin::repo("org/repo"),
+            Trust::repo("org/repo"),
             config.clone(),
         )
         .transport_mode(TransportMode::Ehbp)
@@ -642,7 +642,7 @@ mod openai {
         let _: RouterOpenAIClient = send(RouterOpenAIClient::connect(config.clone())).await?;
         let builder: RouterOpenAIClientBuilder = RouterOpenAIClient::builder(config)
             .transport_mode(TransportMode::Tls)
-            .verifier(Verifier::default())
+            .policy(Policy::default())
             .verification_check(check)
             .user_cache_secret("opaque-random-value")
             .timeout(Duration::from_secs(60));

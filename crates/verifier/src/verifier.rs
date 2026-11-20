@@ -447,13 +447,6 @@ impl Verifier {
         self.freshness_max_age
     }
 
-    /// Whether the caller supplies the config, with an embedded config, or
-    /// authorizes it, with a config authorizer, in place of a pin that
-    /// authenticates it.
-    pub fn caller_authorizes_config(&self) -> bool {
-        self.embedded.config.is_some() || self.config_authorizer.is_some()
-    }
-
     /// The configured register pins, if any.
     pub fn pinned_registers(&self) -> Option<&Expected> {
         self.pinned_registers.as_ref()

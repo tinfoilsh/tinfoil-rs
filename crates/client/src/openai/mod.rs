@@ -15,7 +15,8 @@ use crate::enclave_client::{EnclaveHttpClient, EnclaveHttpClientBuilder};
 use crate::error::Error;
 use crate::options::TransportMode;
 use crate::router_client::{RouterHttpClient, RouterHttpClientBuilder};
-use crate::verifier::{BoxError, Pin, Verification, Verifier};
+use crate::trust::Trust;
+use crate::verifier::{BoxError, Policy, Verification};
 
 pub(crate) mod relaxed;
 pub(crate) mod retry;
@@ -286,16 +287,16 @@ pub struct EnclaveOpenAIClient {
 }
 
 impl EnclaveOpenAIClient {
-    /// Verifies the enclave at `host` against `pin`, as
-    /// [`EnclaveHttpClient::connect`] does ([`Pin::none`] sets no pin),
-    /// and returns an OpenAI client over it. `config` is applied first; then the API base and the HTTP
+    /// Verifies the enclave at `host` under `trust`, as
+    /// [`EnclaveHttpClient::connect`] does, and returns an OpenAI client
+    /// over it. `config` is applied first; then the API base and the HTTP
     /// client are set, so that `config` cannot replace them.
     pub async fn connect(
         host: impl Into<String>,
-        pin: Pin,
+        trust: Trust,
         config: OpenAIConfig,
     ) -> Result<Self, Error> {
-        Self::builder(host, pin, config).connect().await
+        Self::builder(host, trust, config).connect().await
     }
 
     /// Starts an OpenAI client for the enclave at `host`, to be configured
@@ -303,11 +304,11 @@ impl EnclaveOpenAIClient {
     /// [`EnclaveHttpClientBuilder`].
     pub fn builder(
         host: impl Into<String>,
-        pin: Pin,
+        trust: Trust,
         config: OpenAIConfig,
     ) -> EnclaveOpenAIClientBuilder {
         EnclaveOpenAIClientBuilder {
-            http: EnclaveHttpClient::builder(host, pin),
+            http: EnclaveHttpClient::builder(host, trust),
             config,
         }
     }
@@ -393,9 +394,9 @@ macro_rules! forward_route_setters {
                 self
             }
 
-            #[doc = concat!("See [`", stringify!($http), "::verifier`].")]
-            pub fn verifier(mut self, verifier: impl Into<Arc<Verifier>>) -> Self {
-                self.http = self.http.verifier(verifier);
+            #[doc = concat!("See [`", stringify!($http), "::policy`].")]
+            pub fn policy(mut self, policy: Policy) -> Self {
+                self.http = self.http.policy(policy);
                 self
             }
 

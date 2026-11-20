@@ -62,7 +62,6 @@ fn every_public_name_is_importable_and_has_its_signature() {
     let pin = Pin::repo("owner/name").with_project("org/project");
     let _: (&Option<String>, &Option<String>) = (&pin.repo, &pin.project);
     assert_eq!(Pin::none(), Pin::default());
-    let _: fn(&Verifier) -> bool = Verifier::caller_authorizes_config;
     let _: for<'a> fn(&'a Verifier) -> Option<&'a Expected> = Verifier::pinned_registers;
     let _: fn(&Verifier) -> Duration = Verifier::freshness_max_age;
 
@@ -121,7 +120,7 @@ fn every_public_name_is_importable_and_has_its_signature() {
         Policy::default(),
     )
     .unwrap();
-    assert!(verifier.caller_authorizes_config());
+    let _ = verifier;
 
     let _: fn(&str) -> Result<PublicKey, Error> = PublicKey::from_pem;
     let _: fn(&[u8]) -> Result<PublicKey, Error> = PublicKey::from_spki_der;

@@ -6,25 +6,21 @@
 //! TINFOIL_API_KEY=... cargo run -p tinfoil --example router_custom_verifier
 //! ```
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use tinfoil::RouterHttpClient;
-use tinfoil::verifier::{ConfigTrust, Policy, Verifier};
+use tinfoil::verifier::Policy;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // One verifier can serve any number of clients.
-    let verifier = Arc::new(Verifier::new(
-        ConfigTrust::default(),
-        Policy {
-            freshness_max_age: Duration::from_secs(3 * 24 * 60 * 60),
-            ..Policy::default()
-        },
-    )?);
+    // The policy is plain data, which the client builds its verifier from.
+    let policy = Policy {
+        freshness_max_age: Duration::from_secs(3 * 24 * 60 * 60),
+        ..Policy::default()
+    };
 
     let client = RouterHttpClient::builder()
-        .verifier(Arc::clone(&verifier))
+        .policy(policy)
         // Called for each router that discovery tries, and again whenever
         // the client verifies its router. An error rejects the router.
         .verification_check(|verified| {

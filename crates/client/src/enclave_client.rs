@@ -12,7 +12,8 @@ use crate::internal::transport::base_url;
 use crate::internal::{enclave, system_clock};
 use crate::options::{RouteOptions, Secret, TransportMode};
 use crate::request::http_request_methods;
-use crate::verifier::{BoxError, Pin, Verification, Verifier};
+use crate::trust::Trust;
+use crate::verifier::{BoxError, Policy, Verification, Verifier};
 
 /// An HTTP client whose requests reach only one attested enclave.
 ///
@@ -39,43 +40,42 @@ use crate::verifier::{BoxError, Pin, Verification, Verifier};
 #[derive(Clone)]
 pub struct EnclaveHttpClient {
     pub(crate) inner: Arc<AttestedClient>,
+    /// What the enclave is verified under.
+    trust: Arc<Trust>,
 }
 
 impl EnclaveHttpClient {
-    /// Verifies the enclave at `host` against `pin` and returns a client
+    /// Verifies the enclave at `host` under `trust` and returns a client
     /// for it, with the default options.
     ///
-    /// `host` is a host with an optional port, not a URL. `pin` names what
-    /// the enclave must run. [`Pin::none`] sets no pin: the enclave must
-    /// then run a config that the verifier's own policy authorizes, which
-    /// for the default verifier is one signed into the public registry.
+    /// `host` is a host with an optional port, not a URL. `trust` names
+    /// who vouches for the config that the enclave runs.
     ///
     /// ```no_run
     /// # async fn run() -> Result<(), tinfoil::Error> {
-    /// use tinfoil::{EnclaveHttpClient, Pin};
+    /// use tinfoil::{EnclaveHttpClient, Trust};
     ///
-    /// let repo = EnclaveHttpClient::connect("enclave.example.com", Pin::repo("owner/name")).await?;
+    /// let repo = EnclaveHttpClient::connect("enclave.example.com", Trust::repo("owner/name")).await?;
     /// let project =
-    ///     EnclaveHttpClient::connect("enclave.example.com", Pin::project("org/project")).await?;
-    /// let unpinned = EnclaveHttpClient::connect("enclave.example.com", Pin::none()).await?;
-    /// # let _ = (repo, project, unpinned);
+    ///     EnclaveHttpClient::connect("enclave.example.com", Trust::project("org/project")).await?;
+    /// # let _ = (repo, project);
     /// # Ok(())
     /// # }
     /// ```
     ///
     /// See [`EnclaveHttpClientBuilder::connect`] for the checks, the errors
     /// and cancel safety.
-    pub async fn connect(host: impl Into<String>, pin: Pin) -> Result<Self, Error> {
-        Self::builder(host, pin).connect().await
+    pub async fn connect(host: impl Into<String>, trust: Trust) -> Result<Self, Error> {
+        Self::builder(host, trust).connect().await
     }
 
-    /// Starts a client for the enclave at `host`, verified against `pin`,
+    /// Starts a client for the enclave at `host`, verified under `trust`,
     /// to be configured before it connects. The arguments are those of
     /// [`connect`](Self::connect).
-    pub fn builder(host: impl Into<String>, pin: Pin) -> EnclaveHttpClientBuilder {
+    pub fn builder(host: impl Into<String>, trust: Trust) -> EnclaveHttpClientBuilder {
         EnclaveHttpClientBuilder {
             host: host.into(),
-            pin,
+            trust,
             options: RouteOptions::default(),
         }
     }
@@ -93,9 +93,10 @@ impl EnclaveHttpClient {
         self.inner.enclave()
     }
 
-    /// The pin that the enclave is verified against.
-    pub fn pin(&self) -> &Pin {
-        self.inner.pin()
+    /// The trust that the enclave is verified under: the argument that the
+    /// client was created with.
+    pub fn trust(&self) -> &Trust {
+        &self.trust
     }
 
     /// The transport mode that the client was created with.
@@ -170,7 +171,7 @@ impl fmt::Debug for EnclaveHttpClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EnclaveHttpClient")
             .field("enclave", &self.enclave())
-            .field("pin", &self.pin())
+            .field("trust", &self.trust())
             .field("base_url", &self.base_url().as_str())
             .field("transport_mode", &self.transport_mode())
             .finish_non_exhaustive()
@@ -189,7 +190,7 @@ impl fmt::Debug for EnclaveHttpClient {
 #[must_use = "a builder does nothing until `connect` is called"]
 pub struct EnclaveHttpClientBuilder {
     host: String,
-    pin: Pin,
+    trust: Trust,
     options: RouteOptions,
 }
 
@@ -220,14 +221,16 @@ impl EnclaveHttpClientBuilder {
         self
     }
 
-    /// The verification policy. Unset, it is `Verifier::default()`. A verifier
-    /// can be shared by several clients: pass an `Arc<Verifier>`.
-    pub fn verifier(mut self, verifier: impl Into<Arc<Verifier>>) -> Self {
-        self.options.common.verifier = Some(verifier.into());
+    /// The verification policy that applies on top of the trust argument.
+    /// Unset, it is [`Policy::default()`], which keeps every default. The
+    /// client builds its verifier from the trust argument and the policy.
+    pub fn policy(mut self, policy: Policy) -> Self {
+        self.options.common.policy = policy;
         self
     }
 
-    /// A veto over each verification that passed the verifier, called
+    /// A veto over each verification that passed the trust argument and the
+    /// policy, called
     /// before the client uses the enclave's keys: when the client connects
     /// and whenever it verifies again.
     ///
@@ -301,10 +304,18 @@ impl EnclaveHttpClientBuilder {
     ///    URL), a query string or a fragment; or it uses `http://` for a
     ///    host other than `localhost` or a loopback IP address.
     /// 3. `user_cache_secret` is empty, or `timeout` is zero.
-    /// 4. `host` is not a host with an optional port; a part of the pin
-    ///    is `Some("")`, or is not a reference, or the verifier cannot
-    ///    verify against the pin.
-    /// 5. The mode is [`TransportMode::Tls`] and `base_url` is on another
+    /// 4. The trust argument lacks a field that its variant requires: an
+    ///    empty repository or project, both parts of
+    ///    [`Trust::EitherPin`], or registry IDs of
+    ///    [`Trust::ProjectPin`] that are an empty list.
+    /// 5. The verifier cannot be built from the trust argument and the
+    ///    policy: a value that the verifier refuses, such as empty signing
+    ///    keys, a malformed registry ID or embedded config, or a freshness
+    ///    bound out of range. The verifier's usage error is the source.
+    /// 6. `host` is not a host with an optional port; a part of the pin
+    ///    that the trust argument sets is `Some("")`, or is not a
+    ///    reference, or the verifier cannot verify against it.
+    /// 7. The mode is [`TransportMode::Tls`] and `base_url` is on another
     ///    origin than the enclave: that is a proxy, which requires
     ///    [`TransportMode::Ehbp`].
     ///
@@ -320,20 +331,22 @@ impl EnclaveHttpClientBuilder {
     /// Dropping the future stops the verification and closes its
     /// connection. No client exists and nothing is left behind.
     pub async fn connect(self) -> Result<EnclaveHttpClient, Error> {
-        let (checked, settings) = self.prepare()?;
+        let (checked, settings, trust) = self.prepare()?;
         let inner =
             AttestedClient::connect(checked, settings, system_clock(), enclave::network_fetch())
                 .await?;
         Ok(EnclaveHttpClient {
             inner: Arc::new(inner),
+            trust: Arc::new(trust),
         })
     }
 
     /// Checks the options, in the order that `connect` documents, and
-    /// returns what a client is made from. It does no I/O. The host, the
-    /// pin and the verifier are checked by [`enclave::Config::check`], which
-    /// also selects the verifier that the client then verifies with.
-    pub(crate) fn prepare(self) -> Result<(enclave::Checked, Settings), Error> {
+    /// returns what a client is made from, and the trust argument. It does
+    /// no I/O. The verifier is built from the trust argument and the
+    /// policy; the host and the pin are checked by
+    /// [`enclave::Config::check`].
+    pub(crate) fn prepare(self) -> Result<(enclave::Checked, Settings, Trust), Error> {
         if self.host.is_empty() {
             return Err(Error::configuration("an enclave host is required"));
         }
@@ -341,10 +354,12 @@ impl EnclaveHttpClientBuilder {
         self.options.common.check()?;
         let mode = self.options.mode();
         let common = self.options.common;
+        let (config, pin) = self.trust.verifier_inputs()?;
+        let verifier = Verifier::new(config, common.policy).map_err(enclave::from_verifier)?;
         let checked = enclave::Config {
             host: self.host,
-            pin: self.pin,
-            verifier: common.verifier,
+            pin,
+            verifier: Some(Arc::new(verifier)),
             verification_check: common.verification_check,
         }
         .check()?;
@@ -359,6 +374,7 @@ impl EnclaveHttpClientBuilder {
                 secret: common.user_cache_secret,
                 timeout: common.timeout,
             },
+            self.trust,
         ))
     }
 }

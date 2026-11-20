@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use tinfoil::verifier::{Error as VerifierError, Layer, Pin};
-use tinfoil::{EnclaveHttpClient, ErrorKind, TransportMode};
+use tinfoil::{EnclaveHttpClient, ErrorKind, TransportMode, Trust};
 
 use crate::{
     CODE_ENVELOPE_REJECTED, CODE_POLICY_REJECTED, EXIT_ACCEPTED, EXIT_INTERNAL, EXIT_REJECTED,
@@ -72,6 +72,22 @@ impl Request {
     /// The pin that the request names.
     pub fn pin(&self) -> Pin {
         crate::pin(&self.repo, self.project.as_deref())
+    }
+
+    /// The client's trust argument for the pin that the request names: a
+    /// repository, a project, or both, which accepts either.
+    pub fn trust(&self) -> Trust {
+        match self.pin() {
+            Pin {
+                repo: Some(repo),
+                project: Some(project),
+            } => Trust::EitherPin { repo, project },
+            Pin {
+                project: Some(project),
+                ..
+            } => Trust::project(project),
+            Pin { repo, .. } => Trust::repo(repo.unwrap_or_default()),
+        }
     }
 }
 
@@ -206,7 +222,7 @@ pub fn run(stdin: &[u8]) -> Outcome {
 
 async fn verify(request: &Request) -> Outcome {
     let host = &request.host;
-    let connected = EnclaveHttpClient::builder(host.as_str(), request.pin())
+    let connected = EnclaveHttpClient::builder(host.as_str(), request.trust())
         .transport_mode(TransportMode::Tls)
         .timeout(VERIFY_TIMEOUT)
         .connect()
@@ -290,6 +306,19 @@ mod tests {
             Some(Pin::project("o/p"))
         );
         assert_eq!(pin(r#"{"host":"h","repo":"","project":""}"#), None);
+        let trust = |input: &str| Request::parse(input.as_bytes()).map(|request| request.trust());
+        assert!(matches!(
+            trust(r#"{"host":"h","repo":"o/r","project":"o/p"}"#),
+            Some(Trust::EitherPin { repo, project }) if repo == "o/r" && project == "o/p"
+        ));
+        assert!(matches!(
+            trust(r#"{"host":"h","repo":"o/r","project":""}"#),
+            Some(Trust::RepoPin { repo }) if repo == "o/r"
+        ));
+        assert!(matches!(
+            trust(r#"{"host":"h","project":"o/p"}"#),
+            Some(Trust::ProjectPin { project, registry_ids: None }) if project == "o/p"
+        ));
         assert_eq!(pin(r#"{"host":"h","repo":"o/r","project":null}"#), None);
     }
 

@@ -74,7 +74,7 @@ async fn connect() -> Result<tinfoil::Client, Box<dyn std::error::Error>> {
 
 `Client::connect` discovers and verifies Tinfoil's router, as `new_default`
 did. It takes no other options; use `RouterOpenAIClient::builder(config)` to
-set a transport mode, a verifier, a timeout or a cache secret on the same
+set a transport mode, a policy, a timeout or a cache secret on the same
 route.
 
 The `OpenAIConfig` also carries the organization, the project and extra
@@ -95,23 +95,24 @@ let client = tinfoil::Client::new(
 ```rust,no_run
 // 0.3
 use tinfoil::async_openai::config::OpenAIConfig;
-use tinfoil::{EnclaveOpenAIClient, Pin};
+use tinfoil::{EnclaveOpenAIClient, Trust};
 
 async fn connect(api_key: &str) -> Result<EnclaveOpenAIClient, tinfoil::Error> {
     EnclaveOpenAIClient::connect(
         "inference.tinfoil.sh",
-        Pin::repo("tinfoilsh/confidential-model-router"),
+        Trust::repo("tinfoilsh/confidential-model-router"),
         OpenAIConfig::new().with_api_key(api_key),
     )
     .await
 }
 ```
 
-The pin is a `Pin`: `Pin::repo("owner/name")` for a GitHub repository,
-`Pin::project("org/project")` for a config registry project, or
-`Pin::repo(..).with_project(..)` to accept either. Neither is satisfied by the
-other's collateral. `Pin::none()` sets no pin, and an empty string in either
-part is an error.
+The repository becomes a `Trust`: `Trust::repo("owner/name")` for a GitHub
+repository, `Trust::project("org/project")` for a config registry project, or
+`Trust::EitherPin { repo, project }` to accept either. Neither is satisfied by
+the other's collateral. The other variants trust configs that your keys sign,
+that your function authorizes, or that you supply. An empty repository or
+project is an error.
 
 ### `Client::new_with_proxy(enclave, repo, api_key, proxy_url)`
 
@@ -125,7 +126,7 @@ let client = tinfoil::Client::new_with_proxy(enclave, repo, api_key, proxy_url).
 ```rust,no_run
 // 0.3
 use tinfoil::async_openai::config::OpenAIConfig;
-use tinfoil::{EnclaveOpenAIClient, Pin, TransportMode};
+use tinfoil::{EnclaveOpenAIClient, TransportMode, Trust};
 
 async fn connect(
     enclave: &str,
@@ -134,7 +135,7 @@ async fn connect(
     proxy_url: &str,
 ) -> Result<EnclaveOpenAIClient, tinfoil::Error> {
     let config = OpenAIConfig::new().with_api_key(api_key);
-    EnclaveOpenAIClient::builder(enclave, Pin::repo(repo), config)
+    EnclaveOpenAIClient::builder(enclave, Trust::repo(repo), config)
         .transport_mode(TransportMode::Ehbp)
         .base_url(proxy_url)
         .connect()
@@ -184,7 +185,7 @@ async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
 | `client.with_user_cache_secret(secret)` | `.user_cache_secret(secret)` on a builder, before `connect()`. An empty string is an error; leave the option unset for the default |
 | `client.secure_client()` | `client.http_client()`, which returns the attested HTTP client (`RouterHttpClient` or `EnclaveHttpClient`) |
 | `client.http_client()` → `Result<&OriginBoundClient>` | `client.http_client()`, infallible, and it works in EHBP mode too |
-| `client.enclave()`, `client.repo()` | `client.http_client().enclave()`, `.pin()` |
+| `client.enclave()`, `client.repo()` | `client.http_client().enclave()`, `.trust()` |
 
 ## `SecureClient`
 
@@ -193,10 +194,10 @@ async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
 
 | 0.2 | 0.3 |
 |---|---|
-| `SecureClient::new(host, repo, api_key)` + `verify()` | `EnclaveHttpClient::connect(host, Pin::repo(repo))` |
-| `SecureClient::new_with_proxy(host, repo, api_key, proxy_url)` + `verify()` | `EnclaveHttpClient::builder(host, Pin::repo(repo)).transport_mode(TransportMode::Ehbp).base_url(proxy_url).connect()` |
+| `SecureClient::new(host, repo, api_key)` + `verify()` | `EnclaveHttpClient::connect(host, Trust::repo(repo))` |
+| `SecureClient::new_with_proxy(host, repo, api_key, proxy_url)` + `verify()` | `EnclaveHttpClient::builder(host, Trust::repo(repo)).transport_mode(TransportMode::Ehbp).base_url(proxy_url).connect()` |
 | `SecureClient::new_default_client(api_key)` | `RouterHttpClient::connect()` |
-| `SecureClient::with_measurement(host, api_key, measurement)` | a `Verifier` with `pinned_registers(..)`; see below |
+| `SecureClient::with_measurement(host, api_key, measurement)` | a `Policy` with `pinned_registers`; see below |
 | `is_verified()` | removed: a client is always verified. `current()` returns the last verification |
 | `verify(&mut self)` | `ensure_verified()` / `reverify()` on `&self` |
 | `ground_truth()`, `ground_truth_json()` | `current()`, `current().to_json()` |
@@ -225,7 +226,7 @@ async fn models(
     repo: &str,
     api_key: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let client = tinfoil::EnclaveHttpClient::connect(host, tinfoil::Pin::repo(repo)).await?;
+    let client = tinfoil::EnclaveHttpClient::connect(host, tinfoil::Trust::repo(repo)).await?;
     let response = client
         .get(client.base_url().join("v1/models")?)
         .bearer_auth(api_key)
@@ -247,8 +248,8 @@ work in both modes; in `TransportMode::Ehbp` they seal the body.
 
 `with_measurement` skipped the provenance checks and compared one measurement.
 In 0.3 a pin is an additional check on top of the full verification, so the
-client is also given the repository that the enclave must run (`repo` below),
-or `Pin::none()` to accept any config that the verifier's policy authorizes:
+client is also given the trust that the enclave is verified under (a
+repository below):
 
 ```rust,ignore
 // 0.2
@@ -257,8 +258,8 @@ let secure = tinfoil::SecureClient::with_measurement(host, api_key, measurement)
 
 ```rust,no_run
 // 0.3
-use tinfoil::verifier::{ConfigTrust, Expected, Policy, Verifier};
-use tinfoil::{EnclaveHttpClient, Pin};
+use tinfoil::verifier::{Expected, Policy};
+use tinfoil::{EnclaveHttpClient, Trust};
 
 /// `measurement` is the SEV-SNP launch digest in hexadecimal.
 async fn connect(
@@ -270,9 +271,8 @@ async fn connect(
         pinned_registers: Some(Expected::parse_sev_snp(measurement)?),
         ..Policy::default()
     };
-    let verifier = Verifier::new(ConfigTrust::default(), policy)?;
-    let client = EnclaveHttpClient::builder(host, Pin::repo(repo))
-        .verifier(verifier)
+    let client = EnclaveHttpClient::builder(host, Trust::repo(repo))
+        .policy(policy)
         .connect()
         .await?;
     Ok(client)
@@ -280,7 +280,7 @@ async fn connect(
 ```
 
 To verify against a config that you supply yourself rather than a pin,
-see `ConfigTrust::Embedded` and `ConfigTrust::Authorizer`.
+see `Trust::EmbeddedConfig` and `Trust::AuthorizedBy`.
 
 ## Verification results
 
