@@ -20,7 +20,9 @@ pub(crate) const DEFAULT_API_PATH: &str = "/v1/";
 pub(crate) fn join(root: &Url, api_path: Option<&str>) -> Result<Url, Error> {
     let api_path = api_path.unwrap_or(DEFAULT_API_PATH);
     validate(api_path)?;
-    let mut path = format!("{}{api_path}", root.path().trim_end_matches('/'));
+    // One separator only: a root that ends in `//` keeps its empty segment.
+    let root_path = root.path().strip_suffix('/').unwrap_or(root.path());
+    let mut path = format!("{root_path}{api_path}");
     if !path.ends_with('/') {
         path.push('/');
     }
@@ -138,6 +140,11 @@ mod tests {
                 "http://localhost:8080/",
                 Some("/v1/"),
                 "http://localhost:8080/v1/",
+            ),
+            (
+                "https://proxy.example/relay//",
+                None,
+                "https://proxy.example/relay//v1/",
             ),
             (
                 "https://enclave.example.com/",
