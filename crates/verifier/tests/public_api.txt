@@ -1,4 +1,6 @@
 const REGISTER_SIZE
+enum ArtifactTrust
+enum ConfigTrust
 enum EmbeddedConfig
 enum Error
 enum Expected
@@ -36,11 +38,11 @@ field ConfigVerification.registry_id
 field ConfigVerification.signature_time
 field ConfigVerification.signing_key_hint
 field ConfigVerification.source
-field EmbeddedReferences.config
-field EmbeddedReferences.platform
-field EmbeddedReferences.runtime
 field Pin.project
 field Pin.repo
+field Policy.artifacts
+field Policy.freshness_max_age
+field Policy.pinned_registers
 field Reference.digest
 field Reference.repo
 field Reference.tag
@@ -51,6 +53,7 @@ field SoftwareIdentity.name
 field SoftwareIdentity.version
 field VerificationMetadata.verified_at
 field VerificationMetadata.verifier
+fn ConfigAuthorizer::new
 fn ConfigEndorsement::bundle_json
 fn ConfigEndorsement::config
 fn ConfigEndorsement::issuer_certificate_der
@@ -86,32 +89,22 @@ fn Verification::runtime
 fn Verification::tls_public_key_fp
 fn Verification::to_json
 fn VerificationError::layer
-fn Verifier::builder
-fn Verifier::caller_authorizes_config
 fn Verifier::check_pin_verifiability
+fn Verifier::dangerous_test_only_new [conformance build only]
 fn Verifier::freshness_max_age
 fn Verifier::new
 fn Verifier::pinned_registers
 fn Verifier::verify_v3
 fn Verifier::verify_v3_at
-fn VerifierBuilder::build
-fn VerifierBuilder::config_authorizer
-fn VerifierBuilder::config_registry_ids
-fn VerifierBuilder::config_signing_keys
-fn VerifierBuilder::dangerous_test_only_sigstore_root [conformance build only]
-fn VerifierBuilder::dangerous_test_only_vendor_roots [conformance build only]
-fn VerifierBuilder::embedded_references
-fn VerifierBuilder::freshness_max_age
-fn VerifierBuilder::freshness_signing_keys
-fn VerifierBuilder::pinned_registers
 fn cert_pubkey_fp
 fn crypto_material_data
 fn parse_reference
 struct ArtifactVerification
+struct ConfigAuthorizer
 struct ConfigEndorsement
 struct ConfigVerification
-struct EmbeddedReferences
 struct Pin
+struct Policy
 struct PublicKey
 struct Reference
 struct Register
@@ -122,5 +115,4 @@ struct Verification
 struct VerificationError
 struct VerificationMetadata
 struct Verifier
-struct VerifierBuilder
 type BoxError

@@ -1522,7 +1522,12 @@ mod options {
     #[test]
     fn the_builder_and_the_enclave_refuse_the_same_hosts_pins_and_verifiers_alike() {
         let authorizing = || {
-            let verifier = Verifier::builder().config_authorizer(|_| Ok(())).build();
+            let verifier = Verifier::new(
+                crate::verifier::ConfigTrust::Authorizer(crate::verifier::ConfigAuthorizer::new(
+                    |_| Ok(()),
+                )),
+                crate::verifier::Policy::default(),
+            );
             Arc::new(verifier.expect("a verifier"))
         };
         type Case = (&'static str, Pin, Option<Arc<Verifier>>);
@@ -1569,7 +1574,7 @@ mod options {
         assert!(Arc::ptr_eq(enclave.verifier().unwrap(), &built));
 
         // A configured verifier is used as it is.
-        let configured = Arc::new(Verifier::new());
+        let configured = Arc::new(Verifier::default());
         let (checked, _) = EnclaveHttpClient::builder("enclave.example.com", Pin::repo("org/repo"))
             .verifier(Arc::clone(&configured))
             .prepare()

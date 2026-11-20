@@ -842,7 +842,7 @@ mod options {
         assert!(settings.base_url.is_none() && settings.secret.is_none());
         assert!(settings.timeout.is_none());
 
-        let verifier = Arc::new(Verifier::new());
+        let verifier = Arc::new(Verifier::default());
         let (fallback, settings) = RouterHttpClient::builder()
             .transport_mode(TransportMode::Ehbp)
             .base_url("https://proxy.example.com/tinfoil")
@@ -867,7 +867,12 @@ mod options {
     #[test]
     fn the_checks_run_in_the_documented_order() {
         let authorizing = || {
-            let verifier = Verifier::builder().config_authorizer(|_| Ok(())).build();
+            let verifier = Verifier::new(
+                crate::verifier::ConfigTrust::Authorizer(crate::verifier::ConfigAuthorizer::new(
+                    |_| Ok(()),
+                )),
+                crate::verifier::Policy::default(),
+            );
             Arc::new(verifier.expect("a verifier"))
         };
         let refusal = |builder: crate::RouterHttpClientBuilder| {

@@ -136,7 +136,9 @@ impl Config {
     pub(crate) fn check(self) -> Result<Checked, Error> {
         authority_url(&self.host)?;
         check_pin(&self.pin)?;
-        let verifier = self.verifier.unwrap_or_else(|| Arc::new(Verifier::new()));
+        let verifier = self
+            .verifier
+            .unwrap_or_else(|| Arc::new(Verifier::default()));
         verifier
             .check_pin_verifiability(&self.pin)
             .map_err(from_verifier)?;
@@ -450,7 +452,7 @@ mod tests {
 
     #[test]
     fn a_usage_error_is_a_configuration_error_and_keeps_its_source() {
-        let usage = Verifier::new()
+        let usage = Verifier::default()
             .check_pin_verifiability(&Pin::repo("not a reference"))
             .expect_err("an invalid reference is refused");
         let error = from_verifier(usage);

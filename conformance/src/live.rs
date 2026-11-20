@@ -427,7 +427,7 @@ mod tests {
     fn the_rejecting_layer_is_found_among_the_sources() {
         let nonce = tinfoil::verifier::random_nonce().expect("the random source");
         // Not a document at all: the envelope layer rejects it.
-        let rejection = Verifier::new()
+        let rejection = Verifier::default()
             .verify_v3(b"{}", &nonce, &Pin::repo("owner/name"))
             .unwrap_err();
         assert!(matches!(rejection, VerifierError::Verification(_)));
@@ -435,7 +435,7 @@ mod tests {
         assert_eq!(rejecting_layer(&wrapped), Some(Layer::Envelope));
 
         // A usage error is not a rejection, and neither is another error.
-        let usage = Verifier::new()
+        let usage = Verifier::default()
             .verify_v3(b"{}", &nonce, &Pin::repo(""))
             .unwrap_err();
         assert!(matches!(usage, VerifierError::Usage(_)));

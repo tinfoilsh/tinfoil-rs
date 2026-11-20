@@ -24,7 +24,7 @@ use crate::endorsement::{
 use crate::error::{BoxError, Error, Layer, UsageError, VerificationError};
 use crate::instant::Instant;
 use crate::measurement::{Expected, Register};
-use crate::options::{ConfigAuthorizer, ConfigEndorsement, VerifierBuilder};
+use crate::options::{self, ConfigAuthorizer, ConfigEndorsement, ConfigTrust, Policy, Roots};
 use crate::policy::{self, ARTIFACT_FORMAT, ARTIFACT_FORMAT_V2, Shape};
 use crate::quote::{
     self, ConfigReferenceValues, LegacyReferenceValues, ReferenceValues, VendorRoots,
@@ -105,8 +105,16 @@ impl fmt::Debug for Verifier {
 }
 
 impl Default for Verifier {
+    /// A verifier with the defaults: the trust anchors embedded in the
+    /// crate, Tinfoil's public config and artifact signing keys, and a
+    /// freshness bound of seven days.
+    ///
+    /// This cannot fail: the only thing that could is loading the trust
+    /// material that is compiled into the crate, which the crate's tests
+    /// prove to load. Were it ever not to, every verification would return
+    /// a usage error that says so.
     fn default() -> Self {
-        Self::new()
+        options::build_default()
     }
 }
 
@@ -376,21 +384,62 @@ fn part_reference<'a>(
 }
 
 impl Verifier {
-    /// A verifier with the defaults: the trust anchors embedded in the
-    /// crate, Tinfoil's public config and artifact signing keys, and a
-    /// freshness bound of seven days.
+    /// A verifier that trusts configs as `config` selects and applies
+    /// `policy`. Both are taken by value, so later changes by the caller
+    /// have no effect.
     ///
-    /// This cannot fail: the only thing that could is loading the trust
-    /// material that is compiled into the crate, which the crate's tests
-    /// prove to load. Were it ever not to, every verification would return
-    /// a usage error that says so.
-    pub fn new() -> Self {
-        VerifierBuilder::build_default()
+    /// `Verifier::new(ConfigTrust::default(), Policy::default())` keeps
+    /// every default and is [`Verifier::default`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Usage`] for the first invalid value, checked in this
+    /// order: the fields of `policy` in the order of their declaration,
+    /// then `config`. The only check that looks at two values refuses
+    /// [`ArtifactTrust::Embedded`](crate::ArtifactTrust::Embedded) with
+    /// both artifacts and freshness keys, since nothing would be left for
+    /// the keys to verify.
+    pub fn new(config: ConfigTrust, policy: Policy) -> Result<Self, Error> {
+        options::build(config, policy, Roots::default())
     }
 
-    /// A builder that starts from the defaults.
-    pub fn builder() -> VerifierBuilder {
-        VerifierBuilder::new()
+    /// [`new`](Self::new) with the trust anchors that `roots` supplies in
+    /// place of the embedded ones. It exists only in a conformance build.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](Self::new), and [`Error::Usage`] for a Sigstore trusted
+    /// root that does not parse.
+    #[cfg(tinfoil_conformance)]
+    pub fn dangerous_test_only_new(
+        config: ConfigTrust,
+        policy: Policy,
+        roots: options::DangerousTestOnlyRoots,
+    ) -> Result<Self, Error> {
+        let roots = Roots::replaced(
+            roots.sigstore_root_json.as_deref(),
+            roots.amd_cert_chain_pem,
+            roots.intel_root_pem,
+        )
+        .map_err(UsageError::new)?;
+        options::build(config, policy, roots)
+    }
+
+    /// [`new`](Self::new) on replaced trust anchors, for tests that verify
+    /// minted material: a Sigstore trusted root document, an AMD
+    /// certificate chain and an Intel root certificate. `None` keeps the
+    /// embedded anchor.
+    #[cfg(test)]
+    pub(crate) fn with_test_roots(
+        config: ConfigTrust,
+        policy: Policy,
+        trusted_root_json: Option<&[u8]>,
+        amd_cert_chain_pem: Option<Vec<u8>>,
+        intel_root_pem: Option<Vec<u8>>,
+    ) -> Result<Self, Error> {
+        let roots = Roots::replaced(trusted_root_json, amd_cert_chain_pem, intel_root_pem)
+            .map_err(UsageError::new)?;
+        options::build(config, policy, roots)
     }
 
     /// The configured bound on the age of a freshness witness or approval.
@@ -868,7 +917,7 @@ impl Verifier {
             let material = ConfigEndorsement::from_collateral(config)
                 .filter(|material| material.config().len() <= MAX_CONFIG_SIZE)
                 .ok_or_else(|| Refused::rejected("config size is outside allowed bounds"))?;
-            authorize(&material).map_err(Refused::Authorizer)?;
+            (authorize.0)(&material).map_err(Refused::Authorizer)?;
             let bytes = material.config();
             let expected = runtime_from_config(bytes)?;
             let record = ConfigVerification {

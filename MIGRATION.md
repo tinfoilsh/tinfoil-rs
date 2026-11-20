@@ -257,7 +257,7 @@ let secure = tinfoil::SecureClient::with_measurement(host, api_key, measurement)
 
 ```rust,no_run
 // 0.3
-use tinfoil::verifier::{Expected, Verifier};
+use tinfoil::verifier::{ConfigTrust, Expected, Policy, Verifier};
 use tinfoil::{EnclaveHttpClient, Pin};
 
 /// `measurement` is the SEV-SNP launch digest in hexadecimal.
@@ -266,9 +266,11 @@ async fn connect(
     repo: &str,
     measurement: &str,
 ) -> Result<EnclaveHttpClient, Box<dyn std::error::Error>> {
-    let verifier = Verifier::builder()
-        .pinned_registers(Expected::parse_sev_snp(measurement)?)
-        .build()?;
+    let policy = Policy {
+        pinned_registers: Some(Expected::parse_sev_snp(measurement)?),
+        ..Policy::default()
+    };
+    let verifier = Verifier::new(ConfigTrust::default(), policy)?;
     let client = EnclaveHttpClient::builder(host, Pin::repo(repo))
         .verifier(verifier)
         .connect()
@@ -278,8 +280,7 @@ async fn connect(
 ```
 
 To verify against a config that you supply yourself rather than a pin,
-see `VerifierBuilder::embedded_references` and
-`VerifierBuilder::config_authorizer`.
+see `ConfigTrust::Embedded` and `ConfigTrust::Authorizer`.
 
 ## Verification results
 

@@ -96,7 +96,7 @@ fn a_builder_does_no_io_and_prints_no_secret() {
     let builder = EnclaveHttpClient::builder("enclave.example.com", Pin::repo("org/repo"))
         .transport_mode(TransportMode::Ehbp)
         .base_url("https://user:hunter2@proxy.example.com/")
-        .verifier(Verifier::new())
+        .verifier(Verifier::default())
         .verification_check(check)
         .user_cache_secret("cache-scope-value")
         .timeout(Duration::from_secs(30));
@@ -174,7 +174,7 @@ async fn router_client() -> Result<(), Error> {
         RouterHttpClient::builder()
             .transport_mode(TransportMode::Ehbp)
             .base_url("https://proxy.example.com/")
-            .verifier(Arc::new(Verifier::new()))
+            .verifier(Arc::new(Verifier::default()))
             .verification_check(check)
             .user_cache_secret("opaque-random-value")
             .timeout(Duration::from_secs(30))
@@ -512,7 +512,7 @@ mod openai {
             EnclaveOpenAIClient::builder("enclave.example.com", Pin::repo("org/repo"), config)
                 .transport_mode(TransportMode::Tls)
                 .base_url("https://enclave.example.com/api/")
-                .verifier(Verifier::new())
+                .verifier(Verifier::default())
                 .verification_check(check)
                 .user_cache_secret("cache-scope-value")
                 .timeout(Duration::from_secs(30));
@@ -642,7 +642,7 @@ mod openai {
         let _: RouterOpenAIClient = send(RouterOpenAIClient::connect(config.clone())).await?;
         let builder: RouterOpenAIClientBuilder = RouterOpenAIClient::builder(config)
             .transport_mode(TransportMode::Tls)
-            .verifier(Verifier::new())
+            .verifier(Verifier::default())
             .verification_check(check)
             .user_cache_secret("opaque-random-value")
             .timeout(Duration::from_secs(60));

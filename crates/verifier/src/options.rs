@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::document::collateral;
-use crate::embedded::{Embedded, EmbeddedReferences};
+use crate::embedded::{Embedded, EmbeddedConfig};
 use crate::endorsement::approval::ConfigPolicy;
 use crate::endorsement::freshness::MAX_FRESHNESS_AGE;
 use crate::endorsement::{ProvenanceClient, public_signing_keys};
@@ -171,17 +171,192 @@ fn to_json_text(value: &Value) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// A caller's config authorizer.
-pub(crate) type ConfigAuthorizer =
-    Arc<dyn Fn(&ConfigEndorsement) -> Result<(), BoxError> + Send + Sync + 'static>;
+/// A caller's policy that decides whether the config of a document is
+/// authorized, in place of a config endorsement.
+///
+/// The function receives untrusted material from the document and must
+/// return an error for config bytes that it does not authorize. It may be
+/// called from several threads at once.
+#[derive(Clone)]
+pub struct ConfigAuthorizer(pub(crate) Arc<AuthorizeFn>);
 
-/// Builds a [`Verifier`]. Each method sets one option; the options are
-/// checked in the order in which they are set, and [`build`](Self::build)
-/// reports the first one that is invalid.
-#[must_use = "a builder does nothing until `build` is called"]
-pub struct VerifierBuilder {
-    /// The first invalid option.
-    error: Option<BoxError>,
+/// The function inside a [`ConfigAuthorizer`].
+type AuthorizeFn = dyn Fn(&ConfigEndorsement) -> Result<(), BoxError> + Send + Sync + 'static;
+
+impl ConfigAuthorizer {
+    /// An authorizer that calls `authorize` with the config material of
+    /// each document.
+    pub fn new(
+        authorize: impl Fn(&ConfigEndorsement) -> Result<(), BoxError> + Send + Sync + 'static,
+    ) -> Self {
+        Self(Arc::new(authorize))
+    }
+}
+
+impl fmt::Debug for ConfigAuthorizer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ConfigAuthorizer")
+    }
+}
+
+/// Who vouches for the config that an enclave runs.
+///
+/// Each variant is one source of trust, so that two sources that would
+/// conflict cannot be configured together. Every variant other than
+/// [`PublicRegistry`](Self::PublicRegistry), the default, requires
+/// documents with `attestation-collaterals/v3` collateral.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub enum ConfigTrust {
+    /// Configs that Tinfoil's public registry endorses, under Tinfoil's
+    /// registry root.
+    #[default]
+    PublicRegistry,
+    /// Configs that exactly these registries endorse, under Tinfoil's
+    /// registry root, in place of the public registry alone. To keep the
+    /// public registry, list [`PUBLIC_REGISTRY_ID`](crate::PUBLIC_REGISTRY_ID)
+    /// too.
+    ///
+    /// An empty list, an identifier that is not a canonical registry URI
+    /// and a repeated identifier are usage errors.
+    Registries(Vec<String>),
+    /// Configs whose endorsements one of these keys signs, in place of
+    /// Tinfoil's registry root. This trust path uses no registry and does
+    /// not cover artifact freshness.
+    ///
+    /// An empty list, a repeated key and a key that is not ECDSA P-256 are
+    /// usage errors.
+    SigningKeys(Vec<PublicKey>),
+    /// Configs that the caller's policy authorizes, in place of a config
+    /// endorsement. Runtime, platform and hardware checks still apply. An
+    /// authorized config has no authenticated registry name or approval
+    /// time, so a verifier with this trust accepts no project pin.
+    Authorizer(ConfigAuthorizer),
+    /// A config that the caller supplies itself, in place of a registry
+    /// endorsement. It must come from trusted client configuration.
+    Embedded(EmbeddedConfig),
+}
+
+/// How a verifier trusts the runtime and platform artifacts that
+/// `attestation-collaterals/v3` collateral references.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum ArtifactTrust {
+    /// Artifacts that the document's endorsements authenticate, with
+    /// freshness approvals that `freshness_keys` sign. The default.
+    Endorsed {
+        /// The keys that sign freshness approvals. `None` selects
+        /// Tinfoil's public keys. These keys approve platform and runtime
+        /// artifacts only; they authorize no config. A set of keys
+        /// requires `attestation-collaterals/v3` collateral, and an empty
+        /// one is a usage error.
+        freshness_keys: Option<Vec<PublicKey>>,
+    },
+    /// Artifacts that the caller supplies, in place of their endorsements;
+    /// requires `attestation-collaterals/v3` collateral.
+    ///
+    /// No endorsement is consulted for a supplied artifact, even if the
+    /// document carries one. An artifact that is not supplied is still
+    /// endorsed, with its freshness approval signed by `freshness_keys`,
+    /// as [`Endorsed`](Self::Endorsed) describes. Hardware
+    /// authentication, the bindings between the components and register
+    /// pins stay mandatory. The values must come from trusted client
+    /// configuration.
+    ///
+    /// At least one artifact must be supplied, and `freshness_keys` must
+    /// be `None` when both are, since nothing would be left for them to
+    /// verify; either mistake is a usage error.
+    Embedded {
+        /// The exact runtime manifest that the config pins.
+        runtime: Option<Vec<u8>>,
+        /// A platform policy artifact in the `platform-endorsements/v2`
+        /// format.
+        platform: Option<Vec<u8>>,
+        /// The keys that sign the freshness approval of an artifact that
+        /// is not supplied, as in [`Endorsed`](Self::Endorsed).
+        freshness_keys: Option<Vec<PublicKey>>,
+    },
+}
+
+impl Default for ArtifactTrust {
+    fn default() -> Self {
+        ArtifactTrust::Endorsed {
+            freshness_keys: None,
+        }
+    }
+}
+
+/// The checks that a verifier applies on top of its config trust.
+///
+/// The default policy keeps every default: no register pins, a freshness
+/// bound of seven days, and runtime and platform artifacts that Tinfoil's
+/// public keys approve.
+#[derive(Clone, Debug, Default)]
+pub struct Policy {
+    /// Register checks. Each register that the pins set must match the
+    /// enclave: it fills a register that the release leaves open, and must
+    /// equal one that the release fixes. Pins for one platform reject
+    /// every enclave on the other.
+    pub pinned_registers: Option<Expected>,
+    /// How old an authenticated freshness witness or approval may be.
+    /// Zero selects the default of seven days, so that an unset value
+    /// cannot disable the check. More than about 292 years is a usage
+    /// error.
+    pub freshness_max_age: Duration,
+    /// How the runtime and platform artifacts are trusted.
+    pub artifacts: ArtifactTrust,
+}
+
+/// Trust anchors that replace the ones embedded in the crate, so that the
+/// conformance harness can authenticate synthetic collateral.
+///
+/// A supplied anchor destroys the guarantee that it protects, which is why
+/// this type exists only in a conformance build. `None` keeps the embedded
+/// anchor.
+#[cfg(tinfoil_conformance)]
+#[derive(Clone, Debug, Default)]
+pub struct DangerousTestOnlyRoots {
+    /// A Sigstore trusted root document, which otherwise guarantees that
+    /// reference values come from Tinfoil's release workflows.
+    pub sigstore_root_json: Option<Vec<u8>>,
+    /// An AMD certificate chain, ASK then ARK, in PEM.
+    pub amd_cert_chain_pem: Option<Vec<u8>>,
+    /// An Intel SGX root certificate in PEM.
+    pub intel_root_pem: Option<Vec<u8>>,
+}
+
+/// The trust anchors that a verifier is built on: the embedded ones, unless
+/// a conformance build or a test replaces them.
+#[derive(Default)]
+pub(crate) struct Roots {
+    /// A replacement for the embedded Sigstore trusted root.
+    pub(crate) endorsements: Option<ProvenanceClient>,
+    /// The vendor anchors of CPU evidence.
+    pub(crate) vendor_roots: VendorRoots,
+}
+
+impl Roots {
+    /// Anchors that replace the embedded ones: a Sigstore trusted root
+    /// document, an AMD certificate chain and an Intel root certificate.
+    /// `None` keeps the embedded anchor.
+    #[cfg(any(test, tinfoil_conformance))]
+    pub(crate) fn replaced(
+        trusted_root_json: Option<&[u8]>,
+        amd_cert_chain_pem: Option<Vec<u8>>,
+        intel_root_pem: Option<Vec<u8>>,
+    ) -> Result<Self, BoxError> {
+        let endorsements = trusted_root_json
+            .map(ProvenanceClient::from_trusted_root_json)
+            .transpose()?;
+        Ok(Self {
+            endorsements,
+            vendor_roots: VendorRoots::dangerous_test_only(amd_cert_chain_pem, intel_root_pem),
+        })
+    }
+}
+
+/// The parts of a verifier that its config trust and policy set, checked.
+struct Parts {
     pinned_registers: Option<Expected>,
     freshness_max_age: Duration,
     config_keys: Option<Vec<x509::PublicKey>>,
@@ -189,314 +364,152 @@ pub struct VerifierBuilder {
     config_registry_ids: Option<Vec<String>>,
     config_authorizer: Option<ConfigAuthorizer>,
     embedded: Embedded,
-    /// A replacement for the embedded Sigstore trusted root. Only a
-    /// conformance build can set one.
-    endorsements: Option<ProvenanceClient>,
-    vendor_roots: VendorRoots,
 }
 
-impl fmt::Debug for VerifierBuilder {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("VerifierBuilder")
-            .field("pinned_registers", &self.pinned_registers)
-            .field("freshness_max_age", &self.freshness_max_age)
-            .field("config_keys", &self.config_keys)
-            .field("freshness_keys", &self.freshness_keys)
-            .field("config_registry_ids", &self.config_registry_ids)
-            .field("config_authorizer", &self.config_authorizer.is_some())
-            .field("embedded", &self.embedded)
-            .finish_non_exhaustive()
+/// A set of keys, `None` when it is unset. An empty set is refused with
+/// the message `empty`.
+fn keys(
+    keys: Option<Vec<PublicKey>>,
+    empty: &'static str,
+) -> Result<Option<Vec<x509::PublicKey>>, BoxError> {
+    match keys {
+        None => Ok(None),
+        Some(keys) if keys.is_empty() => Err(empty.into()),
+        Some(keys) => Ok(Some(keys.into_iter().map(|key| key.0).collect())),
     }
 }
 
-impl Default for VerifierBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl VerifierBuilder {
-    /// A builder with every option at its default.
-    pub(crate) fn new() -> Self {
-        Self {
-            error: None,
-            pinned_registers: None,
-            freshness_max_age: MAX_FRESHNESS_AGE,
+impl Parts {
+    /// Checks `policy`, then `config`, each field in the order of its
+    /// declaration. The first invalid value is the error.
+    fn check(config: ConfigTrust, policy: Policy) -> Result<Self, BoxError> {
+        let Policy {
+            pinned_registers,
+            freshness_max_age,
+            artifacts,
+        } = policy;
+        if freshness_max_age > MAX_FRESHNESS_MAX_AGE {
+            return Err("freshness maximum age is out of range".into());
+        }
+        let freshness_max_age = if freshness_max_age.is_zero() {
+            MAX_FRESHNESS_AGE
+        } else {
+            freshness_max_age
+        };
+        const NO_FRESHNESS_KEYS: &str = "freshness signing keys must not be empty";
+        let (runtime, platform, freshness_keys) = match artifacts {
+            ArtifactTrust::Endorsed { freshness_keys } => {
+                (None, None, keys(freshness_keys, NO_FRESHNESS_KEYS)?)
+            }
+            ArtifactTrust::Embedded {
+                runtime,
+                platform,
+                freshness_keys,
+            } => {
+                if runtime.is_none() && platform.is_none() {
+                    return Err("embedded artifacts must contain a runtime or a platform".into());
+                }
+                if runtime.is_some() && platform.is_some() && freshness_keys.is_some() {
+                    return Err("freshness signing keys have no endorsed artifact to verify".into());
+                }
+                (runtime, platform, keys(freshness_keys, NO_FRESHNESS_KEYS)?)
+            }
+        };
+        let mut parts = Parts {
+            pinned_registers,
+            freshness_max_age,
             config_keys: None,
-            freshness_keys: None,
+            freshness_keys,
             config_registry_ids: None,
             config_authorizer: None,
             embedded: Embedded::default(),
-            endorsements: None,
-            vendor_roots: VendorRoots::embedded(),
-        }
-    }
-
-    /// Records an invalid option, unless an earlier one is already
-    /// recorded.
-    fn fail(&mut self, cause: impl Into<BoxError>) {
-        if self.error.is_none() {
-            self.error = Some(cause.into());
-        }
-    }
-
-    /// Adds register checks. Each register that `pins` sets must match the
-    /// enclave: it fills a register that the release leaves open, and must
-    /// equal one that the release fixes. Pins for one platform reject
-    /// every enclave on the other.
-    pub fn pinned_registers(mut self, pins: Expected) -> Self {
-        self.pinned_registers = Some(pins);
-        self
-    }
-
-    /// Bounds how old an authenticated freshness witness or approval may
-    /// be. The default is seven days. Zero keeps the bound as it is, so
-    /// that an unset policy value cannot disable the check.
-    ///
-    /// An age of more than about 292 years is an invalid option.
-    pub fn freshness_max_age(mut self, max_age: Duration) -> Self {
-        if max_age > MAX_FRESHNESS_MAX_AGE {
-            self.fail("freshness maximum age is out of range");
-        } else if !max_age.is_zero() {
-            self.freshness_max_age = max_age;
-        }
-        self
-    }
-
-    /// Replaces Tinfoil's public config trust with the given keys: only a
-    /// config endorsement signed with one of them is accepted. This trust
-    /// path uses no registry and does not cover artifact freshness. It
-    /// requires documents with `attestation-collaterals/v3` collateral.
-    ///
-    /// An empty list is an invalid option.
-    pub fn config_signing_keys(mut self, keys: Vec<PublicKey>) -> Self {
-        if keys.is_empty() {
-            self.fail("config signing keys must not be empty");
-        } else {
-            self.config_keys = Some(keys.into_iter().map(|key| key.0).collect());
-        }
-        self
-    }
-
-    /// Replaces Tinfoil's public approval keys for the platform policy
-    /// artifact and the runtime. These keys authorize no config. The
-    /// option requires documents with `attestation-collaterals/v3`
-    /// collateral and at least one artifact that is not embedded.
-    ///
-    /// An empty list is an invalid option.
-    pub fn freshness_signing_keys(mut self, keys: Vec<PublicKey>) -> Self {
-        if keys.is_empty() {
-            self.fail("freshness signing keys must not be empty");
-        } else {
-            self.freshness_keys = Some(keys.into_iter().map(|key| key.0).collect());
-        }
-        self
-    }
-
-    /// Accepts config endorsements of exactly these registries, in place of
-    /// the public registry alone. To keep accepting the public registry,
-    /// list [`PUBLIC_REGISTRY_ID`](crate::PUBLIC_REGISTRY_ID) too.
-    ///
-    /// An empty list, an identifier that is not a canonical registry URI, a
-    /// repeated identifier and a second call are invalid options.
-    pub fn config_registry_ids(mut self, registry_ids: Vec<String>) -> Self {
-        let policy = ConfigPolicy {
-            identity: None,
-            revision: None,
-            digest: None,
-            now: Instant::UNIX_EPOCH,
-            max_age: None,
-            future_skew: None,
-            registry_ids: Some(registry_ids),
         };
-        if let Err(cause) = policy.validate_pins() {
-            self.fail(cause);
-        } else if self.config_registry_ids.is_some() {
-            self.fail("config registry IDs must be supplied once");
-        } else {
-            self.config_registry_ids = policy.registry_ids;
-        }
-        self
-    }
-
-    /// Replaces config endorsement verification with the caller's policy.
-    ///
-    /// The function receives untrusted material from the document and must
-    /// return an error for config bytes that it does not authorize. It may
-    /// be called from several threads at once. Runtime, platform and
-    /// hardware checks still apply; an authorized config has no
-    /// authenticated registry name or approval time, and such a verifier
-    /// accepts no pin.
-    pub fn config_authorizer(
-        mut self,
-        authorize: impl Fn(&ConfigEndorsement) -> Result<(), BoxError> + Send + Sync + 'static,
-    ) -> Self {
-        self.config_authorizer = Some(Arc::new(authorize));
-        self
-    }
-
-    /// Supplies reference values that the caller trusts by itself; see
-    /// [`EmbeddedReferences`]. The values are checked and copied.
-    ///
-    /// References with no component, or with a component that is not well
-    /// formed, are an invalid option.
-    pub fn embedded_references(mut self, references: EmbeddedReferences) -> Self {
-        match Embedded::check(references) {
-            Ok(embedded) => self.embedded = embedded,
-            Err(message) => self.fail(message),
-        }
-        self
-    }
-
-    /// Replaces the embedded Sigstore trusted root with the given trusted
-    /// root document, so that the conformance harness can authenticate
-    /// reference values signed by a synthetic authority.
-    ///
-    /// A supplied root destroys the guarantee that reference values come
-    /// from Tinfoil's release workflows, which is why this method exists
-    /// only in a conformance build. A document that is not a trusted root
-    /// is an invalid option.
-    #[cfg(tinfoil_conformance)]
-    pub fn dangerous_test_only_sigstore_root(mut self, trusted_root_json: &[u8]) -> Self {
-        match ProvenanceClient::from_trusted_root_json(trusted_root_json) {
-            Ok(client) => self.endorsements = Some(client),
-            Err(cause) => self.fail(cause),
-        }
-        self
-    }
-
-    /// Replaces the embedded AMD and Intel trust anchors, so that the
-    /// conformance harness can authenticate synthetic CPU evidence: an AMD
-    /// certificate chain (ASK then ARK, PEM) and an Intel SGX root
-    /// certificate (PEM). `None` keeps the embedded anchor of that vendor.
-    ///
-    /// A supplied anchor destroys the guarantee that evidence chains to
-    /// AMD or Intel, which is why this method exists only in a conformance
-    /// build.
-    #[cfg(tinfoil_conformance)]
-    pub fn dangerous_test_only_vendor_roots(
-        mut self,
-        amd_cert_chain_pem: Option<Vec<u8>>,
-        intel_root_pem: Option<Vec<u8>>,
-    ) -> Self {
-        self.vendor_roots = VendorRoots::dangerous_test_only(amd_cert_chain_pem, intel_root_pem);
-        self
-    }
-
-    /// Replaces trust anchors, for tests that verify minted material: a
-    /// Sigstore trusted root document, an AMD certificate chain and an
-    /// Intel root certificate. `None` keeps the embedded anchor.
-    #[cfg(test)]
-    pub(crate) fn test_roots(
-        mut self,
-        trusted_root_json: Option<&[u8]>,
-        amd_cert_chain_pem: Option<Vec<u8>>,
-        intel_root_pem: Option<Vec<u8>>,
-    ) -> Self {
-        if let Some(trusted_root_json) = trusted_root_json {
-            match ProvenanceClient::from_trusted_root_json(trusted_root_json) {
-                Ok(client) => self.endorsements = Some(client),
-                Err(cause) => self.fail(cause),
+        let mut embedded_config = None;
+        match config {
+            ConfigTrust::PublicRegistry => {}
+            ConfigTrust::Registries(registry_ids) => {
+                let policy = ConfigPolicy {
+                    identity: None,
+                    revision: None,
+                    digest: None,
+                    now: Instant::UNIX_EPOCH,
+                    max_age: None,
+                    future_skew: None,
+                    registry_ids: Some(registry_ids),
+                };
+                policy.validate_pins()?;
+                parts.config_registry_ids = policy.registry_ids;
             }
+            ConfigTrust::SigningKeys(signing_keys) => {
+                parts.config_keys =
+                    keys(Some(signing_keys), "config signing keys must not be empty")?;
+            }
+            ConfigTrust::Authorizer(authorizer) => parts.config_authorizer = Some(authorizer),
+            ConfigTrust::Embedded(config) => embedded_config = Some(config),
         }
-        self.vendor_roots = VendorRoots::dangerous_test_only(amd_cert_chain_pem, intel_root_pem);
-        self
+        parts.embedded = Embedded::check(embedded_config, runtime, platform)?;
+        Ok(parts)
     }
+}
 
-    /// Builds the verifier.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Usage`] for the first invalid option, and for options that
-    /// select conflicting sources of trust: an embedded config with config
-    /// signing keys; a config authorizer with an embedded config or config
-    /// signing keys; registry identifiers with an embedded config, a
-    /// config authorizer or config signing keys; freshness signing keys
-    /// when both the runtime and the platform are embedded.
-    pub fn build(self) -> Result<Verifier, Error> {
-        self.build_parts()
-            .map_err(|cause| UsageError::new(cause).into())
-    }
+/// Builds a verifier on `roots`.
+pub(crate) fn build(config: ConfigTrust, policy: Policy, roots: Roots) -> Result<Verifier, Error> {
+    let parts = Parts::check(config, policy).map_err(UsageError::new)?;
+    let trust = trust(&parts, &roots).map_err(UsageError::new)?;
+    Ok(into_verifier(parts, roots, Ok(trust)))
+}
 
-    /// Builds the verifier with the defaults. A failure can only come from
-    /// the trust material embedded in the crate; it is kept, and reported
-    /// by every verification.
-    pub(crate) fn build_default() -> Verifier {
-        let builder = Self::new();
-        let trust = builder.trust().map_err(|cause| cause.to_string());
-        builder.into_verifier(trust)
-    }
+/// The verifier with the defaults. A failure can only come from the trust
+/// material embedded in the crate; it is kept, and reported by every
+/// verification.
+pub(crate) fn build_default() -> Verifier {
+    let roots = Roots::default();
+    let parts = Parts {
+        pinned_registers: None,
+        freshness_max_age: MAX_FRESHNESS_AGE,
+        config_keys: None,
+        freshness_keys: None,
+        config_registry_ids: None,
+        config_authorizer: None,
+        embedded: Embedded::default(),
+    };
+    let trust = trust(&parts, &roots).map_err(|cause| cause.to_string());
+    into_verifier(parts, roots, trust)
+}
 
-    fn build_parts(mut self) -> Result<Verifier, BoxError> {
-        if let Some(cause) = self.error.take() {
-            return Err(cause);
-        }
-        let embedded_config = self.embedded.config.is_some();
-        let config_keys = self.config_keys.is_some();
-        let authorizer = self.config_authorizer.is_some();
-        let registry_ids = self.config_registry_ids.is_some();
-        if embedded_config && config_keys {
-            return Err(
-                "embedded config and config signing keys select conflicting trust sources".into(),
-            );
-        }
-        if authorizer && (embedded_config || config_keys) {
-            return Err(
-                "config authorizer conflicts with embedded config or config signing keys".into(),
-            );
-        }
-        if registry_ids && (embedded_config || authorizer) {
-            return Err("config authority pins require endorsement verification".into());
-        }
-        if registry_ids && config_keys {
-            return Err(
-                "config registry ID policy requires Tinfoil registry root verification".into(),
-            );
-        }
-        if self.embedded.runtime.is_some()
-            && self.embedded.platform.is_some()
-            && self.freshness_keys.is_some()
-        {
-            return Err("freshness signing keys have no endorsed artifact to verify".into());
-        }
-        let trust = self.trust()?;
-        Ok(self.into_verifier(Ok(trust)))
-    }
+/// The verifiers of the configured trust: the provenance client over the
+/// trusted root, the config verifier over the caller's keys or the
+/// registry roots, and the freshness verifier over the caller's keys or
+/// Tinfoil's.
+fn trust(parts: &Parts, roots: &Roots) -> Result<Trust, BoxError> {
+    let endorsements = match &roots.endorsements {
+        Some(client) => client.clone(),
+        None => ProvenanceClient::embedded()?,
+    };
+    let public_keys = public_signing_keys()?;
+    let config_verifier = match &parts.config_keys {
+        None => endorsements.registry_verifier(&public_keys)?,
+        Some(keys) => endorsements.config_verifier(keys)?,
+    };
+    let freshness_keys = parts.freshness_keys.as_deref().unwrap_or(&public_keys);
+    let freshness_verifier = endorsements.freshness_verifier(freshness_keys)?;
+    Ok(Trust {
+        endorsements,
+        config_verifier,
+        freshness_verifier,
+    })
+}
 
-    /// The verifiers of the configured trust: the provenance client over
-    /// the trusted root, the config verifier over the caller's keys or the
-    /// registry roots, and the freshness verifier over the caller's keys
-    /// or Tinfoil's.
-    fn trust(&self) -> Result<Trust, BoxError> {
-        let endorsements = match &self.endorsements {
-            Some(client) => client.clone(),
-            None => ProvenanceClient::embedded()?,
-        };
-        let public_keys = public_signing_keys()?;
-        let config_verifier = match &self.config_keys {
-            None => endorsements.registry_verifier(&public_keys)?,
-            Some(keys) => endorsements.config_verifier(keys)?,
-        };
-        let freshness_keys = self.freshness_keys.as_deref().unwrap_or(&public_keys);
-        let freshness_verifier = endorsements.freshness_verifier(freshness_keys)?;
-        Ok(Trust {
-            endorsements,
-            config_verifier,
-            freshness_verifier,
-        })
-    }
-
-    fn into_verifier(self, trust: Result<Trust, String>) -> Verifier {
-        Verifier {
-            embedded: self.embedded,
-            pinned_registers: self.pinned_registers,
-            freshness_max_age: self.freshness_max_age,
-            config_authorizer: self.config_authorizer,
-            config_keys_pinned: self.config_keys.is_some(),
-            freshness_keys_pinned: self.freshness_keys.is_some(),
-            config_registry_ids: self.config_registry_ids,
-            trust,
-            vendor_roots: self.vendor_roots,
-        }
+fn into_verifier(parts: Parts, roots: Roots, trust: Result<Trust, String>) -> Verifier {
+    Verifier {
+        embedded: parts.embedded,
+        pinned_registers: parts.pinned_registers,
+        freshness_max_age: parts.freshness_max_age,
+        config_authorizer: parts.config_authorizer,
+        config_keys_pinned: parts.config_keys.is_some(),
+        freshness_keys_pinned: parts.freshness_keys.is_some(),
+        config_registry_ids: parts.config_registry_ids,
+        trust,
+        vendor_roots: roots.vendor_roots,
     }
 }

@@ -140,7 +140,7 @@ impl RouterHttpClientBuilder {
     }
 
     /// The verification policy for the router. Unset, it is
-    /// `Verifier::new()`. A verifier that supplies or authorizes the
+    /// `Verifier::default()`. A verifier that supplies or authorizes the
     /// config itself is refused: it needs an explicit enclave.
     pub fn verifier(mut self, verifier: impl Into<Arc<Verifier>>) -> Self {
         self.options.common.verifier = Some(verifier.into());

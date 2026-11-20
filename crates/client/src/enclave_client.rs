@@ -220,7 +220,7 @@ impl EnclaveHttpClientBuilder {
         self
     }
 
-    /// The verification policy. Unset, it is `Verifier::new()`. A verifier
+    /// The verification policy. Unset, it is `Verifier::default()`. A verifier
     /// can be shared by several clients: pass an `Arc<Verifier>`.
     pub fn verifier(mut self, verifier: impl Into<Arc<Verifier>>) -> Self {
         self.options.common.verifier = Some(verifier.into());

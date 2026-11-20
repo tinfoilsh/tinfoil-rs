@@ -10,16 +10,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tinfoil::RouterHttpClient;
-use tinfoil::verifier::Verifier;
+use tinfoil::verifier::{ConfigTrust, Policy, Verifier};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One verifier can serve any number of clients.
-    let verifier = Arc::new(
-        Verifier::builder()
-            .freshness_max_age(Duration::from_secs(3 * 24 * 60 * 60))
-            .build()?,
-    );
+    let verifier = Arc::new(Verifier::new(
+        ConfigTrust::default(),
+        Policy {
+            freshness_max_age: Duration::from_secs(3 * 24 * 60 * 60),
+            ..Policy::default()
+        },
+    )?);
 
     let client = RouterHttpClient::builder()
         .verifier(Arc::clone(&verifier))

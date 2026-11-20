@@ -185,17 +185,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tinfoil::RouterHttpClient;
-use tinfoil::verifier::{Expected, Verifier};
+use tinfoil::verifier::{ConfigTrust, Expected, Policy, Verifier};
 
 async fn connect_pinned(launch_digest: &str) -> Result<RouterHttpClient, Box<dyn std::error::Error>> {
-    let verifier = Arc::new(
-        Verifier::builder()
-            // Only an SEV-SNP enclave with this launch measurement passes.
-            .pinned_registers(Expected::parse_sev_snp(launch_digest)?)
-            // Accept freshness evidence up to three days old.
-            .freshness_max_age(Duration::from_secs(3 * 24 * 60 * 60))
-            .build()?,
-    );
+    let policy = Policy {
+        // Only an SEV-SNP enclave with this launch measurement passes.
+        pinned_registers: Some(Expected::parse_sev_snp(launch_digest)?),
+        // Accept freshness evidence up to three days old.
+        freshness_max_age: Duration::from_secs(3 * 24 * 60 * 60),
+        ..Policy::default()
+    };
+    let verifier = Arc::new(Verifier::new(ConfigTrust::default(), policy)?);
 
     let client = RouterHttpClient::builder()
         .verifier(verifier)
@@ -214,7 +214,7 @@ async fn connect_pinned(launch_digest: &str) -> Result<RouterHttpClient, Box<dyn
 }
 ```
 
-The other options replace a default of the policy: `config_signing_keys` (the keys that config endorsements must be signed with, in place of Tinfoil's), `freshness_signing_keys` (the keys that approve the runtime and the platform policy), `config_registry_ids` (the registries whose config endorsements are accepted, in place of the public one), `config_authorizer` (your own function decides which config is authorized, in place of endorsement verification), and `embedded_references` (reference values that you supply and trust yourself). None of them replaces the Sigstore, AMD or Intel roots. See the documentation of `tinfoil::verifier::VerifierBuilder`. To verify a document that you fetched yourself, call `Verifier::verify_v3`.
+A verifier takes two values. The `ConfigTrust` selects who vouches for the config: the public registry (the default), `Registries` (the registries whose config endorsements are accepted, in place of the public one), `SigningKeys` (the keys that config endorsements must be signed with, in place of Tinfoil's), `Authorizer` (your own function decides which config is authorized, in place of endorsement verification), or `Embedded` (a config that you supply and trust yourself). Each is one value, so that two sources of trust that would conflict cannot be configured together. The `Policy` holds the register pins, the freshness window and the `ArtifactTrust`: artifacts that endorsements authenticate (the default, with Tinfoil's freshness keys or your own) or artifacts that you supply. None of them replaces the Sigstore, AMD or Intel roots. To verify a document that you fetched yourself, call `Verifier::verify_v3`.
 
 ## Error handling
 
