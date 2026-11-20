@@ -100,7 +100,7 @@ impl<V: Evidence> AttestedClient<V> {
     /// secret, one replay after a key rejection, the enclave header for a
     /// proxy, the transport.
     pub(crate) fn new(transport: Transport<V>, settings: Settings) -> Result<Self, Error> {
-        Self::new_with(transport, settings, |secret| secret)
+        Self::new_with(transport, settings, Ok)
     }
 
     /// As [`new`](Self::new), with the client's cache secret made from the
@@ -111,7 +111,7 @@ impl<V: Evidence> AttestedClient<V> {
     pub(crate) fn new_with(
         transport: Transport<V>,
         settings: Settings,
-        resolve: impl FnOnce(Option<Secret>) -> Option<Secret>,
+        resolve: impl FnOnce(Option<Secret>) -> Result<Option<Secret>, Error>,
     ) -> Result<Self, Error> {
         let Settings {
             mode,
@@ -134,8 +134,9 @@ impl<V: Evidence> AttestedClient<V> {
         let chain = with_enclave_url(chain, &host, base_url.as_ref())?;
         let chain = with_replay(chain);
 
+        let secret = resolve(secret)?;
         // Nothing below can fail.
-        let chain = with_cache_secret(chain, resolve(secret));
+        let chain = with_cache_secret(chain, secret);
         let chain = allowed.guard(chain);
         Ok(Self {
             transport,

@@ -261,7 +261,12 @@ impl RouterHttpClientBuilder {
     /// discovers anew. The `timeout` option bounds the whole call.
     ///
     /// The user cache secret is resolved last, once the client is certain
-    /// to be created; resolving it never fails and does no I/O.
+    /// to be created; resolving it does no I/O. Without a non-empty
+    /// `user_cache_secret` option, the client uses the secret that is
+    /// generated once per process; when the operating system's random
+    /// number generator fails to supply it, the error is of
+    /// [`ErrorKind::Random`](crate::ErrorKind::Random), and its source is
+    /// the generator's `getrandom::Error`.
     ///
     /// # Cancel safety
     ///
