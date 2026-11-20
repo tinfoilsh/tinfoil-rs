@@ -59,7 +59,10 @@
 //!   option and [`RequestBuilder::timeout`]. There is no blocking API; the
 //!   clients need a Tokio runtime.
 //! - **Errors** are [`Error`] values with an [`ErrorKind`]: configuration,
-//!   network or attestation. A response body is read with `reqwest`'s
+//!   network or attestation; or, outside those categories, random, when the
+//!   operating system's random number generator fails while a router client
+//!   generates the cache secret of the process, and `connect` fails with
+//!   the generator's error as the source. A response body is read with `reqwest`'s
 //!   methods, whose error is `reqwest`'s; [`Error::from_reqwest`] returns
 //!   the client's error inside it. Errors from the OpenAI API keep
 //!   `async_openai`'s type; `Error::from_openai` returns the client's
@@ -108,12 +111,10 @@
 //!   that all such requests share.** An enclave client never adds a
 //!   secret. A router client adds none to a request that is not a `POST`
 //!   with a body to a path ending in `/chat/completions`, `/completions`
-//!   or `/responses`; to a body that is not a single JSON object; to a
+//!   or `/responses`; to a body that is not a single JSON object; or to a
 //!   body in which `user_cache_secret` appears more than once or with a
-//!   value that is not a string; or, without the option, when the
-//!   operating system supplies no random bytes for the secret of the
-//!   process. A non-empty `user_cache_secret`
-//!   string in the body is kept.
+//!   value that is not a string. A non-empty `user_cache_secret` string in
+//!   the body is kept.
 //! - **The router list is not trusted.** [`RouterHttpClient`] takes its
 //!   candidates from a list that is fetched over ordinary HTTPS, or from
 //!   the caller's [`RouterListFetcher`], tries them in a random order, and

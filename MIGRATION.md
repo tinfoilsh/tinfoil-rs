@@ -416,7 +416,8 @@ the `tinfoil-verifier` crate:
   longer read**, and the file is no longer created. Without the option, the
   router clients of each process use that process's own random secret, so
   prompt-cache hits are no longer shared across processes; if the operating
-  system supplies no random bytes, router requests carry no secret. To keep a
+  system supplies no random bytes, `connect` fails with an error of
+  `ErrorKind::Random`, and the next `connect` tries again. To keep a
   secret that stays the same across
   processes or machines, store it in your application and pass it with
   `user_cache_secret(..)`; an existing `~/.tinfoil/user_cache_secret` can be

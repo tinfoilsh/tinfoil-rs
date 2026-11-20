@@ -109,13 +109,14 @@ pub(crate) async fn discover<V: Evidence>(
 /// `resolve` turns the `user_cache_secret` option into the client's
 /// secret. It runs once and last: after discovery has chosen and verified
 /// a router, and after everything else that can fail, so that a client
-/// that cannot be created resolves no secret.
+/// that cannot be created resolves no secret. Its error is returned as it
+/// is.
 pub(crate) async fn connect<V: Evidence>(
     list: impl Future<Output = Vec<String>>,
     enclave_for: impl Fn(&str) -> Result<Enclave<V>, Error>,
     mode: Arc<dyn Mode<V>>,
     settings: Settings,
-    resolve: impl FnOnce(Option<Secret>) -> Option<Secret>,
+    resolve: impl FnOnce(Option<Secret>) -> Result<Option<Secret>, Error>,
 ) -> Result<AttestedClient<V>, Error> {
     within(settings.timeout, async move {
         let transport = discover(list, enclave_for, mode).await?;

@@ -684,7 +684,7 @@ async fn the_client_is_bound_to_the_router_that_discovery_chose() {
             world.enclave_for(),
             Arc::new(Recording::default()),
             settings(None),
-            |secret| secret,
+            Ok,
         )
         .await
         .unwrap();
@@ -709,7 +709,7 @@ async fn through_a_proxy_the_requests_name_the_router_that_was_chosen() {
                 base_url: Some(proxy.clone()),
                 ..settings(None)
             },
-            |secret| secret,
+            Ok,
         )
         .await
         .unwrap();
@@ -738,7 +738,7 @@ async fn the_cache_secret_is_resolved_once_after_discovery_and_reaches_the_reque
                 log.lock()
                     .unwrap()
                     .push((option, chosen.attempts("a.example")));
-                Some(Secret::new("resolved-scope"))
+                Ok(Some(Secret::new("resolved-scope")))
             },
         )
         .await
@@ -783,7 +783,7 @@ async fn no_secret_is_resolved_for_a_client_that_cannot_be_created() {
             settings(None),
             move |secret| {
                 *count.lock().unwrap() += 1;
-                secret
+                Ok(secret)
             },
         )
         .await
@@ -791,6 +791,28 @@ async fn no_secret_is_resolved_for_a_client_that_cannot_be_created() {
         .expect("nothing verifies");
         assert_eq!(error.kind(), ErrorKind::Network);
         assert_eq!(*resolved.lock().unwrap(), 0);
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_secret_that_cannot_be_resolved_fails_the_client_with_its_error() {
+    unstuck(async {
+        let world = World::new(vec![("a.example", vec![good("a")])]);
+        let error = connect(
+            hosts(&["a.example"]),
+            world.enclave_for(),
+            Arc::new(Recording::default()),
+            settings(None),
+            |_| Err(Error::random(getrandom::Error::UNSUPPORTED)),
+        )
+        .await
+        .err()
+        .expect("the secret could not be resolved");
+        assert_eq!(error.kind(), ErrorKind::Random);
+        let source = std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<getrandom::Error>());
+        assert_eq!(source, Some(&getrandom::Error::UNSUPPORTED));
     })
     .await
 }
@@ -812,7 +834,7 @@ async fn the_timeout_bounds_discovery_and_the_fallback_together() {
             world.enclave_for(),
             Arc::new(Recording::default()),
             settings(Some(Duration::from_secs(40))),
-            |secret| secret,
+            Ok,
         )
         .await
         .err()
@@ -962,7 +984,7 @@ mod options {
             let second = sent_by_a_router_client(None, body).await;
             // The messages never print the generated secret.
             assert!(first == second, "two router clients sent different secrets");
-            let secret = cachesecret::resolve(None).unwrap();
+            let secret = cachesecret::resolve(None).unwrap().unwrap();
             let expected = format!(
                 r#"{{"model":"m","n":1,"user_cache_secret":"{}"}}"#,
                 secret.expose()

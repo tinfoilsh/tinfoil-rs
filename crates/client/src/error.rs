@@ -54,16 +54,26 @@ pub enum ErrorKind {
     /// a new verification; in the EHBP mode that rejection is an answer
     /// that is not authenticated.
     Attestation,
+    /// The operating system's secure random number generator failed, so
+    /// the user cache secret that a router client generates for the process
+    /// could not be made. This is not one of the three categories above: the
+    /// error belongs to the platform, and its [`source`](StdError::source)
+    /// is the `getrandom::Error` that the generator returned, unchanged. No
+    /// predictable secret is used in its place, and the failure is not
+    /// remembered: the next client that needs the secret tries again. A
+    /// non-empty `user_cache_secret` option needs no generation.
+    Random,
 }
 
 impl ErrorKind {
-    /// The kind as one lowercase word: `configuration`, `network` or
-    /// `attestation`.
+    /// The kind as one lowercase word: `configuration`, `network`,
+    /// `attestation` or `random`.
     pub fn as_str(&self) -> &'static str {
         match self {
             ErrorKind::Configuration => "configuration",
             ErrorKind::Network => "network",
             ErrorKind::Attestation => "attestation",
+            ErrorKind::Random => "random",
         }
     }
 }
@@ -238,6 +248,12 @@ impl Error {
     /// An attestation error with `message` as its cause.
     pub(crate) fn attestation(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Attestation, Cause::Message(message.into()))
+    }
+
+    /// The failure of the operating system's random number generator,
+    /// carried as it is.
+    pub(crate) fn random(source: getrandom::Error) -> Self {
+        Self::new(ErrorKind::Random, Cause::Source(Arc::new(source)))
     }
 
     /// An error of `kind` that wraps `source`, unless `source` is already a

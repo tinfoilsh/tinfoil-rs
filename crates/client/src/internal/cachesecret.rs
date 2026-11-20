@@ -19,32 +19,52 @@
 
 use std::sync::OnceLock;
 
+use crate::error::Error;
 use crate::internal::fetch::lower_hex;
 use crate::options::Secret;
 
 /// The client-level secret for a router client: the option when it is
 /// set and not empty, and otherwise the secret of the process.
 ///
-/// `None` only when the operating system supplies no random bytes for the
-/// secret of the process; requests then carry no secret.
-pub(crate) fn resolve(explicit: Option<Secret>) -> Option<Secret> {
-    explicit
-        .filter(|secret| !secret.expose().is_empty())
-        .or_else(process_secret)
+/// Fails with an error of [`ErrorKind::Random`](crate::ErrorKind::Random)
+/// when the secret of the process has to be generated and the operating
+/// system supplies no random bytes for it.
+pub(crate) fn resolve(explicit: Option<Secret>) -> Result<Option<Secret>, Error> {
+    resolve_from(explicit, &PROCESS_SECRET, getrandom::fill)
 }
 
 /// The secret of this process, generated on first use and the same for
 /// every client after that.
-fn process_secret() -> Option<Secret> {
-    static SECRET: OnceLock<Option<Secret>> = OnceLock::new();
-    SECRET.get_or_init(generate).clone()
+static PROCESS_SECRET: OnceLock<Secret> = OnceLock::new();
+
+/// As [`resolve`], with the secret of the process kept in `process` and
+/// generated with `fill`.
+fn resolve_from(
+    explicit: Option<Secret>,
+    process: &OnceLock<Secret>,
+    fill: impl FnOnce(&mut [u8]) -> Result<(), getrandom::Error>,
+) -> Result<Option<Secret>, Error> {
+    if let Some(explicit) = explicit.filter(|secret| !secret.expose().is_empty()) {
+        return Ok(Some(explicit));
+    }
+    if let Some(secret) = process.get() {
+        return Ok(Some(secret.clone()));
+    }
+    // A failed generation stores nothing, so that the next resolution
+    // tries again. Of two threads that generate at once, one secret wins,
+    // and both return it.
+    let generated = generate_with(fill).map_err(Error::random)?;
+    Ok(Some(process.get_or_init(|| generated).clone()))
 }
 
-/// A new secret: 32 random bytes in lowercase hexadecimal.
-pub(crate) fn generate() -> Option<Secret> {
+/// A new secret from 32 bytes that `fill` writes, in lowercase
+/// hexadecimal.
+fn generate_with(
+    fill: impl FnOnce(&mut [u8]) -> Result<(), getrandom::Error>,
+) -> Result<Secret, getrandom::Error> {
     let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).ok()?;
-    Some(Secret::new(lower_hex(&bytes)))
+    fill(&mut bytes)?;
+    Ok(Secret::new(lower_hex(&bytes)))
 }
 
 #[cfg(test)]
@@ -110,19 +130,44 @@ mod tests {
 
     #[test]
     fn a_new_secret_is_32_random_bytes_in_lowercase_hexadecimal() {
-        let first = exposed(generate()).unwrap();
-        let second = exposed(generate()).unwrap();
+        let first = exposed(generate_with(getrandom::fill).ok()).unwrap();
+        let second = exposed(generate_with(getrandom::fill).ok()).unwrap();
         assert!(is_generated(&first));
         assert!(first != second, "two generated secrets are equal");
     }
 
     #[test]
+    fn a_failing_generator_returns_its_error_unchanged_and_is_tried_again() {
+        let process = OnceLock::new();
+        let failure = getrandom::Error::UNSUPPORTED;
+        let error = resolve_from(None, &process, |_| Err(failure)).unwrap_err();
+        assert_eq!(error.kind(), crate::ErrorKind::Random);
+        let source = std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<getrandom::Error>())
+            .expect("the source is the generator's error");
+        assert_eq!(*source, failure);
+        assert!(process.get().is_none(), "the failure was kept");
+
+        let explicit = resolve_from(Some(Secret::new("explicit")), &process, |_| Err(failure));
+        assert_eq!(
+            exposed(explicit.unwrap()).as_deref(),
+            Some("explicit"),
+            "an explicit secret needs no generation"
+        );
+
+        let generated = exposed(resolve_from(None, &process, getrandom::fill).unwrap()).unwrap();
+        assert!(is_generated(&generated));
+        let again = exposed(resolve_from(None, &process, |_| Err(failure)).unwrap()).unwrap();
+        assert!(again == generated, "the generated secret was not kept");
+    }
+
+    #[test]
     fn the_option_wins_and_an_empty_option_counts_as_unset() {
-        let explicit = resolve(Some(Secret::new("explicit")));
+        let explicit = resolve(Some(Secret::new("explicit"))).unwrap();
         assert_eq!(exposed(explicit).as_deref(), Some("explicit"));
 
-        let empty = exposed(resolve(Some(Secret::new("")))).unwrap();
-        let unset = exposed(resolve(None)).unwrap();
+        let empty = exposed(resolve(Some(Secret::new(""))).unwrap()).unwrap();
+        let unset = exposed(resolve(None).unwrap()).unwrap();
         assert!(is_generated(&unset));
         assert!(
             empty == unset,
@@ -132,10 +177,10 @@ mod tests {
 
     #[test]
     fn without_the_option_every_resolution_in_the_process_shares_one_secret() {
-        let first = exposed(resolve(None)).unwrap();
+        let first = exposed(resolve(None).unwrap()).unwrap();
         let others: Vec<String> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..8)
-                .map(|_| scope.spawn(|| exposed(resolve(None)).unwrap()))
+                .map(|_| scope.spawn(|| exposed(resolve(None).unwrap()).unwrap()))
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
@@ -205,16 +250,16 @@ mod tests {
             return;
         }
         // The messages never print a secret.
-        let first = exposed(resolve(None)).unwrap();
+        let first = exposed(resolve(None).unwrap()).unwrap();
         assert!(is_generated(&first), "the secret is not a generated one");
         assert!(first != FROM_ENV, "the secret came from the environment");
         assert!(first != FROM_FILE, "the secret came from the file");
         assert!(
-            exposed(resolve(None)).unwrap() == first,
+            exposed(resolve(None).unwrap()).unwrap() == first,
             "the process secret changed"
         );
         // The option still wins.
-        let explicit = exposed(resolve(Some(Secret::new("explicit"))));
+        let explicit = exposed(resolve(Some(Secret::new("explicit"))).unwrap());
         assert_eq!(explicit.as_deref(), Some("explicit"));
     }
 }
