@@ -10,7 +10,7 @@ use crate::error::Error;
 use crate::internal::attested::{AttestedClient, Settings};
 use crate::internal::transport::base_url;
 use crate::internal::{enclave, system_clock};
-use crate::options::{RouteOptions, Secret, Transport};
+use crate::options::{RouteOptions, Transport};
 use crate::request::http_request_methods;
 use crate::trust::Trust;
 use crate::verifier::{BoxError, Policy, Verification, Verifier};
@@ -35,6 +35,10 @@ use crate::verifier::{BoxError, Policy, Verification, Verifier};
 /// What is protected depends on the [`Transport`]: in `Tls`, the whole
 /// request and response; in `Ehbp`, the bodies only, and not a request
 /// without a body or the response to it.
+///
+/// The client sends request bodies as they are: it never adds or changes a
+/// `user_cache_secret` member. A caller that points it at Tinfoil's router
+/// and wants a scoped prompt cache sets that member in each request body.
 ///
 /// [`connect`]: EnclaveHttpClient::connect
 #[derive(Clone)]
@@ -186,8 +190,8 @@ impl fmt::Debug for EnclaveHttpClient {
 /// "unset". The setters check nothing: [`connect`](Self::connect) checks
 /// every option before any network I/O.
 ///
-/// The `Debug` output shows neither the user cache secret nor the proxy
-/// URL, which has not been checked for credentials yet.
+/// The `Debug` output does not show the proxy URL, which has not been
+/// checked for credentials yet.
 #[derive(Clone, Debug)]
 #[must_use = "a builder does nothing until `connect` is called"]
 pub struct EnclaveHttpClientBuilder {
@@ -238,22 +242,6 @@ impl EnclaveHttpClientBuilder {
         self
     }
 
-    /// The default prompt-cache scope for the client's requests: the
-    /// client adds it as `user_cache_secret` to the JSON body of chat
-    /// completion, completion and response requests.
-    ///
-    /// Only Tinfoil's router reads the member, so set it when the enclave
-    /// is a router. A non-empty `user_cache_secret` string that a request's
-    /// body already carries wins over it, so a server can scope the cache
-    /// to each of its users. Use an opaque random value, not a user ID or
-    /// an API key.
-    ///
-    /// Unset, this client adds nothing.
-    pub fn user_cache_secret(mut self, secret: impl Into<String>) -> Self {
-        self.options.common.user_cache_secret = Some(Secret::new(secret));
-        self
-    }
-
     /// A deadline for each operation of the client: [`connect`], each
     /// [`ensure_verified`] and [`reverify`], and each request, from the
     /// call until the response body has been read. A request's own
@@ -288,7 +276,7 @@ impl EnclaveHttpClientBuilder {
     ///    error does not repeat the URL), a query string or a fragment; or
     ///    it uses `http://` for a host other than `localhost` or a loopback
     ///    IP address.
-    /// 3. `user_cache_secret` is empty, or `timeout` is zero.
+    /// 3. `timeout` is zero.
     /// 4. The trust argument lacks a field that its variant requires: an
     ///    empty repository or project, in either part of
     ///    [`Trust::EitherPin`] too, or registry IDs of
@@ -355,7 +343,8 @@ impl EnclaveHttpClientBuilder {
             Settings {
                 mode,
                 base_url,
-                secret: common.user_cache_secret,
+                // An enclave client adds no cache secret.
+                secret: None,
                 timeout: common.timeout,
             },
             self.trust,

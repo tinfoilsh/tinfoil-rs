@@ -3,16 +3,15 @@
 //! and requests carrying different secrets cannot observe each other's
 //! cache timing.
 //!
-//! A request's secret is, in order:
+//! A router request's secret is, in order:
 //!
 //! 1. a non-empty `user_cache_secret` string in the request body;
 //! 2. the client's `user_cache_secret` option;
 //! 3. a random secret that is generated in memory once per process and
 //!    that every router client in the process shares.
 //!
-//! Step 3 applies to the router route only: an explicit enclave does not
-//! read the member unless it is a router, so a client for one sends a
-//! secret only when the option is set.
+//! An explicit enclave does not read the member unless it is a router, so
+//! a client for one has no such option and never adds or changes it.
 //!
 //! The secret is never read from the environment or from the file system.
 //! An application that wants a secret that stays the same across processes

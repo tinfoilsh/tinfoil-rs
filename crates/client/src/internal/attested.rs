@@ -22,7 +22,7 @@ use crate::internal::transport::{Mode, RoundTrip, Transport};
 use crate::internal::{Clock, fetch};
 use crate::options::{Secret, TransportMode};
 use crate::request::{Execute, ResponseFuture};
-use crate::verifier::{Pin, Verification};
+use crate::verifier::Verification;
 
 #[cfg(test)]
 #[path = "attested_tests.rs"]
@@ -159,10 +159,6 @@ impl<V: Evidence> AttestedClient<V> {
 
     pub(crate) fn enclave(&self) -> &str {
         self.transport.enclave().host()
-    }
-
-    pub(crate) fn pin(&self) -> &Pin {
-        self.transport.enclave().pin()
     }
 
     pub(crate) fn transport_mode(&self) -> TransportMode {

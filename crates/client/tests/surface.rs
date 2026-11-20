@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use tinfoil::reqwest::header::{HeaderMap, HeaderValue};
 use tinfoil::reqwest::{Method, Request, Response, Url};
-use tinfoil::verifier::{BoxError, Pin, Policy, Verification};
+use tinfoil::verifier::{BoxError, Policy, Verification};
 use tinfoil::{
     EnclaveHttpClient, EnclaveHttpClientBuilder, Error, ErrorKind, RequestBuilder,
     RouterHttpClient, RouterHttpClientBuilder, Transport, Trust, VERSION,
@@ -80,7 +80,6 @@ fn the_accessors_have_their_signatures() {
 
     let _: for<'a> fn(&'a RouterHttpClient) -> &'a Url = RouterHttpClient::base_url;
     let _: for<'a> fn(&'a RouterHttpClient) -> &'a str = RouterHttpClient::enclave;
-    let _: for<'a> fn(&'a RouterHttpClient) -> &'a Pin = RouterHttpClient::pin;
     let _: fn(&RouterHttpClient) -> Arc<Verification> = RouterHttpClient::current;
     let _: fn() -> RouterHttpClientBuilder = RouterHttpClient::builder;
 }
@@ -93,11 +92,14 @@ fn a_builder_does_no_io_and_prints_no_secret() {
         })
         .policy(Policy::default())
         .verification_check(check)
+        .timeout(Duration::from_secs(30));
+    let printed = format!("{builder:?}");
+    assert!(!printed.contains("hunter2"));
+    let builder = RouterHttpClient::builder()
         .user_cache_secret("cache-scope-value")
         .timeout(Duration::from_secs(30));
     let printed = format!("{builder:?}");
     assert!(!printed.contains("cache-scope-value"));
-    assert!(!printed.contains("hunter2"));
 }
 
 /// The enclave client, as a caller writes it.
@@ -122,7 +124,6 @@ async fn enclave_client(policy: Policy) -> Result<(), Box<dyn StdError>> {
         }
         Ok(())
     })
-    .user_cache_secret("opaque-random-value")
     .timeout(Duration::from_secs(30));
     let configured: EnclaveHttpClient = send(builder.connect()).await?;
 
@@ -235,10 +236,6 @@ async fn an_enclave_client_checks_its_options_before_any_io() {
         (proxy("http://proxy.invalid/"), "HTTP is allowed only"),
         (proxy("https://user:hunter2@proxy.invalid/"), "user name"),
         (proxy("https://proxy.invalid/?key=1"), "query string"),
-        (
-            builder().user_cache_secret(""),
-            "user cache secret is empty",
-        ),
         (builder().timeout(Duration::ZERO), "timeout is zero"),
         (
             EnclaveHttpClient::builder("enclave.invalid", Trust::repo("")),

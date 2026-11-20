@@ -404,25 +404,26 @@ the `tinfoil-verifier` crate:
 
 ### Prompt cache secret
 
-- The client-level secret is an option of the builder
+- The client-level secret is an option of the router builder
   (`user_cache_secret(..)`), not a method on a built client.
-- A request's secret is, in order: a non-empty `user_cache_secret` string in
-  its JSON body; the client's `user_cache_secret(..)` option; and, for
-  **router clients** only, a random secret that is generated in memory once
-  per process and that every router client in the process shares. **Enclave
-  clients add no secret** unless the option is set.
+- A router request's secret is, in order: a non-empty `user_cache_secret`
+  string in its JSON body; the client's `user_cache_secret(..)` option; and a
+  random secret that is generated in memory once per process and that every
+  router client in the process shares. **Enclave clients have no such option
+  and never add or change the member**: set it in each request body when the
+  enclave is a router.
 - **`TINFOIL_USER_CACHE_SECRET` and `~/.tinfoil/user_cache_secret` are no
   longer read**, and the file is no longer created. Without the option, the
   router clients of each process use that process's own random secret, so
   prompt-cache hits are no longer shared across processes; if the operating
-  system supplies no random bytes, router requests carry no secret. Enclave
-  clients add no secret unless the option is set. To keep a secret that stays the same across
+  system supplies no random bytes, router requests carry no secret. To keep a
+  secret that stays the same across
   processes or machines, store it in your application and pass it with
   `user_cache_secret(..)`; an existing `~/.tinfoil/user_cache_secret` can be
   read by the application and passed in the same way.
 - The secret is added to the JSON body of `POST` requests to
   `…/chat/completions`, `…/completions` and `…/responses`, also for requests
-  that you send through the HTTP clients. A non-empty `user_cache_secret` in
+  that you send through the router HTTP client. A non-empty `user_cache_secret` in
   the body still wins.
 
 ### `chat_relaxed` and the SSE parser

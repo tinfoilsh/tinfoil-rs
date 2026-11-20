@@ -13,7 +13,7 @@ use std::time::Duration;
 use tinfoil::RouterHttpClient;
 
 const TIMEOUT: Duration = Duration::from_secs(120);
-/// Keeps the router clients from creating a secret file on the machine.
+/// The prompt-cache scope of the live tests.
 const CACHE_SECRET: &str = "tinfoil-rs-live-test";
 
 #[tokio::test]
@@ -27,7 +27,10 @@ async fn the_router_is_discovered_verified_and_reached_over_a_pinned_connection(
         .unwrap();
 
     let verified = client.current();
-    assert_eq!(Some(verified.config_repo()), client.pin().repo.as_deref());
+    assert_eq!(
+        verified.config_repo(),
+        "tinfoilsh/confidential-model-router"
+    );
     assert!(verified.tls_public_key_fp().is_some());
     assert!(verified.freshness_expires_at().is_some());
 

@@ -86,7 +86,6 @@ pub(crate) struct Config {
 /// One enclave and the policy that its attestation is verified against.
 pub(crate) struct Enclave<V = Verification> {
     host: String,
-    pin: Pin,
     #[cfg(test)]
     verifier: Option<Arc<Verifier>>,
     source: Source<V>,
@@ -194,7 +193,6 @@ impl Enclave<Verification> {
         };
         Self {
             host: checked.host,
-            pin: checked.pin,
             #[cfg(test)]
             verifier: Some(verifier),
             source,
@@ -222,7 +220,6 @@ impl<V: Evidence> Enclave<V> {
     ) -> Self {
         Self {
             host: host.to_owned(),
-            pin: Pin::none(),
             #[cfg(test)]
             verifier: None,
             source,
@@ -234,11 +231,6 @@ impl<V: Evidence> Enclave<V> {
     /// The enclave's host.
     pub(crate) fn host(&self) -> &str {
         &self.host
-    }
-
-    /// The pin that the enclave is verified against.
-    pub(crate) fn pin(&self) -> &Pin {
-        &self.pin
     }
 
     /// The clock that the enclave judges freshness by.
@@ -878,7 +870,6 @@ mod tests {
         )
         .expect("an enclave");
         assert_eq!(enclave.host(), "enclave.example.com:8443");
-        assert_eq!(enclave.pin(), &Pin::repo("owner/name"));
 
         let error = enclave
             .verify()

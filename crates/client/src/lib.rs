@@ -105,14 +105,14 @@
 //!   verification stays in place, the client does not verify again, and
 //!   the request is not sent again.
 //! - **A request without a cache secret uses the prompt-cache namespace
-//!   that all such requests share.** No secret is added by an enclave
-//!   client whose `user_cache_secret` option is unset; to a request that
-//!   is not a `POST` with a body to a path ending in `/chat/completions`,
-//!   `/completions` or `/responses`; to a body that is not a single JSON
-//!   object; to a body in which `user_cache_secret` appears more than
-//!   once or with a value that is not a string; or, on a router client
-//!   without the option, when the operating system supplies no random
-//!   bytes for the secret of the process. A non-empty `user_cache_secret`
+//!   that all such requests share.** An enclave client never adds a
+//!   secret. A router client adds none to a request that is not a `POST`
+//!   with a body to a path ending in `/chat/completions`, `/completions`
+//!   or `/responses`; to a body that is not a single JSON object; to a
+//!   body in which `user_cache_secret` appears more than once or with a
+//!   value that is not a string; or, without the option, when the
+//!   operating system supplies no random bytes for the secret of the
+//!   process. A non-empty `user_cache_secret`
 //!   string in the body is kept.
 //! - **The router list is not trusted.** [`RouterHttpClient`] takes its
 //!   candidates from a list that is fetched over ordinary HTTPS, and

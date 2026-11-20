@@ -12,7 +12,7 @@ use crate::internal::enclave::{self, Enclave};
 use crate::internal::{cachesecret, router, system_clock};
 use crate::options::{RouteOptions, Secret, Transport};
 use crate::request::http_request_methods;
-use crate::verifier::{BoxError, ConfigTrust, Pin, Policy, Verification, Verifier};
+use crate::verifier::{BoxError, ConfigTrust, Policy, Verification, Verifier};
 
 /// An HTTP client whose requests reach only the attested router that it
 /// discovered.
@@ -60,12 +60,6 @@ impl RouterHttpClient {
         self.inner.enclave()
     }
 
-    /// The pin that the router is verified against, which is always
-    /// Tinfoil's router.
-    pub fn pin(&self) -> &Pin {
-        self.inner.pin()
-    }
-
     /// The last successful verification of the router, without checking
     /// it: it may have expired or been rejected since.
     pub fn current(&self) -> Arc<Verification> {
@@ -102,7 +96,6 @@ impl fmt::Debug for RouterHttpClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RouterHttpClient")
             .field("enclave", &self.enclave())
-            .field("pin", &self.pin())
             .field("base_url", &self.base_url().as_str())
             .field("transport", &self.inner.transport_mode())
             .finish_non_exhaustive()

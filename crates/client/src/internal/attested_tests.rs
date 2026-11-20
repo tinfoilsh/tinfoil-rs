@@ -19,7 +19,6 @@ use crate::internal::transport::{Failure, Mode, RoundTrip, Transport};
 use crate::internal::{BoxFuture, Clock};
 use crate::options::{Secret, TransportMode};
 use crate::request::{Execute, RequestBuilder, into_url};
-use crate::verifier::Pin;
 
 const HOUR: Duration = Duration::from_secs(3600);
 const ENCLAVE: &str = "enclave.example.com";
@@ -314,7 +313,6 @@ async fn the_client_reports_its_route_and_its_last_verification() {
         })
         .await;
         assert_eq!(f.client.enclave(), ENCLAVE);
-        assert_eq!(f.client.pin(), &Pin::none());
         assert_eq!(f.client.transport_mode(), TransportMode::Tls);
         assert_eq!(f.client.base_url().as_str(), "https://enclave.example.com/");
         assert_eq!(f.client.current().name, "first");
@@ -1631,7 +1629,6 @@ mod options {
         .transport(crate::Transport::Ehbp {
             proxy_url: Some("https://proxy.example.com/tinfoil".into()),
         })
-        .user_cache_secret("opaque")
         .timeout(Duration::from_secs(1))
         .prepare()
         .unwrap();
@@ -1641,7 +1638,8 @@ mod options {
             settings.base_url.as_ref().map(Url::as_str),
             Some("https://proxy.example.com/tinfoil/")
         );
-        assert_eq!(settings.secret.as_ref().map(Secret::expose), Some("opaque"));
+        // An enclave client adds no cache secret.
+        assert!(settings.secret.is_none());
         assert_eq!(settings.timeout, Some(Duration::from_secs(1)));
 
         let (_, settings, _) =
