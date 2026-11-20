@@ -7,19 +7,21 @@ use std::time::Duration;
 use reqwest::Url;
 
 use crate::error::Error;
+use crate::fetchers::{self, AttestationFetcher, RouterListFetcher};
 use crate::internal::attested::{AttestedClient, Settings, mode_for};
 use crate::internal::enclave::{self, Enclave};
 use crate::internal::{cachesecret, router, system_clock};
-use crate::options::{RouteOptions, Secret, TransportMode};
+use crate::options::{RouteOptions, Secret, Transport};
 use crate::request::http_request_methods;
-use crate::verifier::{BoxError, Pin, Verification, Verifier};
+use crate::verifier::{BoxError, ConfigTrust, Policy, Verification, Verifier};
 
 /// An HTTP client whose requests reach only the attested router that it
 /// discovered.
 ///
 /// Tinfoil's router serves the inference API for every model. The client
-/// finds one when it is created: it takes the first router of Tinfoil's
-/// published list that passes verification, and otherwise
+/// finds one when it is created: it tries the routers of Tinfoil's
+/// published list in a random order, takes the first that passes
+/// verification, and otherwise
 /// `inference.tinfoil.sh`. From then on it behaves as an
 /// [`EnclaveHttpClient`](crate::EnclaveHttpClient) for that router: it
 /// verifies the same router again when the verification expires or the
@@ -44,30 +46,21 @@ impl RouterHttpClient {
     pub fn builder() -> RouterHttpClientBuilder {
         RouterHttpClientBuilder {
             options: RouteOptions::default(),
+            router_list_fetcher: None,
         }
     }
 
-    /// Where requests are sent: the `base_url` option, or else the
+    /// Where requests are sent: the proxy URL of [`Transport::Ehbp`], or
+    /// else the
     /// router's own origin, `https://<router>/`. The path ends in `/`.
     pub fn base_url(&self) -> &Url {
         self.inner.base_url()
     }
 
     /// The host of the router that the client discovered and verifies. It
-    /// stays the router's host when `base_url` is a proxy.
+    /// stays the router's host when requests go through a proxy.
     pub fn enclave(&self) -> &str {
         self.inner.enclave()
-    }
-
-    /// The pin that the router is verified against, which is always
-    /// Tinfoil's router.
-    pub fn pin(&self) -> &Pin {
-        self.inner.pin()
-    }
-
-    /// The transport mode that the client was created with.
-    pub fn transport_mode(&self) -> TransportMode {
-        self.inner.transport_mode()
     }
 
     /// The last successful verification of the router, without checking
@@ -95,13 +88,19 @@ impl RouterHttpClient {
 
 http_request_methods!(RouterHttpClient);
 
+impl RouterHttpClient {
+    /// The attested client that requests go through.
+    pub(crate) fn attested(&self) -> &Arc<AttestedClient> {
+        &self.inner
+    }
+}
+
 impl fmt::Debug for RouterHttpClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RouterHttpClient")
             .field("enclave", &self.enclave())
-            .field("pin", &self.pin())
             .field("base_url", &self.base_url().as_str())
-            .field("transport_mode", &self.transport_mode())
+            .field("transport", &self.inner.transport_mode())
             .finish_non_exhaustive()
     }
 }
@@ -111,43 +110,45 @@ impl fmt::Debug for RouterHttpClient {
 /// An option is unset until its setter is called. The setters check
 /// nothing: [`connect`](Self::connect) checks every option before any
 /// network I/O. The `Debug` output shows neither the user cache secret nor
-/// the unchecked base URL.
-#[derive(Clone, Debug)]
+/// the unchecked proxy URL.
+#[derive(Clone)]
 #[must_use = "a builder does nothing until `connect` is called"]
 pub struct RouterHttpClientBuilder {
     options: RouteOptions,
+    router_list_fetcher: Option<Arc<dyn RouterListFetcher>>,
+}
+
+impl fmt::Debug for RouterHttpClientBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RouterHttpClientBuilder")
+            .field("options", &self.options)
+            .field("router_list_fetcher", &self.router_list_fetcher.is_some())
+            .finish()
+    }
 }
 
 impl RouterHttpClientBuilder {
-    /// How the client protects its traffic. Unset, it is
-    /// [`TransportMode::Tls`].
-    pub fn transport_mode(mut self, mode: TransportMode) -> Self {
-        self.options.transport_mode = Some(mode);
-        self
-    }
-
-    /// A proxy that forwards requests to the router that discovery
-    /// chooses. It requires [`TransportMode::Ehbp`]: the router is not
-    /// known before discovery, so a base URL cannot name its origin.
+    /// How the client protects its traffic, and whether it goes through a
+    /// proxy. Unset, it is [`Transport::Tls`].
     ///
-    /// Requests carry the `X-Tinfoil-Enclave-Url` header so that the proxy
-    /// can forward them, and the proxy sees the method, the URL and the
-    /// headers of every request. The rules for the URL are those of
-    /// [`EnclaveHttpClientBuilder::base_url`](crate::EnclaveHttpClientBuilder::base_url).
-    pub fn base_url(mut self, url: impl Into<String>) -> Self {
-        self.options.base_url = Some(url.into());
+    /// A proxy URL of [`Transport::Ehbp`] forwards requests to the router
+    /// that discovery chooses, which the `X-Tinfoil-Enclave-Url` header
+    /// names to it. The rules for the URL are those of
+    /// [`Transport::Ehbp`].
+    pub fn transport(mut self, transport: Transport) -> Self {
+        self.options.transport = transport;
         self
     }
 
-    /// The verification policy for the router. Unset, it is
-    /// `Verifier::new()`. A verifier that supplies or authorizes the
-    /// config itself is refused: it needs an explicit enclave.
-    pub fn verifier(mut self, verifier: impl Into<Arc<Verifier>>) -> Self {
-        self.options.common.verifier = Some(verifier.into());
+    /// The verification policy that applies on top of the router's fixed
+    /// trust. Unset, it is [`Policy::default()`], which keeps every
+    /// default.
+    pub fn policy(mut self, policy: Policy) -> Self {
+        self.options.common.policy = policy;
         self
     }
 
-    /// A veto over each verification that passed the verifier: for each
+    /// A veto over each verification that passed the policy: for each
     /// router that discovery tries, and whenever the client verifies its
     /// router again.
     ///
@@ -203,21 +204,50 @@ impl RouterHttpClientBuilder {
         self
     }
 
+    /// How the client obtains attestation documents, in place of fetching
+    /// them directly from the enclave: an [`AttestationRelay`], or any
+    /// [`AttestationFetcher`], such as an async closure. It is used for
+    /// every verification: for each router that discovery tries, for the
+    /// fallback router, and whenever the client verifies its router again. Whatever it returns is verified as a
+    /// directly fetched document is.
+    ///
+    /// [`AttestationRelay`]: crate::AttestationRelay
+    /// [`AttestationFetcher`]: crate::AttestationFetcher
+    pub fn fetch_attestation(mut self, fetcher: impl AttestationFetcher) -> Self {
+        self.options.common.attestation_fetcher = Some(Arc::new(fetcher));
+        self
+    }
+
+    /// How the client obtains its candidate routers, in place of fetching
+    /// Tinfoil's list from `https://atc.tinfoil.sh/routers`: a
+    /// [`RouterListRelay`], or any [`RouterListFetcher`], such as an async
+    /// closure. Discovery still runs: the list only proposes routers, each
+    /// of which is verified before it is used, and an error counts as an
+    /// empty list, after which the client falls back to
+    /// `inference.tinfoil.sh`. See [`RouterListFetcher`] for what the list
+    /// source is trusted with.
+    ///
+    /// [`RouterListRelay`]: crate::RouterListRelay
+    /// [`RouterListFetcher`]: crate::RouterListFetcher
+    pub fn fetch_router_list(mut self, fetcher: impl RouterListFetcher) -> Self {
+        self.router_list_fetcher = Some(Arc::new(fetcher));
+        self
+    }
+
     /// Checks the options, discovers and verifies a router, and returns
     /// the client.
     ///
     /// Before any network I/O, in this order, each a configuration error:
     ///
-    /// 1. `base_url` is invalid, by the rules of
+    /// 1. The proxy URL of [`Transport::Ehbp`] is invalid, by the rules of
     ///    [`EnclaveHttpClientBuilder::connect`](crate::EnclaveHttpClientBuilder::connect).
-    /// 2. `base_url` is set and the mode is [`TransportMode::Tls`].
-    /// 3. `user_cache_secret` is empty, or `timeout` is zero.
-    /// 4. The verifier supplies or authorizes the config itself
-    ///    (`Verifier::caller_authorizes_config`).
+    /// 2. `user_cache_secret` is empty, or `timeout` is zero.
+    /// 3. The verifier cannot be built from the policy. The verifier's
+    ///    usage error is the source.
     ///
     /// Then discovery runs, for at most 30 seconds in all. The router list
     /// is fetched; a list that cannot be fetched or read counts as empty.
-    /// Its routers are tried one at a time, in the order of the list, each
+    /// Its routers are tried one at a time, in a random order, each
     /// with a single verification, and the first that passes,
     /// `verification_check` included, becomes the client's router. A
     /// router that fails, for whatever reason, is skipped. When none
@@ -238,6 +268,8 @@ impl RouterHttpClientBuilder {
     /// Dropping the future stops discovery and closes its connections. No
     /// client exists.
     pub async fn connect(self) -> Result<RouterHttpClient, Error> {
+        let fetch = fetchers::attestation_fetch(self.options.common.attestation_fetcher.clone());
+        let list_fetcher = self.router_list_fetcher.clone();
         let (fallback, settings) = self.prepare()?;
         let mode = mode_for(settings.mode)?;
         // Every router is verified under the policy that was checked, and
@@ -255,17 +287,17 @@ impl RouterHttpClientBuilder {
             Ok(Enclave::from_checked(
                 checked,
                 system_clock(),
-                enclave::network_fetch(),
+                Arc::clone(&fetch),
             ))
         };
-        let inner = router::connect(
-            router::router_list(),
-            enclave_for,
-            mode,
-            settings,
-            cachesecret::resolve,
-        )
-        .await?;
+        let list = async move {
+            match list_fetcher {
+                Some(fetcher) => fetchers::router_list(fetcher).await,
+                None => router::router_list().await,
+            }
+        };
+        let inner =
+            router::connect(list, enclave_for, mode, settings, cachesecret::resolve).await?;
         Ok(RouterHttpClient {
             inner: Arc::new(inner),
         })
@@ -276,28 +308,16 @@ impl RouterHttpClientBuilder {
     /// the verifier for every router, and what the client is made from. It
     /// does no I/O.
     pub(crate) fn prepare(self) -> Result<(enclave::Checked, Settings), Error> {
-        let base_url = self.options.checked_base_url()?;
+        let base_url = self.options.checked_proxy_url()?;
         let mode = self.options.mode();
-        if base_url.is_some() && mode == TransportMode::Tls {
-            return Err(Error::configuration(
-                "a base URL is a proxy when the router is discovered, which requires TransportMode::Ehbp",
-            ));
-        }
         self.options.common.check()?;
         let common = self.options.common;
-        if common
-            .verifier
-            .as_ref()
-            .is_some_and(|verifier| verifier.caller_authorizes_config())
-        {
-            return Err(Error::configuration(
-                "a verifier that supplies or authorizes the config requires an explicit enclave",
-            ));
-        }
+        let verifier = Verifier::new(ConfigTrust::PublicRegistry, common.policy)
+            .map_err(enclave::from_verifier)?;
         let fallback = enclave::Config {
             host: router::FALLBACK_ROUTER.to_owned(),
             pin: router::router_pin(),
-            verifier: common.verifier,
+            verifier: Some(Arc::new(verifier)),
             verification_check: common.verification_check,
         }
         .check()?;

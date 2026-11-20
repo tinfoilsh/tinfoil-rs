@@ -690,7 +690,6 @@ async fn the_client_is_bound_to_the_router_that_discovery_chose() {
         .unwrap();
         assert_eq!(client.enclave(), "b.example:8443");
         assert_eq!(client.base_url().as_str(), "https://b.example:8443/");
-        assert_eq!(client.openai_url().as_str(), "https://b.example:8443/v1/");
         assert_eq!(client.current().name, "b");
     })
     .await
@@ -716,7 +715,6 @@ async fn through_a_proxy_the_requests_name_the_router_that_was_chosen() {
         .unwrap();
         assert_eq!(client.enclave(), "b.example");
         assert_eq!(client.base_url(), &proxy);
-        assert_eq!(client.openai_url(), &proxy);
     })
     .await
 }
@@ -832,7 +830,7 @@ mod options {
     use super::*;
     use crate::RouterHttpClient;
     use crate::internal::cachesecret;
-    use crate::verifier::Verifier;
+    use crate::verifier::Policy;
 
     #[test]
     fn options_that_pass_every_check_describe_the_fallback_router_and_the_client() {
@@ -842,18 +840,23 @@ mod options {
         assert!(settings.base_url.is_none() && settings.secret.is_none());
         assert!(settings.timeout.is_none());
 
-        let verifier = Arc::new(Verifier::new());
+        let day = Duration::from_secs(24 * 60 * 60);
         let (fallback, settings) = RouterHttpClient::builder()
-            .transport_mode(TransportMode::Ehbp)
-            .base_url("https://proxy.example.com/tinfoil")
-            .verifier(Arc::clone(&verifier))
+            .transport(crate::Transport::Ehbp {
+                proxy_url: Some("https://proxy.example.com/tinfoil".into()),
+            })
+            .policy(Policy {
+                freshness_max_age: day,
+                ..Policy::default()
+            })
             .verification_check(|_| Ok(()))
             .user_cache_secret("opaque")
             .timeout(Duration::from_secs(5))
             .prepare()
             .unwrap();
-        // The verifier of the fallback is the one for every router.
-        assert!(Arc::ptr_eq(fallback.verifier(), &verifier));
+        // The verifier of the fallback, which is the one for every router,
+        // applies the policy.
+        assert_eq!(fallback.verifier().freshness_max_age(), day);
         assert!(fallback.verification_check().is_some());
         assert_eq!(settings.mode, TransportMode::Ehbp);
         assert_eq!(
@@ -866,9 +869,9 @@ mod options {
 
     #[test]
     fn the_checks_run_in_the_documented_order() {
-        let authorizing = || {
-            let verifier = Verifier::builder().config_authorizer(|_| Ok(())).build();
-            Arc::new(verifier.expect("a verifier"))
+        let unbounded = || Policy {
+            freshness_max_age: Duration::MAX,
+            ..Policy::default()
         };
         let refusal = |builder: crate::RouterHttpClientBuilder| {
             let error = builder.prepare().err().expect("refused");
@@ -877,17 +880,17 @@ mod options {
         };
         let all_wrong = || {
             RouterHttpClient::builder()
-                .verifier(authorizing())
+                .policy(unbounded())
                 .timeout(Duration::ZERO)
         };
-        let message = refusal(all_wrong().base_url("ftp://proxy.example/"));
-        assert!(message.contains("invalid base URL"), "{message}");
-        let message = refusal(all_wrong().base_url("https://proxy.example/"));
-        assert!(message.contains("TransportMode::Ehbp"), "{message}");
+        let message = refusal(all_wrong().transport(crate::Transport::Ehbp {
+            proxy_url: Some("ftp://proxy.example/".into()),
+        }));
+        assert!(message.contains("invalid proxy URL"), "{message}");
         let message = refusal(all_wrong());
         assert!(message.contains("timeout is zero"), "{message}");
-        let message = refusal(RouterHttpClient::builder().verifier(authorizing()));
-        assert!(message.contains("explicit enclave"), "{message}");
+        let message = refusal(RouterHttpClient::builder().policy(unbounded()));
+        assert!(message.contains("out of range"), "{message}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -896,8 +899,8 @@ mod options {
             let world = World::new(vec![("a.example", vec![good("a")])]);
             let resolved = Arc::new(Mutex::new(0));
             let count = Arc::clone(&resolved);
-            // A pinned client cannot take a base URL on another origin:
-            // the client is refused once its router is known.
+            // A pinned client cannot take a proxy: the client is refused
+            // once its router is known.
             let error = connect(
                 hosts(&["a.example"]),
                 world.enclave_for(),

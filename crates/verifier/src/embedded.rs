@@ -10,25 +10,6 @@ use crate::runtime::{self, MAX_CONFIG_SIZE, decode_manifest, parse_manifest, run
 /// The size of a SHA-256 digest in bytes.
 const SHA256_SIZE: usize = 32;
 
-/// Reference values that the caller trusts by itself, for documents with
-/// `attestation-collaterals/v3` collateral.
-///
-/// A supplied component replaces the endorsement and the renewal check of
-/// that component only, and no endorsement is consulted for it even if the
-/// document carries one. A component left as `None` keeps its normal
-/// checks. Hardware authentication, the bindings between the components
-/// and register pins stay mandatory. These values must come from trusted
-/// client configuration.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EmbeddedReferences {
-    /// The config that the enclave must run.
-    pub config: Option<EmbeddedConfig>,
-    /// The exact runtime manifest that the config pins.
-    pub runtime: Option<Vec<u8>>,
-    /// A platform policy artifact in the `platform-endorsements/v2` format.
-    pub platform: Option<Vec<u8>>,
-}
-
 /// An immutable pin of one runtime release: what a config's `cvm-version`
 /// names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +23,8 @@ pub struct RuntimeReference {
     pub digest: String,
 }
 
-/// A config that the caller authorizes without a registry endorsement.
+/// A config that the caller supplies itself, in place of a registry
+/// endorsement: [`ConfigTrust::Embedded`](crate::ConfigTrust::Embedded).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmbeddedConfig {
     /// The exact config bytes. Their digest and the runtime that they pin
@@ -102,21 +84,33 @@ pub(crate) struct Embedded {
 impl Embedded {
     /// Checks caller-supplied references and copies them.
     ///
-    /// In order: at least one component is present; config bytes have 1 to
+    /// In order: a supplied manifest decodes; a supplied platform artifact
+    /// decodes and has the v2 format; config bytes have 1 to
     /// [`MAX_CONFIG_SIZE`] bytes and pin a runtime; a config name is a
     /// versioned config name; the config digest is a SHA-256; the runtime
-    /// pin is valid; a supplied manifest is the one that the config pins; a
-    /// supplied manifest decodes; a supplied platform artifact decodes and
-    /// has the v2 format. The error is a message for the caller.
-    pub(crate) fn check(references: EmbeddedReferences) -> Result<Self, String> {
-        let EmbeddedReferences {
-            config,
-            runtime,
-            platform,
-        } = references;
-        if config.is_none() && runtime.is_none() && platform.is_none() {
-            return Err("embedded references must contain at least one component".to_owned());
+    /// pin is valid; a supplied manifest is the one that the config pins.
+    /// The error is a message for the caller.
+    pub(crate) fn check(
+        config: Option<EmbeddedConfig>,
+        runtime: Option<Vec<u8>>,
+        platform: Option<Vec<u8>>,
+    ) -> Result<Self, String> {
+        if let Some(manifest) = &runtime {
+            decode_manifest(manifest).map_err(|cause| cause.to_string())?;
         }
+        let platform = match platform {
+            None => None,
+            Some(bytes) => {
+                let artifact = policy::parse(&bytes).map_err(|cause| cause.to_string())?;
+                if artifact.format != ARTIFACT_FORMAT_V2 {
+                    return Err("embedded platform requires platform-endorsements/v2".to_owned());
+                }
+                Some(Platform {
+                    artifact,
+                    digest: canonical::encode_lower_hex(&Sha256::digest(&bytes)),
+                })
+            }
+        };
         let config = match config {
             None => None,
             Some(EmbeddedConfig::Reference {
@@ -160,22 +154,6 @@ impl Embedded {
                 parse_manifest(manifest, &reference.runtime).map_err(|cause| cause.to_string())?;
             }
         }
-        if let Some(manifest) = &runtime {
-            decode_manifest(manifest).map_err(|cause| cause.to_string())?;
-        }
-        let platform = match platform {
-            None => None,
-            Some(bytes) => {
-                let artifact = policy::parse(&bytes).map_err(|cause| cause.to_string())?;
-                if artifact.format != ARTIFACT_FORMAT_V2 {
-                    return Err("embedded platform requires platform-endorsements/v2".to_owned());
-                }
-                Some(Platform {
-                    artifact,
-                    digest: canonical::encode_lower_hex(&Sha256::digest(&bytes)),
-                })
-            }
-        };
         Ok(Self {
             config,
             runtime,

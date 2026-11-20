@@ -11,12 +11,17 @@
 //!
 //! # Choosing a client
 //!
-//! | route | HTTP client | OpenAI client |
-//! |---|---|---|
-//! | Tinfoil's router, discovered (recommended) | [`RouterHttpClient`] | `Client`, or `RouterOpenAIClient` to configure it |
-//! | an enclave that the caller names | [`EnclaveHttpClient`] | `EnclaveOpenAIClient` |
+//! | route | HTTP client |
+//! |---|---|
+//! | Tinfoil's router, discovered (recommended) | [`RouterHttpClient`] |
+//! | an enclave that the caller names | [`EnclaveHttpClient`] |
 //!
-//! The OpenAI clients need the `openai` feature, which is on by default.
+//! The OpenAI client, `OpenAIClient`, is a layer over either HTTP client:
+//! `OpenAIClient::new(http, options, config)` builds one without further
+//! network I/O, and `Client::connect(config)` (the same type) is the
+//! one-line drop-in over a router. It needs the `openai` feature, which is
+//! on by default; without it the crate is the HTTP clients and the
+//! verifier, and does not depend on `async_openai`.
 //!
 #![cfg_attr(feature = "openai", doc = "```no_run")]
 #![cfg_attr(not(feature = "openai"), doc = "```ignore")]
@@ -63,15 +68,15 @@
 //!
 //! # What is protected
 //!
-//! In [`TransportMode::Tls`], the default, every connection is pinned to
+//! In [`Transport::Tls`], the default, every connection is pinned to
 //! the attested TLS key, which protects the whole request and response. In
-//! [`TransportMode::Ehbp`], request and response bodies are sealed to the
+//! [`Transport::Ehbp`], request and response bodies are sealed to the
 //! attested HPKE key and stay private through a proxy; the method, URL and
 //! headers are not sealed, and neither is a request without a body.
 //!
 //! # Limits of the protection
 //!
-//! - **[`TransportMode::Ehbp`] does not authenticate the end of a
+//! - **[`Transport::Ehbp`] does not authenticate the end of a
 //!   response.** Each part of a sealed response body is authenticated, and
 //!   so is the order of the parts: the content cannot be forged, altered
 //!   or reordered. Nothing marks the last part, so whoever controls the
@@ -82,7 +87,7 @@
 //!   terminator: that the JSON document is whole, or that the final event
 //!   of a stream arrived. The event-stream parser reports a stream that
 //!   is cut inside an event.
-//! - **In [`TransportMode::Ehbp`] a request without a body is sent as it
+//! - **In [`Transport::Ehbp`] a request without a body is sent as it
 //!   is**, and its response is returned as it arrives, neither encrypted
 //!   nor authenticated. An error response to a sealed request that is not
 //!   sealed itself is passed through as received, since a proxy may
@@ -100,29 +105,35 @@
 //!   verification stays in place, the client does not verify again, and
 //!   the request is not sent again.
 //! - **A request without a cache secret uses the prompt-cache namespace
-//!   that all such requests share.** No secret is added by an enclave
-//!   client whose `user_cache_secret` option is unset; to a request that
-//!   is not a `POST` with a body to a path ending in `/chat/completions`,
-//!   `/completions` or `/responses`; to a body that is not a single JSON
-//!   object; to a body in which `user_cache_secret` appears more than
-//!   once or with a value that is not a string; or, on a router client
-//!   without the option, when the operating system supplies no random
-//!   bytes for the secret of the process. A non-empty `user_cache_secret`
+//!   that all such requests share.** An enclave client never adds a
+//!   secret. A router client adds none to a request that is not a `POST`
+//!   with a body to a path ending in `/chat/completions`, `/completions`
+//!   or `/responses`; to a body that is not a single JSON object; to a
+//!   body in which `user_cache_secret` appears more than once or with a
+//!   value that is not a string; or, without the option, when the
+//!   operating system supplies no random bytes for the secret of the
+//!   process. A non-empty `user_cache_secret`
 //!   string in the body is kept.
 //! - **The router list is not trusted.** [`RouterHttpClient`] takes its
-//!   candidates from a list that is fetched over ordinary HTTPS, and
+//!   candidates from a list that is fetched over ordinary HTTPS, or from
+//!   the caller's [`RouterListFetcher`], tries them in a random order, and
 //!   verifies each router like any other enclave before it uses it. A
 //!   wrong list can only cause attempts that fail, within the fixed time
-//!   that discovery may take.
+//!   that discovery may take, except that the list source is trusted not
+//!   to name a host that relays another router's attestation (see
+//!   [`RouterListFetcher`]).
+//! - **Fetchers are not trusted.** A document that an
+//!   [`AttestationFetcher`] returns, such as an [`AttestationRelay`], is
+//!   verified as a directly fetched one is.
 //!
 //! # Features
 //!
 //! | feature | what it adds |
 //! |---|---|
-//! | `openai` (default) | the OpenAI clients over `async_openai`, with its chat completion, embedding, audio and responses APIs; the relaxed chat helper; the `sse` and `multimodal` modules |
+//! | `openai` (default) | the OpenAI client over `async_openai`, with its chat completion, embedding, audio and responses APIs; the relaxed chat helper; the `sse` and `multimodal` modules |
 //!
 //! The other API families of `async_openai` are opt-in. Each feature below
-//! implies `openai` and adds the family's calls to the OpenAI clients,
+//! implies `openai` and adds the family's calls to the OpenAI client,
 //! where they go through the attested HTTP client like every other call.
 //! Whether an enclave serves a family is up to the enclave.
 //!
@@ -156,14 +167,17 @@
 // lints (see clippy.toml). Overflow in a test is a test failure.
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
 
+mod attested_client;
 mod enclave_client;
 mod error;
+mod fetchers;
 mod internal;
 #[cfg(feature = "openai")]
 mod openai;
 mod options;
 mod request;
 mod router_client;
+mod trust;
 
 #[cfg(feature = "openai")]
 pub mod multimodal;
@@ -188,22 +202,23 @@ pub use async_openai::types::chat;
 #[cfg(feature = "openai")]
 pub use async_openai::types::embeddings;
 
+pub use attested_client::AttestedHttpClient;
 pub use enclave_client::{EnclaveHttpClient, EnclaveHttpClientBuilder};
 pub use error::{Error, ErrorKind};
+pub use fetchers::{
+    AttestationFetcher, AttestationRelay, FetchFuture, RouterListFetcher, RouterListRelay,
+};
 #[cfg(feature = "openai")]
 pub use openai::relaxed::{
     RelaxedChat, RelaxedChatRequestBuilder, RelaxedResponse, RelaxedStream, RelaxedStreamChunk,
     RelaxedToolCall,
 };
 #[cfg(feature = "openai")]
-pub use openai::{
-    Client, EnclaveOpenAIClient, EnclaveOpenAIClientBuilder, RouterOpenAIClient,
-    RouterOpenAIClientBuilder,
-};
-pub use options::TransportMode;
+pub use openai::{Client, OpenAIClient, OpenAIOptions};
+pub use options::Transport;
 pub use request::RequestBuilder;
 pub use router_client::{RouterHttpClient, RouterHttpClientBuilder};
-pub use tinfoil_verifier::Pin;
+pub use trust::Trust;
 
 // Compiles the examples of the repository's README as documentation tests,
 // so that they cannot drift from the API.

@@ -84,6 +84,32 @@ async fn document_through(
     .await
 }
 
+/// Fetches the attestation document at `url`, a relay's URL for one host
+/// and nonce, with the bounds of [`document`]. The relay URL follows the
+/// rules of a proxy URL, so it may be plaintext to a loopback host; a
+/// redirect still goes to `https://` URLs only.
+pub(crate) async fn relayed(url: Url) -> Result<Vec<u8>, Error> {
+    let client = relay_client_for(&url)?;
+    get_bounded(
+        &client,
+        url,
+        MAX_DOCUMENT_BYTES,
+        FETCH_TIMEOUT,
+        "attestation document",
+    )
+    .await
+}
+
+/// The client of [`plain_client_for`] for a relay URL: the first request
+/// may be plaintext to a loopback host, which the relay URL's rules allow,
+/// and every redirect must lead to an `https://` URL.
+pub(crate) fn relay_client_for(url: &Url) -> Result<Client, Error> {
+    let builder = client_builder(true)?.https_only(url.scheme() == "https");
+    route(builder, never_proxied(url), None)
+        .build()
+        .map_err(|error| Error::wrap(ErrorKind::Configuration, error))
+}
+
 /// A `reqwest` client for material that is not attested yet: documents
 /// and the router list.
 ///

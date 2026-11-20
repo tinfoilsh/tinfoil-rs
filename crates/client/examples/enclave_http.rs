@@ -10,17 +10,26 @@
 
 use std::time::Duration;
 
-use tinfoil::{EnclaveHttpClient, ErrorKind, Pin, TransportMode};
+use tinfoil::{EnclaveHttpClient, ErrorKind, Transport, Trust};
 
 const ENCLAVE: &str = "inference.tinfoil.sh";
 const REPO: &str = "tinfoilsh/confidential-model-router";
+
+/// The router's code is published under the same name as a repository and
+/// as a registry project; either collateral is accepted.
+fn trust() -> Trust {
+    Trust::EitherPin {
+        repo: REPO.to_owned(),
+        project: REPO.to_owned(),
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = api_key()?;
 
     // The enclave is verified before `connect` returns.
-    let client = EnclaveHttpClient::connect(ENCLAVE, Pin::repo(REPO).with_project(REPO)).await?;
+    let client = EnclaveHttpClient::connect(ENCLAVE, trust()).await?;
 
     let verified = client.current();
     println!("enclave:     {}", client.enclave());
@@ -47,9 +56,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("set TINFOIL_PROXY_URL to send a sealed request through a proxy");
         return Ok(());
     };
-    let proxied = EnclaveHttpClient::builder(ENCLAVE, Pin::repo(REPO).with_project(REPO))
-        .transport_mode(TransportMode::Ehbp)
-        .base_url(proxy_url)
+    let proxied = EnclaveHttpClient::builder(ENCLAVE, trust())
+        .transport(Transport::Ehbp {
+            proxy_url: Some(proxy_url),
+        })
         .timeout(Duration::from_secs(60))
         .connect()
         .await?;

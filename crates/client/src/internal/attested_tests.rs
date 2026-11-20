@@ -19,7 +19,6 @@ use crate::internal::transport::{Failure, Mode, RoundTrip, Transport};
 use crate::internal::{BoxFuture, Clock};
 use crate::options::{Secret, TransportMode};
 use crate::request::{Execute, RequestBuilder, into_url};
-use crate::verifier::Pin;
 
 const HOUR: Duration = Duration::from_secs(3600);
 const ENCLAVE: &str = "enclave.example.com";
@@ -314,13 +313,8 @@ async fn the_client_reports_its_route_and_its_last_verification() {
         })
         .await;
         assert_eq!(f.client.enclave(), ENCLAVE);
-        assert_eq!(f.client.pin(), &Pin::none());
         assert_eq!(f.client.transport_mode(), TransportMode::Tls);
         assert_eq!(f.client.base_url().as_str(), "https://enclave.example.com/");
-        assert_eq!(
-            f.client.openai_url().as_str(),
-            "https://enclave.example.com/v1/"
-        );
         assert_eq!(f.client.current().name, "first");
         assert_eq!(f.client.ensure_verified().await.unwrap().name, "first");
         assert_eq!(f.script.calls(), 1);
@@ -331,26 +325,7 @@ async fn the_client_reports_its_route_and_its_last_verification() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_base_url_replaces_the_enclaves_origin_for_both_urls() {
-    unstuck(async {
-        let base = Url::parse("https://enclave.example.com/prefix/").unwrap();
-        let f = fake(
-            vec![ready("first")],
-            Settings {
-                base_url: Some(base.clone()),
-                ..settings()
-            },
-            |_| Answer::Text("ok"),
-        )
-        .await;
-        assert_eq!(f.client.base_url(), &base);
-        assert_eq!(f.client.openai_url(), &base);
-    })
-    .await
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_pinned_client_takes_no_base_url_on_another_origin() {
+async fn a_pinned_client_takes_no_proxy() {
     unstuck(async {
         let script = Script::new([ready("first")]);
         let mode = Scripted {
@@ -372,7 +347,10 @@ async fn a_pinned_client_takes_no_base_url_on_another_origin() {
         .err()
         .expect("a proxy needs sealed bodies");
         assert_eq!(error.kind(), ErrorKind::Configuration);
-        assert!(error.to_string().contains("TransportMode::Ehbp"), "{error}");
+        assert!(
+            error.to_string().contains("requires Transport::Ehbp"),
+            "{error}"
+        );
 
         AttestedClient::new(
             transport,
@@ -1502,9 +1480,9 @@ async fn an_error_that_no_client_made_carries_no_client_error() {
 
 mod options {
     use super::*;
-    use crate::EnclaveHttpClient;
     use crate::internal::system_clock;
-    use crate::verifier::{Pin, Verifier};
+    use crate::verifier::{ArtifactTrust, Pin, Policy, Verifier};
+    use crate::{EnclaveHttpClient, Trust};
 
     fn refusing_fetch() -> Fetch {
         Arc::new(|_, _| Box::pin(async { panic!("the checks do no I/O") }))
@@ -1520,33 +1498,21 @@ mod options {
     }
 
     #[test]
-    fn the_builder_and_the_enclave_refuse_the_same_hosts_pins_and_verifiers_alike() {
-        let authorizing = || {
-            let verifier = Verifier::builder().config_authorizer(|_| Ok(())).build();
-            Arc::new(verifier.expect("a verifier"))
-        };
-        type Case = (&'static str, Pin, Option<Arc<Verifier>>);
-        let cases: Vec<Case> = vec![
-            ("https://enclave.example.com", Pin::repo("owner/name"), None),
-            ("enclave.example.com/v1", Pin::repo("owner/name"), None),
-            ("user@enclave.example.com", Pin::repo("owner/name"), None),
-            ("127.1", Pin::repo("owner/name"), None),
-            ("enclave.example.com", Pin::repo(""), None),
-            ("enclave.example.com", Pin::repo("not a reference"), None),
-            (
-                "enclave.example.com",
-                Pin::repo("owner/name"),
-                Some(authorizing()),
-            ),
+    fn the_builder_and_the_enclave_refuse_the_same_hosts_and_pins_alike() {
+        let cases = [
+            ("https://enclave.example.com", "owner/name"),
+            ("enclave.example.com/v1", "owner/name"),
+            ("user@enclave.example.com", "owner/name"),
+            ("127.1", "owner/name"),
+            ("enclave.example.com", "not a reference"),
         ];
-        for (host, pin, verifier) in cases {
-            let mut builder = EnclaveHttpClient::builder(host, pin.clone());
-            if let Some(verifier) = &verifier {
-                builder = builder.verifier(Arc::clone(verifier));
-            }
-            let from_builder = builder.prepare().err().expect(host);
+        for (host, repo) in cases {
+            let from_builder = EnclaveHttpClient::builder(host, Trust::repo(repo))
+                .prepare()
+                .err()
+                .expect(host);
             let from_enclave = Enclave::with_fetch(
-                config(host, pin, verifier),
+                config(host, Pin::repo(repo), None),
                 system_clock(),
                 refusing_fetch(),
             )
@@ -1558,24 +1524,14 @@ mod options {
     }
 
     #[test]
-    fn the_verifier_that_was_checked_is_the_one_that_the_enclave_verifies_with() {
-        // The default verifier is built once, by the check.
-        let (checked, _) =
-            EnclaveHttpClient::builder("enclave.example.com", Pin::repo("owner/name"))
+    fn the_verifier_that_was_built_is_the_one_that_the_enclave_verifies_with() {
+        let (checked, _, _) =
+            EnclaveHttpClient::builder("enclave.example.com", Trust::repo("owner/name"))
                 .prepare()
                 .unwrap();
         let built = Arc::clone(checked.verifier());
         let enclave = Enclave::from_checked(checked, system_clock(), refusing_fetch());
         assert!(Arc::ptr_eq(enclave.verifier().unwrap(), &built));
-
-        // A configured verifier is used as it is.
-        let configured = Arc::new(Verifier::new());
-        let (checked, _) = EnclaveHttpClient::builder("enclave.example.com", Pin::repo("org/repo"))
-            .verifier(Arc::clone(&configured))
-            .prepare()
-            .unwrap();
-        let enclave = Enclave::from_checked(checked, system_clock(), refusing_fetch());
-        assert!(Arc::ptr_eq(enclave.verifier().unwrap(), &configured));
     }
 
     #[test]
@@ -1586,67 +1542,128 @@ mod options {
             error.to_string()
         };
         let builder = EnclaveHttpClient::builder;
-        // An empty host, before the base URL.
-        let message = refusal(builder("", Pin::repo("")).base_url("ftp://proxy.example/"));
-        assert!(message.contains("enclave host is required"), "{message}");
-        // The base URL, before a host that is no host.
-        let message = refusal(
-            builder("https://enclave.example.com", Pin::repo("")).base_url("ftp://proxy.example/"),
-        );
-        assert!(message.contains("invalid base URL"), "{message}");
-        // The other options, before a host that is no host.
+        let unkeyed = || Trust::SignedBy {
+            keys: Vec::new(),
+            project: None,
+        };
+        let proxy = |url: &str| crate::Transport::Ehbp {
+            proxy_url: Some(url.into()),
+        };
+        // An empty host, before the proxy URL.
         let message =
-            refusal(builder("https://enclave.example.com", Pin::repo("")).timeout(Duration::ZERO));
+            refusal(builder("", Trust::repo("")).transport(proxy("ftp://proxy.example/")));
+        assert!(message.contains("enclave host is required"), "{message}");
+        // The proxy URL, before a host that is no host.
+        let message = refusal(
+            builder("https://enclave.example.com", Trust::repo(""))
+                .transport(proxy("ftp://proxy.example/")),
+        );
+        assert!(message.contains("invalid proxy URL"), "{message}");
+        // The other options, before a host that is no host.
+        let message = refusal(
+            builder("https://enclave.example.com", Trust::repo("")).timeout(Duration::ZERO),
+        );
         assert!(message.contains("timeout is zero"), "{message}");
+        // The fields of the trust argument, before the verifier.
+        let message = refusal(builder("https://enclave.example.com", Trust::repo("")));
+        assert!(message.contains("requires a repository"), "{message}");
+        // The verifier, before a host that is no host.
+        let message = refusal(builder("https://enclave.example.com", unkeyed()));
+        assert!(
+            message.contains("signing keys must not be empty"),
+            "{message}"
+        );
+        let message = refusal(
+            builder("https://enclave.example.com", Trust::repo("owner/name")).policy(Policy {
+                artifacts: ArtifactTrust::Embedded {
+                    runtime: None,
+                    platform: None,
+                    freshness_keys: None,
+                },
+                ..Policy::default()
+            }),
+        );
+        assert!(message.contains("runtime or a platform"), "{message}");
         // The host, before the pin.
-        let message = refusal(builder("https://enclave.example.com", Pin::repo("")));
+        let message = refusal(builder(
+            "https://enclave.example.com",
+            Trust::repo("not a reference"),
+        ));
         assert!(message.contains("host with an optional port"), "{message}");
-        // The pin, before the proxy rule of the pinned mode.
+        // The pin, before a proxy on the enclave's own origin.
         let message = refusal(
-            builder("enclave.example.com", Pin::repo("")).base_url("https://proxy.example/"),
+            builder(
+                "enclave.example.com",
+                Trust::SignedBy {
+                    keys: signing_keys(),
+                    project: Some(String::new()),
+                },
+            )
+            .transport(proxy("https://enclave.example.com/")),
         );
-        assert!(message.contains("repository pin is empty"), "{message}");
-        let message = refusal(
-            builder("enclave.example.com", Pin::repo("owner/name"))
-                .base_url("https://proxy.example/"),
-        );
-        assert!(message.contains("TransportMode::Ehbp"), "{message}");
+        assert!(message.contains("project pin is empty"), "{message}");
+        for own_origin in [
+            "https://enclave.example.com/",
+            "https://ENCLAVE.example.com:443/proxy/",
+        ] {
+            let message = refusal(
+                builder("enclave.example.com", Trust::repo("owner/name"))
+                    .transport(proxy(own_origin)),
+            );
+            assert!(message.contains("enclave's own origin"), "{message}");
+        }
+    }
+
+    /// Tinfoil's public config signing key.
+    fn signing_keys() -> Vec<crate::verifier::PublicKey> {
+        let pem = include_str!("../../../verifier/src/trust/data/tinfoil_signing_key.pem");
+        vec![crate::verifier::PublicKey::from_pem(pem).unwrap()]
     }
 
     #[test]
     fn options_that_pass_every_check_yield_the_clients_settings() {
-        let (checked, settings) =
-            EnclaveHttpClient::builder("enclave.example.com:8443", Pin::repo("owner/name@v1.2.3"))
-                .transport_mode(TransportMode::Ehbp)
-                .base_url("https://proxy.example.com/tinfoil")
-                .user_cache_secret("opaque")
-                .timeout(Duration::from_secs(1))
-                .prepare()
-                .unwrap();
+        let (checked, settings, _) = EnclaveHttpClient::builder(
+            "enclave.example.com:8443",
+            Trust::repo("owner/name@v1.2.3"),
+        )
+        .transport(crate::Transport::Ehbp {
+            proxy_url: Some("https://proxy.example.com/tinfoil".into()),
+        })
+        .timeout(Duration::from_secs(1))
+        .prepare()
+        .unwrap();
         assert_eq!(checked.host(), "enclave.example.com:8443");
         assert_eq!(settings.mode, TransportMode::Ehbp);
         assert_eq!(
             settings.base_url.as_ref().map(Url::as_str),
             Some("https://proxy.example.com/tinfoil/")
         );
-        assert_eq!(settings.secret.as_ref().map(Secret::expose), Some("opaque"));
+        // An enclave client adds no cache secret.
+        assert!(settings.secret.is_none());
         assert_eq!(settings.timeout, Some(Duration::from_secs(1)));
 
-        let (_, settings) =
-            EnclaveHttpClient::builder("enclave.example.com", Pin::repo("org/repo"))
+        let (_, settings, _) =
+            EnclaveHttpClient::builder("enclave.example.com", Trust::repo("org/repo"))
                 .prepare()
                 .unwrap();
         assert_eq!(settings.mode, TransportMode::Tls);
         assert!(settings.base_url.is_none() && settings.secret.is_none());
         assert!(settings.timeout.is_none());
 
-        for accepted in [
-            EnclaveHttpClient::builder("enclave.example.com", Pin::repo("owner/name"))
-                .base_url("https://enclave.example.com/api/"),
-            EnclaveHttpClient::builder("enclave.example.com", Pin::repo("owner/name"))
-                .transport_mode(TransportMode::Ehbp)
-                .base_url("http://localhost:8080/"),
-        ] {
+        for accepted in
+            [
+                EnclaveHttpClient::builder("enclave.example.com", Trust::repo("owner/name"))
+                    .transport(crate::Transport::Ehbp { proxy_url: None }),
+                EnclaveHttpClient::builder("enclave.example.com", Trust::repo("owner/name"))
+                    .transport(crate::Transport::Ehbp {
+                        proxy_url: Some("http://localhost:8080/".into()),
+                    }),
+                EnclaveHttpClient::builder("enclave.example.com", Trust::repo("owner/name"))
+                    .transport(crate::Transport::Ehbp {
+                        proxy_url: Some("https://enclave.example.com:8443/".into()),
+                    }),
+            ]
+        {
             accepted.prepare().expect("accepted");
         }
     }
@@ -1654,10 +1671,12 @@ mod options {
     // Connecting, with the document fetch replaced.
 
     fn checked() -> (crate::internal::enclave::Checked, Settings) {
-        EnclaveHttpClient::builder("enclave.example.com", Pin::repo("owner/name"))
-            .timeout(Duration::from_secs(5))
-            .prepare()
-            .unwrap()
+        let (checked, settings, _) =
+            EnclaveHttpClient::builder("enclave.example.com", Trust::repo("owner/name"))
+                .timeout(Duration::from_secs(5))
+                .prepare()
+                .unwrap();
+        (checked, settings)
     }
 
     #[tokio::test(start_paused = true)]
@@ -1795,25 +1814,6 @@ mod over_tls {
         // One verification, one connection.
         assert_eq!(script.calls(), 1);
         assert_eq!(server.accepted(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_base_url_on_the_enclaves_origin_is_where_requests_go() {
-        let server = serve().await;
-        let base = Url::parse(&format!("https://127.0.0.1:{}/api/", server.port)).unwrap();
-        let (_, client) = client(
-            &server,
-            vec![evidence("a", &LEAF_A)],
-            Settings {
-                base_url: Some(base),
-                ..settings()
-            },
-        )
-        .await;
-        let response = soon(get(&client, &url(&client, "v1/models")).send())
-            .await
-            .unwrap();
-        assert_eq!(soon(response.text()).await.unwrap(), "/api/v1/models");
     }
 
     #[tokio::test]

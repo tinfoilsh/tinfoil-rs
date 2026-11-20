@@ -64,7 +64,7 @@ impl fmt::Debug for ResponseFuture {
 /// then goes out under the keys of the current verification.
 ///
 /// The `Host` header belongs to the client, and so do the headers of the
-/// sealed-body protocol in [`TransportMode::Ehbp`](crate::TransportMode::Ehbp);
+/// sealed-body protocol in [`Transport::Ehbp`](crate::Transport::Ehbp);
 /// a request that sets one of them is refused with a configuration error.
 ///
 /// Its `Debug` output names no header value, because a header can hold a
@@ -108,7 +108,7 @@ impl RequestBuilder {
     }
 
     /// Sets `Authorization: Bearer <token>`. In
-    /// [`TransportMode::Ehbp`](crate::TransportMode::Ehbp) a proxy sees this
+    /// [`Transport::Ehbp`](crate::Transport::Ehbp) a proxy sees this
     /// header.
     pub fn bearer_auth(self, token: impl fmt::Display) -> Self {
         self.map(|inner| inner.bearer_auth(token))
@@ -185,8 +185,8 @@ pub(crate) fn into_url(url: impl reqwest::IntoUrl) -> Result<reqwest::Url, Error
         .map_err(|error| Error::wrap(ErrorKind::Configuration, error.without_url()))
 }
 
-/// The request methods of an HTTP client whose `inner` field is an `Arc` of
-/// a type that implements [`Execute`].
+/// The request methods of an HTTP client whose `attested()` method returns
+/// the `Arc` of the attested client that it sends through.
 macro_rules! http_request_methods {
     ($client:ident) => {
         impl $client {
@@ -237,7 +237,8 @@ macro_rules! http_request_methods {
                 method: reqwest::Method,
                 url: impl reqwest::IntoUrl,
             ) -> $crate::RequestBuilder {
-                let executor: std::sync::Arc<dyn $crate::request::Execute> = self.inner.clone();
+                let executor: std::sync::Arc<dyn $crate::request::Execute> =
+                    self.attested().clone();
                 $crate::RequestBuilder::new(executor, method, $crate::request::into_url(url))
             }
 
@@ -251,7 +252,7 @@ macro_rules! http_request_methods {
             ///    refused, so that its headers are never disclosed to
             ///    another host. A request that the transport mode cannot
             ///    protect is refused too: plaintext `http://` in
-            ///    [`TransportMode::Tls`](crate::TransportMode::Tls); a
+            ///    [`Transport::Tls`](crate::Transport::Tls); a
             ///    protocol upgrade or `CONNECT` wherever bodies are sealed.
             ///    A `Host` header, or a header that the sealed-body protocol
             ///    owns, is refused. These are configuration errors, and they
@@ -305,7 +306,7 @@ macro_rules! http_request_methods {
                 &self,
                 request: reqwest::Request,
             ) -> Result<reqwest::Response, $crate::Error> {
-                $crate::request::Execute::execute(&*self.inner, request).await
+                $crate::request::Execute::execute(&**self.attested(), request).await
             }
         }
     };

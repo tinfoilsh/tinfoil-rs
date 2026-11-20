@@ -23,10 +23,11 @@ use crate::verification::{
 };
 use crate::verifier::freshness_expiration;
 use crate::{
-    CRYPTO_MATERIAL_ID_HPKE, CRYPTO_MATERIAL_ID_TLS, ConfigEndorsement, CryptoMaterialItem,
-    EmbeddedConfig, EmbeddedReferences, KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_SPKI_V1_FORMAT,
-    KEY_X25519_HPKE_V1_FORMAT, PUBLIC_REGISTRY_ID, Pin, PublicKey, RuntimeReference, Verifier,
-    crypto_material_data, parse_reference,
+    ArtifactTrust, CRYPTO_MATERIAL_ID_HPKE, CRYPTO_MATERIAL_ID_TLS, ConfigAuthorizer,
+    ConfigEndorsement, ConfigTrust, CryptoMaterialItem, EmbeddedConfig,
+    KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_SPKI_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT,
+    PUBLIC_REGISTRY_ID, Pin, Policy, PublicKey, RuntimeReference, Verifier, crypto_material_data,
+    parse_reference,
 };
 
 const SEVEN_DAYS: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -88,21 +89,88 @@ impl Inputs {
         }
     }
 
-    fn all(&self) -> EmbeddedReferences {
-        EmbeddedReferences {
-            config: Some(self.named_config()),
-            runtime: Some(self.runtime.clone()),
-            platform: Some(self.platform.clone()),
-        }
+    /// The named config, the runtime and the platform, all embedded.
+    fn all(&self) -> Options {
+        (ConfigTrust::Embedded(self.named_config()), self.artifacts())
     }
 
-    fn artifacts(&self) -> EmbeddedReferences {
-        EmbeddedReferences {
-            config: None,
-            runtime: Some(self.runtime.clone()),
-            platform: Some(self.platform.clone()),
-        }
+    /// A policy that embeds the runtime and the platform.
+    fn artifacts(&self) -> Policy {
+        embedded_artifacts(Some(&self.runtime), Some(&self.platform), None)
     }
+}
+
+/// The two arguments of [`Verifier::new`].
+type Options = (ConfigTrust, Policy);
+
+/// Builds the verifier of a pair of arguments.
+trait Build {
+    fn build(self) -> Result<Verifier, Error>;
+}
+
+impl Build for Options {
+    fn build(self) -> Result<Verifier, Error> {
+        Verifier::new(self.0, self.1)
+    }
+}
+
+fn defaults() -> Options {
+    Options::default()
+}
+
+fn config(config: ConfigTrust) -> Options {
+    (config, Policy::default())
+}
+
+fn policy(policy: Policy) -> Options {
+    (ConfigTrust::default(), policy)
+}
+
+fn config_keys(keys: Vec<PublicKey>) -> Options {
+    config(ConfigTrust::SigningKeys(keys))
+}
+
+fn registries(ids: Vec<String>) -> Options {
+    config(ConfigTrust::Registries(ids))
+}
+
+fn authorizer(
+    authorize: impl Fn(&ConfigEndorsement) -> Result<(), BoxError> + Send + Sync + 'static,
+) -> Options {
+    config(ConfigTrust::Authorizer(ConfigAuthorizer::new(authorize)))
+}
+
+/// Endorsed artifacts whose freshness these keys approve.
+fn freshness_keys(keys: Vec<PublicKey>) -> Options {
+    policy(Policy {
+        artifacts: ArtifactTrust::Endorsed {
+            freshness_keys: Some(keys),
+        },
+        ..Policy::default()
+    })
+}
+
+/// A policy that embeds the artifacts given.
+fn embedded_artifacts(
+    runtime: Option<&[u8]>,
+    platform: Option<&[u8]>,
+    freshness_keys: Option<Vec<PublicKey>>,
+) -> Policy {
+    Policy {
+        artifacts: ArtifactTrust::Embedded {
+            runtime: runtime.map(<[u8]>::to_vec),
+            platform: platform.map(<[u8]>::to_vec),
+            freshness_keys,
+        },
+        ..Policy::default()
+    }
+}
+
+fn max_age(age: Duration) -> Options {
+    policy(Policy {
+        freshness_max_age: age,
+        ..Policy::default()
+    })
 }
 
 fn signing_keys() -> Vec<PublicKey> {
@@ -124,7 +192,7 @@ fn usage<T: fmt::Debug>(result: Result<T, Error>) -> String {
 
 #[test]
 fn the_default_verifier_loads_the_embedded_trust() {
-    for verifier in [Verifier::new(), Verifier::default()] {
+    for verifier in [defaults().build().unwrap(), Verifier::default()] {
         assert!(
             verifier.trust.is_ok(),
             "{:?}",
@@ -132,10 +200,7 @@ fn the_default_verifier_loads_the_embedded_trust() {
         );
         assert_eq!(verifier.freshness_max_age(), SEVEN_DAYS);
         assert_eq!(verifier.pinned_registers(), None);
-        assert!(!verifier.caller_authorizes_config());
     }
-    let built = Verifier::builder().build().unwrap();
-    assert_eq!(built.freshness_max_age(), SEVEN_DAYS);
 }
 
 #[test]
@@ -143,44 +208,30 @@ fn a_verifier_is_shared_between_threads() {
     fn assert_send_sync<T: Send + Sync + 'static>() {}
     assert_send_sync::<Verifier>();
     assert_send_sync::<Verification>();
-    assert_send_sync::<crate::VerifierBuilder>();
+    assert_send_sync::<ConfigTrust>();
+    assert_send_sync::<Policy>();
 }
 
 #[test]
 fn a_zero_freshness_bound_keeps_the_default() {
     // An unset policy value must not disable the bound.
-    let verifier = Verifier::builder()
-        .freshness_max_age(Duration::ZERO)
-        .build()
-        .unwrap();
+    let verifier = max_age(Duration::ZERO).build().unwrap();
     assert_eq!(verifier.freshness_max_age(), SEVEN_DAYS);
     let day = Duration::from_secs(24 * 60 * 60);
-    let verifier = Verifier::builder().freshness_max_age(day).build().unwrap();
-    assert_eq!(verifier.freshness_max_age(), day);
-    let verifier = Verifier::builder()
-        .freshness_max_age(day)
-        .freshness_max_age(Duration::ZERO)
-        .build()
-        .unwrap();
+    let verifier = max_age(day).build().unwrap();
     assert_eq!(verifier.freshness_max_age(), day);
     let nanosecond = Duration::from_nanos(1);
-    let verifier = Verifier::builder()
-        .freshness_max_age(nanosecond)
-        .build()
-        .unwrap();
+    let verifier = max_age(nanosecond).build().unwrap();
     assert_eq!(verifier.freshness_max_age(), nanosecond);
 }
 
 #[test]
 fn a_freshness_bound_beyond_292_years_is_a_usage_error() {
     let longest = Duration::from_nanos(u64::try_from(i64::MAX).unwrap());
-    let verifier = Verifier::builder()
-        .freshness_max_age(longest)
-        .build()
-        .unwrap();
+    let verifier = max_age(longest).build().unwrap();
     assert_eq!(verifier.freshness_max_age(), longest);
     for age in [longest + Duration::from_nanos(1), Duration::MAX] {
-        let message = usage(Verifier::builder().freshness_max_age(age).build());
+        let message = usage(max_age(age).build());
         assert!(message.contains("out of range"), "{message}");
     }
 }
@@ -194,65 +245,45 @@ fn pinned_registers_are_read_back() {
         rtmr2: None,
         rtmr3: Some(register(0xab)),
     };
-    let verifier = Verifier::builder()
-        .pinned_registers(pins.clone())
-        .build()
-        .unwrap();
+    let verifier = policy(Policy {
+        pinned_registers: Some(pins.clone()),
+        ..Policy::default()
+    })
+    .build()
+    .unwrap();
     assert_eq!(verifier.pinned_registers(), Some(&pins));
-    // The last pins win.
-    let launch = Expected::SevSnp {
-        launch: Some(register(1)),
-    };
-    let verifier = Verifier::builder()
-        .pinned_registers(pins)
-        .pinned_registers(launch.clone())
-        .build()
-        .unwrap();
-    assert_eq!(verifier.pinned_registers(), Some(&launch));
 }
 
 #[test]
 fn key_and_registry_options_refuse_empty_and_malformed_values() {
-    let cases: Vec<(crate::VerifierBuilder, &str)> = vec![
+    let cases: Vec<(Options, &str)> = vec![
         (
-            Verifier::builder().config_signing_keys(Vec::new()),
+            config_keys(Vec::new()),
             "config signing keys must not be empty",
         ),
         (
-            Verifier::builder().freshness_signing_keys(Vec::new()),
+            freshness_keys(Vec::new()),
             "freshness signing keys must not be empty",
         ),
+        (registries(Vec::new()), "must not be empty"),
+        (registries(vec![String::new()]), "canonical registry URI"),
         (
-            Verifier::builder().config_registry_ids(Vec::new()),
-            "must not be empty",
-        ),
-        (
-            Verifier::builder().config_registry_ids(vec![String::new()]),
+            registries(vec![PRIVATE_REGISTRY.to_uppercase()]),
             "canonical registry URI",
         ),
         (
-            Verifier::builder().config_registry_ids(vec![PRIVATE_REGISTRY.to_uppercase()]),
-            "canonical registry URI",
-        ),
-        (
-            Verifier::builder().config_registry_ids(vec![
+            registries(vec![
                 PRIVATE_REGISTRY.to_owned(),
                 PRIVATE_REGISTRY.to_owned(),
             ]),
             "duplicate config registry ID",
         ),
         (
-            Verifier::builder()
-                .config_registry_ids(vec![PRIVATE_REGISTRY.to_owned()])
-                .config_registry_ids(vec![PUBLIC_REGISTRY_ID.to_owned()]),
-            "must be supplied once",
-        ),
-        (
-            Verifier::builder().config_signing_keys([signing_keys(), signing_keys()].concat()),
+            config_keys([signing_keys(), signing_keys()].concat()),
             "duplicate signing key",
         ),
         (
-            Verifier::builder().freshness_signing_keys([signing_keys(), signing_keys()].concat()),
+            freshness_keys([signing_keys(), signing_keys()].concat()),
             "duplicate signing key",
         ),
     ];
@@ -261,10 +292,7 @@ fn key_and_registry_options_refuse_empty_and_malformed_values() {
         assert!(message.contains(want), "{message}: want {want}");
     }
     let both = vec![PUBLIC_REGISTRY_ID.to_owned(), PRIVATE_REGISTRY.to_owned()];
-    Verifier::builder()
-        .config_registry_ids(both)
-        .build()
-        .unwrap();
+    registries(both).build().unwrap();
 }
 
 #[test]
@@ -280,24 +308,10 @@ fn only_ecdsa_p256_keys_sign_approvals() {
     };
     let p256 = PublicKey::from_spki_der(&spki(crate::trust::INTEL_SGX_ROOT_CA_PEM)).unwrap();
     let rsa = PublicKey::from_spki_der(&spki(crate::trust::AMD_GENOA_CERT_CHAIN_PEM)).unwrap();
-    Verifier::builder()
-        .freshness_signing_keys(vec![p256.clone()])
-        .build()
-        .unwrap();
-    Verifier::builder()
-        .config_signing_keys(vec![p256])
-        .build()
-        .unwrap();
-    usage(
-        Verifier::builder()
-            .config_signing_keys(vec![rsa.clone()])
-            .build(),
-    );
-    usage(
-        Verifier::builder()
-            .freshness_signing_keys(vec![rsa])
-            .build(),
-    );
+    freshness_keys(vec![p256.clone()]).build().unwrap();
+    config_keys(vec![p256]).build().unwrap();
+    usage(config_keys(vec![rsa.clone()]).build());
+    usage(freshness_keys(vec![rsa]).build());
 }
 
 #[test]
@@ -319,152 +333,92 @@ fn a_public_key_parses_from_pem_and_from_der() {
 }
 
 #[test]
-fn options_that_select_conflicting_trust_are_refused() {
+fn embedded_artifacts_need_an_artifact_and_leave_one_for_freshness_keys() {
     let inputs = Inputs::new();
-    let registry = || vec![PRIVATE_REGISTRY.to_owned()];
-    let cases: Vec<(crate::VerifierBuilder, &str)> = vec![
+    let refused = [
         (
-            Verifier::builder()
-                .embedded_references(inputs.all())
-                .config_signing_keys(signing_keys()),
-            "embedded config and config signing keys select conflicting trust sources",
+            embedded_artifacts(None, None, None),
+            "embedded artifacts must contain a runtime or a platform",
         ),
         (
-            Verifier::builder()
-                .config_signing_keys(signing_keys())
-                .embedded_references(inputs.all()),
-            "embedded config and config signing keys select conflicting trust sources",
-        ),
-        (
-            Verifier::builder()
-                .config_authorizer(accept)
-                .embedded_references(inputs.all()),
-            "config authorizer conflicts with embedded config or config signing keys",
-        ),
-        (
-            Verifier::builder()
-                .embedded_references(inputs.all())
-                .config_authorizer(accept),
-            "config authorizer conflicts with embedded config or config signing keys",
-        ),
-        (
-            Verifier::builder()
-                .config_authorizer(accept)
-                .config_signing_keys(signing_keys()),
-            "config authorizer conflicts with embedded config or config signing keys",
-        ),
-        (
-            Verifier::builder()
-                .config_signing_keys(signing_keys())
-                .config_authorizer(accept),
-            "config authorizer conflicts with embedded config or config signing keys",
-        ),
-        (
-            Verifier::builder()
-                .config_registry_ids(registry())
-                .embedded_references(inputs.all()),
-            "config authority pins require endorsement verification",
-        ),
-        (
-            Verifier::builder()
-                .config_registry_ids(registry())
-                .config_authorizer(accept),
-            "config authority pins require endorsement verification",
-        ),
-        (
-            Verifier::builder()
-                .config_registry_ids(registry())
-                .config_signing_keys(signing_keys()),
-            "config registry ID policy requires Tinfoil registry root verification",
-        ),
-        (
-            Verifier::builder()
-                .embedded_references(inputs.all())
-                .freshness_signing_keys(signing_keys()),
+            embedded_artifacts(
+                Some(&inputs.runtime),
+                Some(&inputs.platform),
+                Some(signing_keys()),
+            ),
             "freshness signing keys have no endorsed artifact to verify",
         ),
         (
-            Verifier::builder()
-                .freshness_signing_keys(signing_keys())
-                .embedded_references(inputs.artifacts()),
-            "freshness signing keys have no endorsed artifact to verify",
+            embedded_artifacts(Some(&inputs.runtime), None, Some(Vec::new())),
+            "freshness signing keys must not be empty",
         ),
     ];
-    for (builder, want) in cases {
-        assert_eq!(usage(builder.build()), format!("usage error: {want}"));
+    for (refused, want) in refused {
+        assert_eq!(
+            usage(policy(refused).build()),
+            format!("usage error: {want}")
+        );
     }
 
-    // Combinations that leave one source of trust for each component.
-    let runtime_only = EmbeddedReferences {
-        runtime: Some(inputs.runtime.clone()),
-        ..EmbeddedReferences::default()
-    };
+    // Each source of config trust goes with any artifact trust.
     let accepted = [
-        Verifier::builder()
-            .embedded_references(inputs.artifacts())
-            .config_signing_keys(signing_keys()),
-        Verifier::builder()
-            .embedded_references(inputs.artifacts())
-            .config_authorizer(accept),
-        Verifier::builder()
-            .embedded_references(inputs.artifacts())
-            .config_registry_ids(registry()),
-        Verifier::builder()
-            .embedded_references(runtime_only)
-            .freshness_signing_keys(signing_keys()),
-        Verifier::builder()
-            .config_signing_keys(signing_keys())
-            .freshness_signing_keys(signing_keys()),
+        (ConfigTrust::SigningKeys(signing_keys()), inputs.artifacts()),
+        (
+            ConfigTrust::Authorizer(ConfigAuthorizer::new(accept)),
+            inputs.artifacts(),
+        ),
+        (
+            ConfigTrust::Registries(vec![PRIVATE_REGISTRY.to_owned()]),
+            inputs.artifacts(),
+        ),
+        (
+            ConfigTrust::default(),
+            embedded_artifacts(Some(&inputs.runtime), None, Some(signing_keys())),
+        ),
+        (
+            ConfigTrust::SigningKeys(signing_keys()),
+            freshness_keys(signing_keys()).1,
+        ),
     ];
-    for builder in accepted {
-        builder.build().unwrap();
+    for options in accepted {
+        options.build().unwrap();
     }
 }
 
 #[test]
-fn the_first_invalid_option_is_the_one_reported() {
+fn the_policy_is_checked_before_the_config_trust() {
     let message = usage(
-        Verifier::builder()
-            .config_signing_keys(Vec::new())
-            .freshness_signing_keys(Vec::new())
-            .build(),
-    );
-    assert_eq!(
-        message,
-        "usage error: config signing keys must not be empty"
-    );
-    let message = usage(
-        Verifier::builder()
-            .freshness_signing_keys(Vec::new())
-            .config_signing_keys(Vec::new())
-            .embedded_references(EmbeddedReferences::default())
+        (
+            ConfigTrust::SigningKeys(Vec::new()),
+            freshness_keys(Vec::new()).1,
+        )
             .build(),
     );
     assert_eq!(
         message,
         "usage error: freshness signing keys must not be empty"
     );
-    // An invalid option is reported before a conflict between valid ones.
-    let inputs = Inputs::new();
     let message = usage(
-        Verifier::builder()
-            .embedded_references(inputs.all())
-            .config_signing_keys(signing_keys())
-            .config_registry_ids(Vec::new())
+        (
+            ConfigTrust::Registries(Vec::new()),
+            embedded_artifacts(None, None, None),
+        )
             .build(),
     );
-    assert!(message.contains("must not be empty"), "{message}");
+    assert!(message.contains("runtime or a platform"), "{message}");
 }
 
 #[test]
 fn embedded_references_are_checked_when_the_verifier_is_built() {
     let inputs = Inputs::new();
     let only = |config: Option<EmbeddedConfig>, runtime: Option<&[u8]>, platform: Option<&[u8]>| {
-        EmbeddedReferences {
-            config,
-            runtime: runtime.map(<[u8]>::to_vec),
-            platform: platform.map(<[u8]>::to_vec),
-        }
+        let config = config.map_or_else(ConfigTrust::default, ConfigTrust::Embedded);
+        let policy = if runtime.is_some() || platform.is_some() {
+            embedded_artifacts(runtime, platform, None)
+        } else {
+            Policy::default()
+        };
+        (config, policy)
     };
     let bytes = |bytes: &[u8], name: Option<&str>| {
         Some(EmbeddedConfig::Bytes {
@@ -485,11 +439,7 @@ fn embedded_references_are_checked_when_the_verifier_is_built() {
     let short_version = String::from_utf8(inputs.runtime.clone())
         .unwrap()
         .replace("v0.15.0", "v0.15");
-    let refused: Vec<(EmbeddedReferences, &str)> = vec![
-        (
-            EmbeddedReferences::default(),
-            "must contain at least one component",
-        ),
+    let refused: Vec<(Options, &str)> = vec![
         (only(bytes(b"", None), None, None), "outside allowed bounds"),
         (
             only(bytes(&vec![b'a'; (1 << 20) + 1], None), None, None),
@@ -586,13 +536,13 @@ fn embedded_references_are_checked_when_the_verifier_is_built() {
         ),
     ];
     for (references, want) in refused {
-        let message = usage(Verifier::builder().embedded_references(references).build());
+        let message = usage(references.build());
         assert!(message.contains(want), "{message}: want {want}");
     }
 
     let accepted = [
         inputs.all(),
-        inputs.artifacts(),
+        policy(inputs.artifacts()),
         only(bytes(&inputs.config, None), None, None),
         only(
             reference(&inputs.config_digest(), pinned.clone()),
@@ -608,22 +558,8 @@ fn embedded_references_are_checked_when_the_verifier_is_built() {
         only(None, None, Some(&inputs.platform)),
     ];
     for references in accepted {
-        Verifier::builder()
-            .embedded_references(references)
-            .build()
-            .unwrap();
+        references.build().unwrap();
     }
-}
-
-#[test]
-fn the_last_embedded_references_replace_the_earlier_ones() {
-    let inputs = Inputs::new();
-    let verifier = Verifier::builder()
-        .embedded_references(inputs.all())
-        .embedded_references(inputs.artifacts())
-        .build()
-        .unwrap();
-    assert!(!verifier.caller_authorizes_config());
 }
 
 #[test]
@@ -631,60 +567,52 @@ fn a_project_pin_is_checked_without_a_document() {
     let inputs = Inputs::new();
     let digest = inputs.config_digest();
     let other_digest = "ab".repeat(32);
-    let embedded = || Verifier::builder().embedded_references(inputs.all());
+    let embedded = || inputs.all();
     let unnamed = || {
-        Verifier::builder().embedded_references(EmbeddedReferences {
-            config: Some(EmbeddedConfig::Bytes {
+        (
+            ConfigTrust::Embedded(EmbeddedConfig::Bytes {
                 bytes: inputs.config.clone(),
                 name: None,
             }),
-            ..inputs.artifacts()
-        })
+            inputs.artifacts(),
+        )
     };
     let reference = || {
-        Verifier::builder().embedded_references(EmbeddedReferences {
-            config: Some(EmbeddedConfig::Reference {
-                digest: digest.clone(),
-                runtime: inputs.runtime_reference(),
-                name: Some(CONFIG_NAME.to_owned()),
-            }),
-            ..EmbeddedReferences::default()
-        })
+        config(ConfigTrust::Embedded(EmbeddedConfig::Reference {
+            digest: digest.clone(),
+            runtime: inputs.runtime_reference(),
+            name: Some(CONFIG_NAME.to_owned()),
+        }))
     };
-    let authorizer = || Verifier::builder().config_authorizer(accept);
+    let authorizer = || authorizer(accept);
     let with_digest = format!("org/project@v1@sha256:{digest}");
     let digest_only = format!("org/project@sha256:{digest}");
     let wrong_digest = format!("org/project@sha256:{other_digest}");
-    let cases: Vec<(&str, crate::VerifierBuilder, &str, bool)> = vec![
-        (
-            "defaults with a pin",
-            Verifier::builder(),
-            "org/repo@v1",
-            true,
-        ),
+    let cases: Vec<(&str, Options, &str, bool)> = vec![
+        ("defaults with a pin", defaults(), "org/repo@v1", true),
         // v2 collateral accepts it, so the check waits for the document.
         (
             "defaults with a mixed-case pin",
-            Verifier::builder(),
+            defaults(),
             "Org/My_Repo",
             true,
         ),
-        ("defaults without a pin", Verifier::builder(), "", false),
+        ("defaults without a pin", defaults(), "", false),
         (
             "defaults with a malformed pin",
-            Verifier::builder(),
+            defaults(),
             "not a reference",
             false,
         ),
         (
             "defaults with two tags",
-            Verifier::builder(),
+            defaults(),
             "org/project@v1@v2",
             false,
         ),
         (
             "defaults with a bad digest",
-            Verifier::builder(),
+            defaults(),
             "org/project@sha256:bad",
             false,
         ),
@@ -794,7 +722,7 @@ fn a_project_pin_is_checked_without_a_document() {
     }
     // An empty pin is refused whatever the verifier; only `None` sets no
     // pin.
-    for builder in [Verifier::builder(), embedded(), authorizer()] {
+    for builder in [defaults(), embedded(), authorizer()] {
         let verifier = builder.build().unwrap();
         let message = usage(verifier.check_pin_verifiability(&Pin::repo("")));
         assert!(message.contains("repository pin is empty"), "{message}");
@@ -811,7 +739,7 @@ fn a_repository_pin_alone_is_refused_where_only_registry_collateral_is_verified(
     let project = Pin::project("org/project");
     let both = Pin::repo("Owner/My_Repo").with_project("org/project");
 
-    let defaults = Verifier::new();
+    let defaults = Verifier::default();
     for pin in [&repo, &project, &both] {
         defaults.check_pin_verifiability(pin).unwrap();
     }
@@ -826,25 +754,13 @@ fn a_repository_pin_alone_is_refused_where_only_registry_collateral_is_verified(
     }
 
     for (name, builder) in [
-        (
-            "embedded references",
-            Verifier::builder().embedded_references(inputs.all()),
-        ),
-        (
-            "embedded artifacts",
-            Verifier::builder().embedded_references(inputs.artifacts()),
-        ),
-        (
-            "config signing keys",
-            Verifier::builder().config_signing_keys(signing_keys()),
-        ),
-        (
-            "freshness signing keys",
-            Verifier::builder().freshness_signing_keys(signing_keys()),
-        ),
+        ("embedded references", inputs.all()),
+        ("embedded artifacts", policy(inputs.artifacts())),
+        ("config signing keys", config_keys(signing_keys())),
+        ("freshness signing keys", freshness_keys(signing_keys())),
         (
             "registry IDs",
-            Verifier::builder().config_registry_ids(vec![PRIVATE_REGISTRY.to_owned()]),
+            registries(vec![PRIVATE_REGISTRY.to_owned()]),
         ),
     ] {
         let verifier = builder.build().unwrap();
@@ -858,10 +774,7 @@ fn a_repository_pin_alone_is_refused_where_only_registry_collateral_is_verified(
     }
 
     // A config authorizer authenticates neither part.
-    let authorizer = Verifier::builder()
-        .config_authorizer(accept)
-        .build()
-        .unwrap();
+    let authorizer = authorizer(accept).build().unwrap();
     let message = usage(authorizer.check_pin_verifiability(&repo));
     assert!(message.contains(REGISTRY_ONLY), "{message}");
     usage(authorizer.check_pin_verifiability(&project));
@@ -943,38 +856,6 @@ fn the_collateral_of_the_document_selects_the_part_of_the_pin() {
         ] {
             usage(verify(name, &malformed));
         }
-    }
-}
-
-#[test]
-fn the_caller_authorizes_a_config_that_it_embeds_or_judges() {
-    let inputs = Inputs::new();
-    let cases = [
-        ("defaults", Verifier::builder(), false),
-        (
-            "embedded runtime and platform",
-            Verifier::builder().embedded_references(inputs.artifacts()),
-            false,
-        ),
-        (
-            "embedded config",
-            Verifier::builder().embedded_references(inputs.all()),
-            true,
-        ),
-        (
-            "config authorizer",
-            Verifier::builder().config_authorizer(accept),
-            true,
-        ),
-        (
-            "config signing keys",
-            Verifier::builder().config_signing_keys(signing_keys()),
-            false,
-        ),
-    ];
-    for (name, builder, want) in cases {
-        let verifier = builder.build().unwrap();
-        assert_eq!(verifier.caller_authorizes_config(), want, "{name}");
     }
 }
 
@@ -1160,15 +1041,15 @@ fn a_config_authorizer_never_chooses_the_kind_of_error() {
     let case = fixture.case("config-sev/authorizer-accept");
     let document = fixture.document(text(case, "doc")).unwrap();
     let embedded = fixture.verifier(case).unwrap().embedded;
-    let artifacts = |builder: crate::VerifierBuilder| {
-        let mut verifier = builder
-            .test_roots(
-                fixture.root(text(case, "sigstore")).as_deref(),
-                fixture.root(text(case, "amd")),
-                None,
-            )
-            .build()
-            .unwrap();
+    let artifacts = |(config, policy): Options| {
+        let mut verifier = Verifier::with_test_roots(
+            config,
+            policy,
+            fixture.root(text(case, "sigstore")).as_deref(),
+            fixture.root(text(case, "amd")),
+            None,
+        )
+        .unwrap();
         verifier.embedded = embedded.clone();
         verifier
     };
@@ -1184,10 +1065,9 @@ fn a_config_authorizer_never_chooses_the_kind_of_error() {
     // Whatever the authorizer returns, even one of this crate's own usage
     // errors, a refusal is a rejection at the provenance layer with the
     // authorizer's error as the cause of its cause.
-    let refuse_plainly = artifacts(
-        Verifier::builder()
-            .config_authorizer(|_| Err(Box::new(Refusal("config is not authorized")))),
-    );
+    let refuse_plainly = artifacts(authorizer(|_| {
+        Err(Box::new(Refusal("config is not authorized")))
+    }));
     let Err(Error::Verification(rejected)) = verify(&refuse_plainly) else {
         panic!("want a rejection");
     };
@@ -1202,10 +1082,9 @@ fn a_config_authorizer_never_chooses_the_kind_of_error() {
         Some(&Refusal("config is not authorized"))
     );
 
-    let refuse_as_usage = artifacts(
-        Verifier::builder()
-            .config_authorizer(|_| Err(Box::new(parse_reference("not a reference").unwrap_err()))),
-    );
+    let refuse_as_usage = artifacts(authorizer(|_| {
+        Err(Box::new(parse_reference("not a reference").unwrap_err()))
+    }));
     let Err(Error::Verification(rejected)) = verify(&refuse_as_usage) else {
         panic!("want a rejection");
     };
@@ -1216,7 +1095,7 @@ fn a_config_authorizer_never_chooses_the_kind_of_error() {
         Some(Error::Usage(_))
     ));
 
-    let accepting = artifacts(Verifier::builder().config_authorizer(accept));
+    let accepting = artifacts(authorizer(accept));
     let verified = verify(&accepting).unwrap();
     let config = verified.config().unwrap();
     assert_eq!(config.source, ReferenceSource::Policy);
@@ -1244,18 +1123,18 @@ fn a_config_authorizer_sees_the_material_of_the_document() {
         let embedded = fixture.verifier(case).unwrap().embedded;
         let seen: Arc<Mutex<Vec<ConfigEndorsement>>> = Arc::default();
         let record = Arc::clone(&seen);
-        let mut verifier = Verifier::builder()
-            .config_authorizer(move |endorsement| {
-                record.lock().unwrap().push(endorsement.clone());
-                Ok(())
-            })
-            .test_roots(
-                fixture.root(text(case, "sigstore")).as_deref(),
-                fixture.root(text(case, "amd")),
-                None,
-            )
-            .build()
-            .unwrap();
+        let (config, policy) = authorizer(move |endorsement| {
+            record.lock().unwrap().push(endorsement.clone());
+            Ok(())
+        });
+        let mut verifier = Verifier::with_test_roots(
+            config,
+            policy,
+            fixture.root(text(case, "sigstore")).as_deref(),
+            fixture.root(text(case, "amd")),
+            None,
+        )
+        .unwrap();
         verifier.embedded = embedded;
         let verified = verifier
             .verify_at(
@@ -1298,20 +1177,11 @@ fn the_accepted_registries_are_never_left_open_by_default() {
     let public = Some(vec![PUBLIC_REGISTRY_ID.to_owned()]);
     let inputs = Inputs::new();
     for (name, builder) in [
-        ("defaults", Verifier::builder()),
-        (
-            "embedded artifacts",
-            Verifier::builder().embedded_references(inputs.artifacts()),
-        ),
-        (
-            "freshness keys",
-            Verifier::builder().freshness_signing_keys(signing_keys()),
-        ),
-        ("authorizer", Verifier::builder().config_authorizer(accept)),
-        (
-            "embedded config",
-            Verifier::builder().embedded_references(inputs.all()),
-        ),
+        ("defaults", defaults()),
+        ("embedded artifacts", policy(inputs.artifacts())),
+        ("freshness keys", freshness_keys(signing_keys())),
+        ("authorizer", authorizer(accept)),
+        ("embedded config", inputs.all()),
     ] {
         let verifier = builder.build().unwrap();
         assert_eq!(
@@ -1321,18 +1191,12 @@ fn the_accepted_registries_are_never_left_open_by_default() {
         );
     }
     let listed = vec![PRIVATE_REGISTRY.to_owned()];
-    let verifier = Verifier::builder()
-        .config_registry_ids(listed.clone())
-        .build()
-        .unwrap();
+    let verifier = registries(listed.clone()).build().unwrap();
     assert_eq!(
         verifier.reference_pins("").unwrap().registry_ids,
         Some(listed)
     );
-    let keyed = Verifier::builder()
-        .config_signing_keys(signing_keys())
-        .build()
-        .unwrap();
+    let keyed = config_keys(signing_keys()).build().unwrap();
     assert_eq!(keyed.reference_pins("").unwrap().registry_ids, None);
 
     // End to end: a config endorsement that a private registry certified,

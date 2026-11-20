@@ -33,7 +33,7 @@ const RETRY_AFTER_MS: &str = "retry-after-ms";
 /// (milliseconds) or else in `Retry-After`: seconds, or a date in the one
 /// form that [`http_date`] reads.
 /// Either number may have a fraction. Both headers arrive from whoever
-/// answered, which in [`TransportMode::Ehbp`](crate::TransportMode::Ehbp)
+/// answered, which in [`Transport::Ehbp`](crate::Transport::Ehbp)
 /// can be a proxy, so neither is obeyed beyond the limit: the smaller of
 /// [`MAX_RETRY_AFTER`] and the client's `timeout` option.
 ///

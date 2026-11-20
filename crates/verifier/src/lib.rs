@@ -8,8 +8,11 @@
 //!
 //! # Verifying a document
 //!
-//! A [`Verifier`] holds the policy: which configs to accept,
-//! how old a freshness proof may be, and optional register pins. Its
+//! A [`Verifier`] holds the policy: a [`ConfigTrust`] that selects who
+//! vouches for the config, and a [`Policy`] with how old a freshness proof
+//! may be, optional register pins and how the runtime and platform
+//! artifacts are trusted. Each choice of trust is one value, so that two
+//! sources of trust that would conflict cannot be configured together. Its
 //! [`verify_v3`](Verifier::verify_v3) takes the document, the nonce that the
 //! caller sent with its request, and a [`Pin`], and returns a
 //! [`Verification`] with the endorsed keys to bind traffic to.
@@ -21,7 +24,7 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let nonce = random_nonce()?;
 //! let document = fetch(&nonce);
-//! let verifier = Verifier::new();
+//! let verifier = Verifier::default();
 //! match verifier.verify_v3(&document, &nonce, &Pin::repo("owner/repository")) {
 //!     Ok(verified) => println!("TLS key: {:?}", verified.tls_public_key_fp()),
 //!     Err(Error::Verification(rejected)) => println!("rejected at {}", rejected.layer()),
@@ -43,20 +46,20 @@
 //! which passes `--cfg tinfoil_conformance` to the compiler.
 //!
 //! Tinfoil's public signing keys are a default, not an anchor of that
-//! kind: [`VerifierBuilder::config_signing_keys`] and
-//! [`VerifierBuilder::freshness_signing_keys`] replace the keys that
-//! config endorsements and artifact approvals are verified under.
+//! kind: [`ConfigTrust::SigningKeys`] and the `freshness_keys` of
+//! [`ArtifactTrust`] replace the keys that config endorsements and
+//! artifact approvals are verified under.
 //!
 #![cfg_attr(not(tinfoil_conformance), doc = "```compile_fail,E0599")]
 #![cfg_attr(tinfoil_conformance, doc = "```no_run")]
-//! // An ordinary build has no way to supply a Sigstore trusted root.
-//! let _ = tinfoil_verifier::Verifier::builder().dangerous_test_only_sigstore_root(b"{}");
-//! ```
-//!
-#![cfg_attr(not(tinfoil_conformance), doc = "```compile_fail,E0599")]
-#![cfg_attr(tinfoil_conformance, doc = "```no_run")]
-//! // Nor a vendor root.
-//! let _ = tinfoil_verifier::Verifier::builder().dangerous_test_only_vendor_roots(None, None);
+//! // An ordinary build has no way to supply a Sigstore trusted root or a
+//! // vendor root.
+//! use tinfoil_verifier::{ConfigTrust, Policy, Verifier};
+//! let _ = Verifier::dangerous_test_only_new(
+//!     ConfigTrust::default(),
+//!     Policy::default(),
+//!     Default::default(),
+//! );
 //! ```
 //!
 //! # Features
@@ -125,17 +128,22 @@ pub use document::{
     NVIDIA_GPU_EVIDENCE_V1_FORMAT, REPORT_DATA_V1_ALGORITHM, SEV_SNP_REPORT_V1_FORMAT,
     TDX_QUOTE_V1_FORMAT, random_nonce,
 };
-pub use embedded::{EmbeddedConfig, EmbeddedReferences, RuntimeReference};
+pub use embedded::{EmbeddedConfig, RuntimeReference};
 pub use endorsement::{PUBLIC_REGISTRY_ID, Reference};
 pub use error::{BoxError, Error, Layer, UsageError, VerificationError};
 pub use fingerprint::cert_pubkey_fp;
 pub use measurement::{Expected, Measurement, REGISTER_SIZE, Register};
-pub use options::{ConfigEndorsement, PublicKey, VerifierBuilder};
+pub use options::{
+    ArtifactTrust, ConfigAuthorizer, ConfigEndorsement, ConfigTrust, Policy, PublicKey,
+};
 pub use verification::{
     ArtifactVerification, ConfigVerification, ReferenceSource, SoftwareIdentity, Verification,
     VerificationMetadata, crypto_material_data,
 };
 pub use verifier::{Pin, Verifier, parse_reference};
+
+#[cfg(tinfoil_conformance)]
+pub use options::DangerousTestOnlyRoots;
 
 /// Internal modules, exposed to the conformance adapter only. This module
 /// exists only in builds that pass `--cfg tinfoil_conformance`; it is not

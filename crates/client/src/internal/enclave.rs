@@ -86,7 +86,6 @@ pub(crate) struct Config {
 /// One enclave and the policy that its attestation is verified against.
 pub(crate) struct Enclave<V = Verification> {
     host: String,
-    pin: Pin,
     #[cfg(test)]
     verifier: Option<Arc<Verifier>>,
     source: Source<V>,
@@ -136,7 +135,9 @@ impl Config {
     pub(crate) fn check(self) -> Result<Checked, Error> {
         authority_url(&self.host)?;
         check_pin(&self.pin)?;
-        let verifier = self.verifier.unwrap_or_else(|| Arc::new(Verifier::new()));
+        let verifier = self
+            .verifier
+            .unwrap_or_else(|| Arc::new(Verifier::default()));
         verifier
             .check_pin_verifiability(&self.pin)
             .map_err(from_verifier)?;
@@ -192,7 +193,6 @@ impl Enclave<Verification> {
         };
         Self {
             host: checked.host,
-            pin: checked.pin,
             #[cfg(test)]
             verifier: Some(verifier),
             source,
@@ -220,7 +220,6 @@ impl<V: Evidence> Enclave<V> {
     ) -> Self {
         Self {
             host: host.to_owned(),
-            pin: Pin::none(),
             #[cfg(test)]
             verifier: None,
             source,
@@ -232,11 +231,6 @@ impl<V: Evidence> Enclave<V> {
     /// The enclave's host.
     pub(crate) fn host(&self) -> &str {
         &self.host
-    }
-
-    /// The pin that the enclave is verified against.
-    pub(crate) fn pin(&self) -> &Pin {
-        &self.pin
     }
 
     /// The clock that the enclave judges freshness by.
@@ -450,7 +444,7 @@ mod tests {
 
     #[test]
     fn a_usage_error_is_a_configuration_error_and_keeps_its_source() {
-        let usage = Verifier::new()
+        let usage = Verifier::default()
             .check_pin_verifiability(&Pin::repo("not a reference"))
             .expect_err("an invalid reference is refused");
         let error = from_verifier(usage);
@@ -876,7 +870,6 @@ mod tests {
         )
         .expect("an enclave");
         assert_eq!(enclave.host(), "enclave.example.com:8443");
-        assert_eq!(enclave.pin(), &Pin::repo("owner/name"));
 
         let error = enclave
             .verify()

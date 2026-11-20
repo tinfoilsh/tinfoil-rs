@@ -13,7 +13,7 @@ use std::time::Duration;
 use tinfoil::RouterHttpClient;
 
 const TIMEOUT: Duration = Duration::from_secs(120);
-/// Keeps the router clients from creating a secret file on the machine.
+/// The prompt-cache scope of the live tests.
 const CACHE_SECRET: &str = "tinfoil-rs-live-test";
 
 #[tokio::test]
@@ -27,7 +27,10 @@ async fn the_router_is_discovered_verified_and_reached_over_a_pinned_connection(
         .unwrap();
 
     let verified = client.current();
-    assert_eq!(Some(verified.config_repo()), client.pin().repo.as_deref());
+    assert_eq!(
+        verified.config_repo(),
+        "tinfoilsh/confidential-model-router"
+    );
     assert!(verified.tls_public_key_fp().is_some());
     assert!(verified.freshness_expires_at().is_some());
 
@@ -51,7 +54,7 @@ mod openai {
         ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest,
         CreateChatCompletionRequestArgs,
     };
-    use tinfoil::{Client, RouterOpenAIClient, TransportMode};
+    use tinfoil::{Client, OpenAIClient, OpenAIOptions, RouterHttpClient, Transport};
 
     use super::{CACHE_SECRET, TIMEOUT};
 
@@ -91,13 +94,14 @@ mod openai {
     #[tokio::test]
     #[ignore = "uses the network and needs TINFOIL_API_KEY"]
     async fn a_chat_with_sealed_bodies_completes() {
-        let client = RouterOpenAIClient::builder(openai_config())
-            .transport_mode(TransportMode::Ehbp)
+        let http = RouterHttpClient::builder()
+            .transport(Transport::Ehbp { proxy_url: None })
             .user_cache_secret(CACHE_SECRET)
             .timeout(TIMEOUT)
             .connect()
             .await
             .unwrap();
+        let client = OpenAIClient::new(http, OpenAIOptions::default(), openai_config()).unwrap();
         assert!(client.http_client().current().hpke_public_key().is_some());
         let response = client.chat().create(chat_request()).await.unwrap();
         assert!(!response.choices.is_empty());

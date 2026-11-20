@@ -1,6 +1,6 @@
-//! The rules for a client's base URL (where requests go instead of the
-//! enclave's own origin: a path on that origin, or a proxy on another) and
-//! for the origins that requests are compared by.
+//! The rules for a client's proxy URL (where requests go instead of the
+//! enclave's own origin) and for the origins that requests are compared
+//! by.
 //!
 //! No error from this module repeats the URL or the host that it refuses:
 //! either may hold a credential.
@@ -9,8 +9,9 @@ use reqwest::Url;
 
 use crate::error::Error;
 
-/// Checks a `base_url` option and returns it parsed, with its path made to
-/// end in `/` so that a relative path joins under it.
+/// Checks the proxy URL of [`Transport::Ehbp`](crate::Transport::Ehbp) and
+/// returns it parsed, with its path made to end in `/` so that a relative
+/// path joins under it.
 ///
 /// The text must be an absolute `http://` or `https://` URL as a caller
 /// would write one deliberately: the scheme, `://`, then a host. Each
@@ -38,6 +39,13 @@ use crate::error::Error;
 /// ASCII form, a default port removed, and dot segments of the path
 /// resolved.
 pub(crate) fn validate(base_url: &str) -> Result<Url, Error> {
+    validate_as(base_url, "proxy URL")
+}
+
+/// [`validate`] for a URL that `name` describes in the errors, such as a
+/// relay URL, which follows the rules of a proxy URL.
+pub(crate) fn validate_as(base_url: &str, name: &str) -> Result<Url, Error> {
+    let invalid = |reason: &str| Error::configuration(format!("invalid {name}: {reason}"));
     if base_url.is_empty() {
         return Err(invalid("it is empty"));
     }
@@ -88,16 +96,16 @@ pub(crate) fn validate(base_url: &str) -> Result<Url, Error> {
     Ok(url)
 }
 
-/// Requires a base URL in the TLS mode to be on the enclave's own origin: a
-/// pinned connection cannot pass through a proxy. Each failure is a
-/// configuration error: an enclave host that yields no origin, or a base
-/// URL on another origin.
-pub(crate) fn validate_for_tls(base_url: &Url, enclave_host: &str) -> Result<(), Error> {
-    if origin_of(base_url)? == enclave_origin(enclave_host)? {
+/// Refuses a proxy URL on the enclave's own origin, which would send
+/// requests directly to the enclave under the name of a proxy. Each
+/// failure is a configuration error: an enclave host that yields no
+/// origin, or a proxy on the enclave's origin, whatever its path.
+pub(crate) fn refuse_enclave_origin(proxy_url: &Url, enclave_host: &str) -> Result<(), Error> {
+    if origin_of(proxy_url)? != enclave_origin(enclave_host)? {
         return Ok(());
     }
-    Err(Error::configuration(
-        "a base URL off the verified enclave's origin is a proxy, which requires TransportMode::Ehbp",
+    Err(invalid(
+        "it is the enclave's own origin; leave proxy_url unset to connect directly",
     ))
 }
 
@@ -198,7 +206,7 @@ fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> 
 }
 
 fn invalid(reason: &str) -> Error {
-    Error::configuration(format!("invalid base URL: {reason}"))
+    Error::configuration(format!("invalid proxy URL: {reason}"))
 }
 
 #[cfg(test)]
@@ -534,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tls_base_url_must_be_on_the_enclaves_origin() {
+    fn a_proxy_url_must_not_be_on_the_enclaves_origin() {
         let on_origin = [
             ("https://enclave.example.com/", "enclave.example.com"),
             ("https://enclave.example.com/api/v1/", "enclave.example.com"),
@@ -549,7 +557,12 @@ mod tests {
         ];
         for (base, host) in on_origin {
             let base = validate(base).expect("valid");
-            assert!(validate_for_tls(&base, host).is_ok(), "{base} on {host}");
+            let error = refuse_enclave_origin(&base, host).expect_err("on the origin");
+            assert_eq!(error.kind(), ErrorKind::Configuration);
+            assert!(
+                error.to_string().contains("enclave's own origin"),
+                "{error}"
+            );
         }
         let off_origin = [
             ("https://proxy.example.com/", "enclave.example.com"),
@@ -560,12 +573,13 @@ mod tests {
         ];
         for (base, host) in off_origin {
             let base = validate(base).expect("valid");
-            let error = validate_for_tls(&base, host).expect_err("off the origin");
-            assert_eq!(error.kind(), ErrorKind::Configuration);
-            assert!(error.to_string().contains("TransportMode::Ehbp"));
+            assert!(
+                refuse_enclave_origin(&base, host).is_ok(),
+                "{base} on {host}"
+            );
         }
-        let base = validate("https://enclave.example.com/").expect("valid");
-        assert!(validate_for_tls(&base, "enclave.example.com/x").is_err());
+        let base = validate("https://proxy.example.com/").expect("valid");
+        assert!(refuse_enclave_origin(&base, "enclave.example.com/x").is_err());
     }
 
     #[test]

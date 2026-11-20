@@ -1,34 +1,30 @@
-//! The OpenAI clients: `async_openai` clients whose requests go through an
+//! The OpenAI client: an `async_openai` client whose requests go through an
 //! attested HTTP client.
 
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_openai::config::OpenAIConfig;
 use async_openai::error::OpenAIError;
 use async_openai::types::audio::{CreateTranscriptionRequest, CreateTranscriptionResponseJson};
 use reqwest::Url;
 
-use crate::enclave_client::{EnclaveHttpClient, EnclaveHttpClientBuilder};
+use crate::attested_client::AttestedHttpClient;
 use crate::error::Error;
-use crate::options::TransportMode;
-use crate::router_client::{RouterHttpClient, RouterHttpClientBuilder};
-use crate::verifier::{BoxError, Pin, Verification, Verifier};
+use crate::router_client::RouterHttpClient;
 
+pub(crate) mod api_path;
 pub(crate) mod relaxed;
 pub(crate) mod retry;
 pub(crate) mod service;
 
 use relaxed::RelaxedChat;
 
-/// The `async_openai` client type that every OpenAI client of this crate
-/// dereferences to.
+/// The `async_openai` client type that [`OpenAIClient`] dereferences to.
 type OpenAI = async_openai::Client<OpenAIConfig>;
 
-/// The methods that every OpenAI client of this crate has in addition to
-/// `async_openai`'s. The type has the fields `openai` (the `async_openai`
+/// The methods that [`OpenAIClient`] has in addition to `async_openai`'s. The type has the fields `openai` (the `async_openai`
 /// client), `sender` (the service under it), `http` (the attested HTTP
 /// client) and `api_base`.
 macro_rules! openai_client_methods {
@@ -48,7 +44,7 @@ macro_rules! openai_client_methods {
             /// A permissive chat-completion handle, for raw JSON requests
             /// and responses. See [`RelaxedChat`].
             pub fn chat_relaxed(&self) -> RelaxedChat<'_> {
-                let http: Arc<dyn crate::request::Execute> = self.http.inner.clone();
+                let http: Arc<dyn crate::request::Execute> = self.http.attested().clone();
                 RelaxedChat {
                     sender: self.sender.clone(),
                     http,
@@ -122,13 +118,16 @@ pub(crate) async fn embed_batch(
         .collect())
 }
 
-/// An OpenAI client for Tinfoil's recommended route: the drop-in.
+/// An `async_openai` client whose requests go through one of this crate's
+/// attested HTTP clients.
 ///
-/// It is an `async_openai::Client` whose requests go through a
-/// [`RouterHttpClient`]: [`connect`](Self::connect) discovers and verifies
-/// Tinfoil's router before it returns, and the client verifies the router
-/// again by itself when the verification expires or its key changes. The
-/// whole `async_openai` API is available on it through `Deref`:
+/// [`new`](Self::new) builds one over an [`EnclaveHttpClient`](crate::EnclaveHttpClient) or a
+/// [`RouterHttpClient`] that is already verified, and does no network I/O;
+/// the HTTP client verifies again by itself when its verification expires
+/// or its key changes. [`connect`](Self::connect) is the one-line drop-in
+/// for Tinfoil's recommended route: it discovers and verifies a router and
+/// builds the client over it. The whole `async_openai` API is available on
+/// the client through `Deref`:
 ///
 /// ```no_run
 /// use tinfoil::async_openai::config::OpenAIConfig;
@@ -146,8 +145,24 @@ pub(crate) async fn embed_batch(
 /// # }
 /// ```
 ///
-/// To choose the enclave, the transport mode or the verification policy,
-/// use [`RouterOpenAIClient`] or [`EnclaveOpenAIClient`].
+/// To choose the enclave, the transport or the verification policy, build
+/// the HTTP client with its builder and pass it to [`new`](Self::new):
+///
+/// ```no_run
+/// use tinfoil::async_openai::config::OpenAIConfig;
+/// use tinfoil::{EnclaveHttpClient, OpenAIClient, OpenAIOptions, Transport, Trust};
+///
+/// # async fn run() -> Result<(), tinfoil::Error> {
+/// let http = EnclaveHttpClient::builder("enclave.example.com", Trust::repo("owner/name"))
+///     .transport(Transport::Ehbp { proxy_url: None })
+///     .connect()
+///     .await?;
+/// let config = OpenAIConfig::new().with_api_key("...");
+/// let client = OpenAIClient::new(http, OpenAIOptions::default(), config)?;
+/// # let _ = client;
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// A failed call returns `async_openai`'s `OpenAIError`. When the cause is
 /// this crate's (the router no longer passes verification, for example),
@@ -174,7 +189,7 @@ pub(crate) async fn embed_batch(
 /// the `timeout` option if that is shorter. A response that asks for a
 /// longer wait is not tried again: the call returns it at once, as the
 /// error that it is. A value that cannot be read is ignored. In
-/// [`TransportMode::Ehbp`] these headers are not authenticated, which is
+/// [`Transport::Ehbp`](crate::Transport::Ehbp) these headers are not authenticated, which is
 /// why they are bounded.
 ///
 /// The `timeout` option bounds each request that a call sends and each
@@ -211,35 +226,86 @@ pub(crate) async fn embed_batch(
 /// HTTP client, service or configuration no longer goes through the
 /// attested client and has none of its protections.
 #[derive(Clone)]
-pub struct Client {
+pub struct OpenAIClient {
     openai: OpenAI,
     sender: service::Sender,
-    http: RouterHttpClient,
+    http: AttestedHttpClient,
     api_base: Url,
 }
 
-impl Client {
-    /// Discovers and verifies Tinfoil's router and returns an OpenAI
-    /// client for it.
+/// The drop-in name of [`OpenAIClient`]: `tinfoil::Client::connect(config)`
+/// is [`OpenAIClient::connect`].
+pub type Client = OpenAIClient;
+
+/// The options of an [`OpenAIClient`]. The default keeps every default.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OpenAIOptions {
+    /// The path of the OpenAI API, joined under the HTTP client's
+    /// [`base_url`](AttestedHttpClient::base_url): the proxy URL of
+    /// [`Transport::Ehbp`](crate::Transport::Ehbp), or the enclave's
+    /// origin. `None` selects `/v1/`.
+    ///
+    /// It must be an RFC 3986 absolute path: it starts with `/`, but not
+    /// with `//`, and holds only path characters (letters, digits,
+    /// `-._~!$&'()*+,;=:@`), `/` between segments and well-formed `%XX`
+    /// escapes. A segment that is `.` or `..` is refused, percent-encoded
+    /// or not, and so is a segment that holds a slash or a backslash once
+    /// it is percent-decoded (`%2F` or `%5C`); the `/` between segments is
+    /// what separates them. A query and a fragment are refused too. Any
+    /// other escape is accepted, also
+    /// one of a byte that is not UTF-8. Each mistake, an empty string among
+    /// them, is a configuration error.
+    pub api_path: Option<String>,
+}
+
+impl OpenAIClient {
+    /// An OpenAI client that sends through `http`, an [`EnclaveHttpClient`](crate::EnclaveHttpClient)
+    /// or a [`RouterHttpClient`]. It does no network I/O: the HTTP client
+    /// was verified when it was created, and verifies again by itself.
     ///
     /// `config` is the caller's `async_openai` configuration: the API key,
     /// organization, project and extra headers. It is applied first; then
     /// the API base and the HTTP client are set, so that `config` cannot
-    /// replace them. The API key travels only in `config`: this crate
-    /// reads no API key from the environment. (`OpenAIConfig::new()` and
-    /// `OpenAIConfig::default()` themselves read `OPENAI_API_KEY`,
-    /// `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID`; `with_api_key` and the
-    /// other setters replace what they read.)
+    /// replace them. An API base in `config`, and `OPENAI_BASE_URL` in the
+    /// environment, have no effect: set
+    /// [`api_path`](OpenAIOptions::api_path) to change the API's path. The
+    /// API key travels only in `config`: this crate reads no API key from
+    /// the environment. (`OpenAIConfig::new()` and `OpenAIConfig::default()`
+    /// themselves read `OPENAI_API_KEY`, `OPENAI_ORG_ID` and
+    /// `OPENAI_PROJECT_ID`; `with_api_key` and the other setters replace
+    /// what they read.)
     ///
-    /// The errors and the cancel safety are those of
-    /// [`RouterHttpClientBuilder::connect`] with no option set.
-    pub async fn connect(config: OpenAIConfig) -> Result<Self, Error> {
-        let RouterOpenAIClient {
-            openai,
-            sender,
-            http,
-            api_base,
-        } = RouterOpenAIClient::connect(config).await?;
+    /// The API base is the HTTP client's
+    /// [`base_url`](AttestedHttpClient::base_url) without its final `/`,
+    /// followed by the API path, ending in `/`:
+    /// `https://<enclave>/v1/` by default, or `https://proxy.example/relay/v1/`
+    /// under the proxy URL `https://proxy.example/relay`, with or without a
+    /// final `/`.
+    ///
+    /// # Errors
+    ///
+    /// A configuration error for an API path that breaks the rules of
+    /// [`OpenAIOptions::api_path`].
+    pub fn new(
+        http: impl Into<AttestedHttpClient>,
+        options: OpenAIOptions,
+        config: OpenAIConfig,
+    ) -> Result<Self, Error> {
+        let http = http.into();
+        let attested = http.attested();
+        let api_base = api_path::join(attested.base_url(), options.api_path.as_deref())?;
+        let executor: Arc<dyn crate::request::Execute> = attested.clone();
+        let waits = retry::Waits {
+            timeout: attested.timeout(),
+            clock: crate::internal::system_clock(),
+        };
+        let (openai, sender) = service::openai_client(
+            config,
+            &api_base,
+            executor,
+            attested.transport_mode(),
+            waits,
+        )?;
         Ok(Self {
             openai,
             sender,
@@ -248,268 +314,43 @@ impl Client {
         })
     }
 
-    /// The attested HTTP client that the OpenAI client sends through, for
-    /// raw requests to the same router.
-    pub fn http_client(&self) -> &RouterHttpClient {
+    /// Discovers and verifies Tinfoil's router and returns an OpenAI
+    /// client for it: the one-line drop-in. It is
+    /// [`RouterHttpClient::connect`] followed by [`new`](Self::new) with
+    /// the default options.
+    ///
+    /// The errors and the cancel safety are those of
+    /// [`RouterHttpClientBuilder::connect`](crate::RouterHttpClientBuilder::connect)
+    /// with no option set.
+    pub async fn connect(config: OpenAIConfig) -> Result<Self, Error> {
+        let router = RouterHttpClient::connect().await?;
+        Self::new(router, OpenAIOptions::default(), config)
+    }
+
+    /// The attested HTTP client that the OpenAI client sends through: its
+    /// accessors, `ensure_verified`, `reverify` and raw requests. Match on
+    /// it for the methods of the concrete client.
+    pub fn http_client(&self) -> &AttestedHttpClient {
         &self.http
     }
 
-    /// The URL of the OpenAI API on the route that the client chose:
-    /// `https://<router>/v1/`. Build the URLs of raw requests for
+    /// The URL of the OpenAI API that the client sends to, ending in `/`.
+    /// Build the URLs of raw requests for
     /// [`http_client`](Self::http_client) from it.
     pub fn base_url(&self) -> &Url {
         &self.api_base
     }
 }
 
-openai_client_methods!(Client);
+openai_client_methods!(OpenAIClient);
 
-impl fmt::Debug for Client {
+impl fmt::Debug for OpenAIClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Client")
+        // The configuration holds the API key and may hold credentials in
+        // its headers: none of it is printed.
+        f.debug_struct("OpenAIClient")
             .field("http", &self.http)
+            .field("base_url", &self.api_base.as_str())
             .finish_non_exhaustive()
-    }
-}
-
-/// An OpenAI client whose requests go through an [`EnclaveHttpClient`], to
-/// its `base_url` option or, when that is unset, to the enclave's `/v1/`
-/// API.
-///
-/// See [`Client`] for how errors, retries and `Deref` behave.
-#[derive(Clone)]
-pub struct EnclaveOpenAIClient {
-    openai: OpenAI,
-    sender: service::Sender,
-    http: EnclaveHttpClient,
-    api_base: Url,
-}
-
-impl EnclaveOpenAIClient {
-    /// Verifies the enclave at `host` against `pin`, as
-    /// [`EnclaveHttpClient::connect`] does ([`Pin::none`] sets no pin),
-    /// and returns an OpenAI client over it. `config` is applied first; then the API base and the HTTP
-    /// client are set, so that `config` cannot replace them.
-    pub async fn connect(
-        host: impl Into<String>,
-        pin: Pin,
-        config: OpenAIConfig,
-    ) -> Result<Self, Error> {
-        Self::builder(host, pin, config).connect().await
-    }
-
-    /// Starts an OpenAI client for the enclave at `host`, to be configured
-    /// before it connects. The builder has the options of
-    /// [`EnclaveHttpClientBuilder`].
-    pub fn builder(
-        host: impl Into<String>,
-        pin: Pin,
-        config: OpenAIConfig,
-    ) -> EnclaveOpenAIClientBuilder {
-        EnclaveOpenAIClientBuilder {
-            http: EnclaveHttpClient::builder(host, pin),
-            config,
-        }
-    }
-
-    /// The enclave client that the OpenAI client sends through: its
-    /// accessors, `ensure_verified`, `reverify` and raw requests.
-    pub fn http_client(&self) -> &EnclaveHttpClient {
-        &self.http
-    }
-}
-
-openai_client_methods!(EnclaveOpenAIClient);
-
-impl fmt::Debug for EnclaveOpenAIClient {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EnclaveOpenAIClient")
-            .field("http", &self.http)
-            .finish_non_exhaustive()
-    }
-}
-
-/// An OpenAI client whose requests go through a [`RouterHttpClient`], to
-/// its `base_url` option or, when that is unset, to the router's `/v1/`
-/// API. It is [`Client`] with the router client's options.
-#[derive(Clone)]
-pub struct RouterOpenAIClient {
-    openai: OpenAI,
-    sender: service::Sender,
-    http: RouterHttpClient,
-    api_base: Url,
-}
-
-impl RouterOpenAIClient {
-    /// Discovers and verifies a router, as [`RouterHttpClient::connect`]
-    /// does, and returns an OpenAI client over it. `config` is applied
-    /// first; then the API base and the HTTP client are set, so that
-    /// `config` cannot replace them.
-    pub async fn connect(config: OpenAIConfig) -> Result<Self, Error> {
-        Self::builder(config).connect().await
-    }
-
-    /// Starts a router OpenAI client to be configured before it connects.
-    /// The builder has the options of [`RouterHttpClientBuilder`].
-    pub fn builder(config: OpenAIConfig) -> RouterOpenAIClientBuilder {
-        RouterOpenAIClientBuilder {
-            http: RouterHttpClient::builder(),
-            config,
-        }
-    }
-
-    /// The router client that the OpenAI client sends through.
-    pub fn http_client(&self) -> &RouterHttpClient {
-        &self.http
-    }
-}
-
-openai_client_methods!(RouterOpenAIClient);
-
-impl fmt::Debug for RouterOpenAIClient {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RouterOpenAIClient")
-            .field("http", &self.http)
-            .finish_non_exhaustive()
-    }
-}
-
-/// The setters that an OpenAI builder passes on to the builder of its HTTP
-/// client, in the field `http`.
-macro_rules! forward_route_setters {
-    ($builder:ident, $http:ident) => {
-        impl $builder {
-            #[doc = concat!("See [`", stringify!($http), "::transport_mode`].")]
-            pub fn transport_mode(mut self, mode: TransportMode) -> Self {
-                self.http = self.http.transport_mode(mode);
-                self
-            }
-
-            #[doc = concat!("See [`", stringify!($http), "::base_url`]. The OpenAI client then")]
-            /// sends to this URL as its API base, in place of the `/v1/`
-            /// API of the enclave.
-            pub fn base_url(mut self, url: impl Into<String>) -> Self {
-                self.http = self.http.base_url(url);
-                self
-            }
-
-            #[doc = concat!("See [`", stringify!($http), "::verifier`].")]
-            pub fn verifier(mut self, verifier: impl Into<Arc<Verifier>>) -> Self {
-                self.http = self.http.verifier(verifier);
-                self
-            }
-
-            #[doc = concat!("See [`", stringify!($http), "::verification_check`].")]
-            pub fn verification_check<F>(mut self, check: F) -> Self
-            where
-                F: Fn(&Verification) -> Result<(), BoxError> + Send + Sync + 'static,
-            {
-                self.http = self.http.verification_check(check);
-                self
-            }
-
-            #[doc = concat!("See [`", stringify!($http), "::user_cache_secret`].")]
-            pub fn user_cache_secret(mut self, secret: impl Into<String>) -> Self {
-                self.http = self.http.user_cache_secret(secret);
-                self
-            }
-
-            #[doc = concat!("See [`", stringify!($http), "::timeout`]. Of an OpenAI call it")]
-            /// bounds each request that the call sends and each wait
-            /// between two attempts, not the call as a whole. See
-            /// [`Client`] for the retries.
-            pub fn timeout(mut self, timeout: Duration) -> Self {
-                self.http = self.http.timeout(timeout);
-                self
-            }
-        }
-
-        impl fmt::Debug for $builder {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                // The configuration holds the API key and may hold
-                // credentials in its headers: none of it is printed.
-                f.debug_struct(stringify!($builder))
-                    .field("http", &self.http)
-                    .finish_non_exhaustive()
-            }
-        }
-    };
-}
-
-/// Configures an [`EnclaveOpenAIClient`] and connects it. Its `Debug`
-/// output shows nothing of the OpenAI configuration.
-#[derive(Clone)]
-#[must_use = "a builder does nothing until `connect` is called"]
-pub struct EnclaveOpenAIClientBuilder {
-    http: EnclaveHttpClientBuilder,
-    config: OpenAIConfig,
-}
-
-forward_route_setters!(EnclaveOpenAIClientBuilder, EnclaveHttpClientBuilder);
-
-impl EnclaveOpenAIClientBuilder {
-    /// Checks the options, verifies the enclave and returns the client, as
-    /// [`EnclaveHttpClientBuilder::connect`] does, with its errors and its
-    /// cancel safety.
-    pub async fn connect(self) -> Result<EnclaveOpenAIClient, Error> {
-        let http = self.http.connect().await?;
-        let api_base = http.inner.openai_url().clone();
-        let executor: Arc<dyn crate::request::Execute> = http.inner.clone();
-        let waits = retry::Waits {
-            timeout: http.inner.timeout(),
-            clock: crate::internal::system_clock(),
-        };
-        let (openai, sender) = service::openai_client(
-            self.config,
-            &api_base,
-            executor,
-            http.transport_mode(),
-            waits,
-        )?;
-        Ok(EnclaveOpenAIClient {
-            openai,
-            sender,
-            http,
-            api_base,
-        })
-    }
-}
-
-/// Configures a [`RouterOpenAIClient`] and connects it. Its `Debug` output
-/// shows nothing of the OpenAI configuration.
-#[derive(Clone)]
-#[must_use = "a builder does nothing until `connect` is called"]
-pub struct RouterOpenAIClientBuilder {
-    http: RouterHttpClientBuilder,
-    config: OpenAIConfig,
-}
-
-forward_route_setters!(RouterOpenAIClientBuilder, RouterHttpClientBuilder);
-
-impl RouterOpenAIClientBuilder {
-    /// Checks the options, discovers and verifies a router and returns the
-    /// client, as [`RouterHttpClientBuilder::connect`] does, with its
-    /// errors and its cancel safety.
-    pub async fn connect(self) -> Result<RouterOpenAIClient, Error> {
-        let http = self.http.connect().await?;
-        let api_base = http.inner.openai_url().clone();
-        let executor: Arc<dyn crate::request::Execute> = http.inner.clone();
-        let waits = retry::Waits {
-            timeout: http.inner.timeout(),
-            clock: crate::internal::system_clock(),
-        };
-        let (openai, sender) = service::openai_client(
-            self.config,
-            &api_base,
-            executor,
-            http.transport_mode(),
-            waits,
-        )?;
-        Ok(RouterOpenAIClient {
-            openai,
-            sender,
-            http,
-            api_base,
-        })
     }
 }

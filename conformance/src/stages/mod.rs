@@ -12,10 +12,10 @@ pub(crate) mod verify_timestamp;
 
 use std::sync::Arc;
 
-use tinfoil_verifier::Verifier;
 use tinfoil_verifier::conformance::endorsement::ProvenanceClient;
 use tinfoil_verifier::conformance::instant::Instant;
 use tinfoil_verifier::conformance::sigstore::trusted_root::TrustedRoot;
+use tinfoil_verifier::{ConfigTrust, DangerousTestOnlyRoots, Policy, Verifier};
 
 use super::{
     AcceptOutputs, EXIT_ACCEPTED, EXIT_REJECTED, Input, Output, Rejection, STAGE_ASSEMBLE_POLICY,
@@ -46,11 +46,12 @@ pub(crate) fn vendor_roots(input: &Input) -> (Option<Vec<u8>>, Option<Vec<u8>>) 
 fn verifier(input: &Input) -> Option<Verifier> {
     let supplied = decode_base64(&input.sigstore_trusted_root_json_b64)?;
     let (amd, intel) = vendor_roots(input);
-    let mut builder = Verifier::builder().dangerous_test_only_vendor_roots(amd, intel);
-    if !supplied.is_empty() {
-        builder = builder.dangerous_test_only_sigstore_root(&supplied);
-    }
-    builder.build().ok()
+    let roots = DangerousTestOnlyRoots {
+        sigstore_root_json: (!supplied.is_empty()).then_some(supplied),
+        amd_cert_chain_pem: amd,
+        intel_root_pem: intel,
+    };
+    Verifier::dangerous_test_only_new(ConfigTrust::default(), Policy::default(), roots).ok()
 }
 
 /// Runs `stage` over a decoded input.

@@ -48,9 +48,10 @@ pub(crate) const MAX_ROUTER_LIST_BYTES: usize = 32 << 20;
 /// Returns a verified transport for the first router of `list` that passes
 /// verification, and otherwise for [`FALLBACK_ROUTER`].
 ///
-/// 1. `list` yields the hosts to try: for a client, [`router_list`]. They
-///    are tried one at a time, in the order of the list, as often as they
-///    appear in it. Nothing is shuffled.
+/// 1. `list` yields the hosts to try: for a client, [`router_list`] or the
+///    caller's router-list fetcher. They are put in a uniformly random
+///    order ([`shuffle`]), so that clients spread across routers, and
+///    tried one at a time, as often as they appear in the list.
 /// 2. `enclave_for` makes the enclave of a host, under the caller's policy
 ///    and the router pin. A host that it refuses is skipped.
 /// 3. A probe is one verification without a retry, followed by binding
@@ -79,9 +80,10 @@ pub(crate) async fn discover<V: Evidence>(
     // A budget too long to add to the present cannot happen; if it did,
     // discovery would go straight to the fallback.
     if let Some(deadline) = Instant::now().checked_add(DISCOVERY_BUDGET) {
-        let hosts = tokio::time::timeout_at(deadline, list)
+        let mut hosts = tokio::time::timeout_at(deadline, list)
             .await
             .unwrap_or_default();
+        order(&mut hosts);
         for host in hosts {
             if Instant::now() >= deadline {
                 break;
@@ -122,6 +124,81 @@ pub(crate) async fn connect<V: Evidence>(
     .await
 }
 
+/// Puts `routers` in a uniformly random order: a Fisher-Yates shuffle
+/// driven by a generator that one read of the operating system's random
+/// bytes seeds, so that a long list costs no system call per entry. When
+/// the operating system supplies no random bytes, the order stays as it
+/// is. The order spreads clients across routers; it protects nothing, so
+/// the generator need not be cryptographic.
+pub(crate) fn shuffle(routers: &mut [String]) {
+    let mut seed = [0u8; 8];
+    if getrandom::fill(&mut seed).is_err() {
+        return;
+    }
+    let mut random = SplitMix64(u64::from_le_bytes(seed));
+    for last in (1..routers.len()).rev() {
+        let Some(pick) = random.below(last.saturating_add(1)) else {
+            return;
+        };
+        routers.swap(last, pick);
+    }
+}
+
+/// The SplitMix64 generator.
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// A uniformly random number below `bound`, which is not zero, by
+    /// rejection sampling.
+    fn below(&mut self, bound: usize) -> Option<usize> {
+        let bound = u64::try_from(bound).ok()?;
+        // The largest multiple of `bound` that a `u64` holds, so that
+        // every remainder below `bound` is equally likely.
+        let limit = u64::MAX.checked_sub(u64::MAX.checked_rem(bound)?)?;
+        loop {
+            let value = self.next();
+            if value < limit {
+                return usize::try_from(value.checked_rem(bound)?).ok();
+            }
+        }
+    }
+}
+
+/// The order in which discovery tries the routers: [`shuffle`].
+#[cfg(not(test))]
+fn order(routers: &mut [String]) {
+    shuffle(routers);
+}
+
+/// A way to order the routers that discovery tries.
+#[cfg(test)]
+type Order = fn(&mut [String]);
+
+#[cfg(test)]
+thread_local! {
+    /// The order of discovery in this thread's tests: the order of the list,
+    /// unless a test sets one.
+    pub(crate) static TEST_ORDER: std::cell::Cell<Option<Order>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The order in which discovery tries the routers in tests: the one that
+/// the test set, or the order of the list.
+#[cfg(test)]
+fn order(routers: &mut [String]) {
+    if let Some(order) = TEST_ORDER.get() {
+        order(routers);
+    }
+}
+
 /// The hosts of Tinfoil's router list, fetched from [`ROUTER_LIST_URL`].
 /// Any failure is an empty list.
 ///
@@ -137,6 +214,23 @@ pub(crate) async fn router_list() -> Vec<String> {
         return Vec::new();
     };
     list_through(&client, url, MAX_ROUTER_LIST_BYTES, LIST_FETCH_TIMEOUT).await
+}
+
+/// The hosts of the router list that a relay at `url` serves, fetched and
+/// read as [`router_list`] reads Tinfoil's. A failure is a network error,
+/// a body that is not a router list among them.
+pub(crate) async fn relayed_list(url: Url) -> Result<Vec<String>, Error> {
+    let client = fetch::relay_client_for(&url)?;
+    let body = fetch::get_bounded(
+        &client,
+        url,
+        MAX_ROUTER_LIST_BYTES,
+        LIST_FETCH_TIMEOUT,
+        "router list",
+    )
+    .await?;
+    parse_router_list(&body)
+        .ok_or_else(|| Error::network("the relayed router list is not a JSON array of hosts"))
 }
 
 /// The hosts of the router list at `url`, fetched with `client`. A fetch

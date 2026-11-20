@@ -46,7 +46,7 @@ async-openai moves from 0.41 to 0.42. Use the re-exports (`tinfoil::async_openai
 `tinfoil::chat`, `tinfoil::audio`, `tinfoil::embeddings`) rather than a
 dependency of your own, so that the versions cannot differ.
 
-The OpenAI clients are behind the cargo feature `openai`, which is on by
+The OpenAI client is behind the cargo feature `openai`, which is on by
 default. With `default-features = false` the crate is the HTTP clients and the
 verifier only.
 
@@ -73,12 +73,14 @@ async fn connect() -> Result<tinfoil::Client, Box<dyn std::error::Error>> {
 ```
 
 `Client::connect` discovers and verifies Tinfoil's router, as `new_default`
-did. It takes no other options; use `RouterOpenAIClient::builder(config)` to
-set a transport mode, a verifier, a timeout or a cache secret on the same
-route.
+did. It takes no other options. To set a transport, a policy, a timeout or a
+cache secret on the same route, build a `RouterHttpClient` with its builder
+and pass it to `OpenAIClient::new` (`Client` is another name for
+`OpenAIClient`).
 
 The `OpenAIConfig` also carries the organization, the project and extra
-headers. Its API base is always replaced with the attested route.
+headers. Its API base is always replaced with the attested route; set
+`OpenAIOptions::api_path` to change the path of the API.
 
 ### `Client::new(enclave, repo, api_key)`
 
@@ -95,27 +97,29 @@ let client = tinfoil::Client::new(
 ```rust,no_run
 // 0.3
 use tinfoil::async_openai::config::OpenAIConfig;
-use tinfoil::{EnclaveOpenAIClient, Pin};
+use tinfoil::{EnclaveHttpClient, OpenAIClient, OpenAIOptions, Trust};
 
-async fn connect(api_key: &str) -> Result<EnclaveOpenAIClient, tinfoil::Error> {
-    EnclaveOpenAIClient::connect(
+async fn connect(api_key: &str) -> Result<OpenAIClient, tinfoil::Error> {
+    let http = EnclaveHttpClient::connect(
         "inference.tinfoil.sh",
-        Pin::repo("tinfoilsh/confidential-model-router"),
-        OpenAIConfig::new().with_api_key(api_key),
+        Trust::repo("tinfoilsh/confidential-model-router"),
     )
-    .await
+    .await?;
+    let config = OpenAIConfig::new().with_api_key(api_key);
+    OpenAIClient::new(http, OpenAIOptions::default(), config)
 }
 ```
 
-The pin is a `Pin`: `Pin::repo("owner/name")` for a GitHub repository,
-`Pin::project("org/project")` for a config registry project, or
-`Pin::repo(..).with_project(..)` to accept either. Neither is satisfied by the
-other's collateral. `Pin::none()` sets no pin, and an empty string in either
-part is an error.
+The repository becomes a `Trust`: `Trust::repo("owner/name")` for a GitHub
+repository, `Trust::project("org/project")` for a config registry project, or
+`Trust::EitherPin { repo, project }` to accept either. Neither is satisfied by
+the other's collateral. The other variants trust configs that your keys sign,
+that your function authorizes, or that you supply. An empty repository or
+project is an error.
 
 ### `Client::new_with_proxy(enclave, repo, api_key, proxy_url)`
 
-Proxy mode is a transport mode plus a base URL, on any client:
+Proxy mode is the sealed-body transport with a proxy URL, on any client:
 
 ```rust,ignore
 // 0.2
@@ -125,34 +129,39 @@ let client = tinfoil::Client::new_with_proxy(enclave, repo, api_key, proxy_url).
 ```rust,no_run
 // 0.3
 use tinfoil::async_openai::config::OpenAIConfig;
-use tinfoil::{EnclaveOpenAIClient, Pin, TransportMode};
+use tinfoil::{EnclaveHttpClient, OpenAIClient, OpenAIOptions, Transport, Trust};
 
 async fn connect(
     enclave: &str,
     repo: &str,
     api_key: &str,
     proxy_url: &str,
-) -> Result<EnclaveOpenAIClient, tinfoil::Error> {
-    let config = OpenAIConfig::new().with_api_key(api_key);
-    EnclaveOpenAIClient::builder(enclave, Pin::repo(repo), config)
-        .transport_mode(TransportMode::Ehbp)
-        .base_url(proxy_url)
+) -> Result<OpenAIClient, tinfoil::Error> {
+    let http = EnclaveHttpClient::builder(enclave, Trust::repo(repo))
+        .transport(Transport::Ehbp {
+            proxy_url: Some(proxy_url.to_owned()),
+        })
         .connect()
-        .await
+        .await?;
+    let config = OpenAIConfig::new().with_api_key(api_key);
+    OpenAIClient::new(http, OpenAIOptions::default(), config)
 }
 ```
 
-The OpenAI client uses the base URL verbatim as its API base, so include the
-path that your proxy serves the API under (for example `…/v1/`). The base URL
+The proxy URL is where the proxy is mounted, not the API path: the OpenAI
+client joins `OpenAIOptions::api_path`, `/v1/` by default, under it. A proxy
+that serves the API at `https://proxy.example.com/tinfoil/v1/` has the proxy
+URL `https://proxy.example.com/tinfoil/`. The proxy URL
 must be HTTPS, without credentials, a query string or a fragment. Plain
 `http://` is accepted only for a loopback host: the name `localhost` (not
 `localhost.` and not a subdomain), an IPv4 address in `127.0.0.0/8`, or the
 IPv6 address `[::1]` in any spelling (`[0:0:0:0:0:0:0:1]` is the same
 address). An IPv4 address must be written as four decimal numbers, so
 `127.1` and `0x7f.0.0.1` are refused, and an IPv4 address mapped into IPv6
-(`[::ffff:127.0.0.1]`) does not count as loopback. With the router, `RouterOpenAIClient::builder(config)` takes
-the same two setters, and the router that discovery chooses is named to the
-proxy in the `X-Tinfoil-Enclave-Url` header.
+(`[::ffff:127.0.0.1]`) does not count as loopback. With the router,
+`RouterHttpClient::builder()` takes the same setter, and the router that
+discovery chooses is named to the proxy in the `X-Tinfoil-Enclave-Url`
+header.
 
 ### `Client::verify(&mut self)`
 
@@ -181,10 +190,10 @@ async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
 | `client.chat_relaxed()` | unchanged in shape; see [behaviour changes](#behaviour-changes-in-names-that-stayed) |
 | `client.transcribe(request)` | unchanged |
 | `client.embed_batch(model, inputs)` | unchanged in shape; now checks the response |
-| `client.with_user_cache_secret(secret)` | `.user_cache_secret(secret)` on a builder, before `connect()`. An empty string is an error; leave the option unset for the default |
-| `client.secure_client()` | `client.http_client()`, which returns the attested HTTP client (`RouterHttpClient` or `EnclaveHttpClient`) |
+| `client.with_user_cache_secret(secret)` | `.user_cache_secret(secret)` on the `RouterHttpClient` builder, before `connect()`. An empty string is an error; leave the option unset for the default |
+| `client.secure_client()` | `client.http_client()`, which returns the attested HTTP client as an `AttestedHttpClient` (a `Router` or an `Enclave` client) |
 | `client.http_client()` → `Result<&OriginBoundClient>` | `client.http_client()`, infallible, and it works in EHBP mode too |
-| `client.enclave()`, `client.repo()` | `client.http_client().enclave()`, `.pin()` |
+| `client.enclave()`, `client.repo()` | `client.http_client().enclave()`; `repo()` has no direct replacement: a router client's trust is fixed, and an `EnclaveHttpClient` (in `AttestedHttpClient::Enclave`) has `trust()` |
 
 ## `SecureClient`
 
@@ -193,10 +202,10 @@ async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
 
 | 0.2 | 0.3 |
 |---|---|
-| `SecureClient::new(host, repo, api_key)` + `verify()` | `EnclaveHttpClient::connect(host, Pin::repo(repo))` |
-| `SecureClient::new_with_proxy(host, repo, api_key, proxy_url)` + `verify()` | `EnclaveHttpClient::builder(host, Pin::repo(repo)).transport_mode(TransportMode::Ehbp).base_url(proxy_url).connect()` |
+| `SecureClient::new(host, repo, api_key)` + `verify()` | `EnclaveHttpClient::connect(host, Trust::repo(repo))` |
+| `SecureClient::new_with_proxy(host, repo, api_key, proxy_url)` + `verify()` | `EnclaveHttpClient::builder(host, Trust::repo(repo)).transport(Transport::Ehbp { proxy_url: Some(proxy_url.to_owned()) }).connect()` |
 | `SecureClient::new_default_client(api_key)` | `RouterHttpClient::connect()` |
-| `SecureClient::with_measurement(host, api_key, measurement)` | a `Verifier` with `pinned_registers(..)`; see below |
+| `SecureClient::with_measurement(host, api_key, measurement)` | a `Policy` with `pinned_registers`; see below |
 | `is_verified()` | removed: a client is always verified. `current()` returns the last verification |
 | `verify(&mut self)` | `ensure_verified()` / `reverify()` on `&self` |
 | `ground_truth()`, `ground_truth_json()` | `current()`, `current().to_json()` |
@@ -225,7 +234,7 @@ async fn models(
     repo: &str,
     api_key: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let client = tinfoil::EnclaveHttpClient::connect(host, tinfoil::Pin::repo(repo)).await?;
+    let client = tinfoil::EnclaveHttpClient::connect(host, tinfoil::Trust::repo(repo)).await?;
     let response = client
         .get(client.base_url().join("v1/models")?)
         .bearer_auth(api_key)
@@ -241,14 +250,14 @@ to another origin is refused, and redirects are not followed: a `3xx` response
 is returned.
 
 In 0.2, `http_client()` failed in proxy mode. In 0.3 the same request methods
-work in both modes; in `TransportMode::Ehbp` they seal the body.
+work in both modes; in `Transport::Ehbp` they seal the body.
 
 ### A pinned measurement
 
 `with_measurement` skipped the provenance checks and compared one measurement.
 In 0.3 a pin is an additional check on top of the full verification, so the
-client is also given the repository that the enclave must run (`repo` below),
-or `Pin::none()` to accept any config that the verifier's policy authorizes:
+client is also given the trust that the enclave is verified under (a
+repository below):
 
 ```rust,ignore
 // 0.2
@@ -257,8 +266,8 @@ let secure = tinfoil::SecureClient::with_measurement(host, api_key, measurement)
 
 ```rust,no_run
 // 0.3
-use tinfoil::verifier::{Expected, Verifier};
-use tinfoil::{EnclaveHttpClient, Pin};
+use tinfoil::verifier::{Expected, Policy};
+use tinfoil::{EnclaveHttpClient, Trust};
 
 /// `measurement` is the SEV-SNP launch digest in hexadecimal.
 async fn connect(
@@ -266,11 +275,12 @@ async fn connect(
     repo: &str,
     measurement: &str,
 ) -> Result<EnclaveHttpClient, Box<dyn std::error::Error>> {
-    let verifier = Verifier::builder()
-        .pinned_registers(Expected::parse_sev_snp(measurement)?)
-        .build()?;
-    let client = EnclaveHttpClient::builder(host, Pin::repo(repo))
-        .verifier(verifier)
+    let policy = Policy {
+        pinned_registers: Some(Expected::parse_sev_snp(measurement)?),
+        ..Policy::default()
+    };
+    let client = EnclaveHttpClient::builder(host, Trust::repo(repo))
+        .policy(policy)
         .connect()
         .await?;
     Ok(client)
@@ -278,8 +288,7 @@ async fn connect(
 ```
 
 To verify against a config that you supply yourself rather than a pin,
-see `VerifierBuilder::embedded_references` and
-`VerifierBuilder::config_authorizer`.
+see `Trust::EmbeddedConfig` and `Trust::AuthorizedBy`.
 
 ## Verification results
 
@@ -395,25 +404,26 @@ the `tinfoil-verifier` crate:
 
 ### Prompt cache secret
 
-- The client-level secret is an option of the builder
+- The client-level secret is an option of the router builder
   (`user_cache_secret(..)`), not a method on a built client.
-- A request's secret is, in order: a non-empty `user_cache_secret` string in
-  its JSON body; the client's `user_cache_secret(..)` option; and, for
-  **router clients** only, a random secret that is generated in memory once
-  per process and that every router client in the process shares. **Enclave
-  clients add no secret** unless the option is set.
+- A router request's secret is, in order: a non-empty `user_cache_secret`
+  string in its JSON body; the client's `user_cache_secret(..)` option; and a
+  random secret that is generated in memory once per process and that every
+  router client in the process shares. **Enclave clients have no such option
+  and never add or change the member**: set it in each request body when the
+  enclave is a router.
 - **`TINFOIL_USER_CACHE_SECRET` and `~/.tinfoil/user_cache_secret` are no
   longer read**, and the file is no longer created. Without the option, the
   router clients of each process use that process's own random secret, so
   prompt-cache hits are no longer shared across processes; if the operating
-  system supplies no random bytes, router requests carry no secret. Enclave
-  clients add no secret unless the option is set. To keep a secret that stays the same across
+  system supplies no random bytes, router requests carry no secret. To keep a
+  secret that stays the same across
   processes or machines, store it in your application and pass it with
   `user_cache_secret(..)`; an existing `~/.tinfoil/user_cache_secret` can be
   read by the application and passed in the same way.
 - The secret is added to the JSON body of `POST` requests to
   `…/chat/completions`, `…/completions` and `…/responses`, also for requests
-  that you send through the HTTP clients. A non-empty `user_cache_secret` in
+  that you send through the router HTTP client. A non-empty `user_cache_secret` in
   the body still wins.
 
 ### `chat_relaxed` and the SSE parser
@@ -468,7 +478,7 @@ the `tinfoil-verifier` crate:
 ## New in 0.3
 
 - `RouterHttpClient` and `EnclaveHttpClient` as first-class HTTP clients, with
-  `TransportMode::Tls` and `TransportMode::Ehbp` on both.
+  `Transport::Tls` and `Transport::Ehbp` on both.
 - Intel TDX enclaves, in addition to AMD SEV-SNP.
 - `verification_check`, a veto over every verification that a client relies
   on.

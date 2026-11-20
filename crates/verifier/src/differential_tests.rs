@@ -33,14 +33,14 @@ use sha2::{Digest, Sha256};
 
 use crate::canonical::{decode_hex, encode_lower_hex};
 use crate::document::collateral::FORMAT_V2;
-use crate::error::{BoxError, Error};
+use crate::error::{BoxError, Error, UsageError};
 use crate::instant::Instant;
 use crate::json::{self, Object, Value};
 use crate::measurement::{Expected, Measurement, Register};
 use crate::verification::{ArtifactVerification, ConfigVerification, Verification};
 use crate::{
-    ConfigEndorsement, EmbeddedConfig, EmbeddedReferences, Pin, PublicKey, RuntimeReference,
-    Verifier, x509,
+    ArtifactTrust, ConfigAuthorizer, ConfigEndorsement, ConfigTrust, EmbeddedConfig, Pin, Policy,
+    PublicKey, RuntimeReference, Verifier, x509,
 };
 
 const CASES: &[u8] = include_bytes!("../tests/data/verifier/integration_differential.json");
@@ -200,10 +200,15 @@ impl Fixture {
         Some(STANDARD.decode(self.resolve(encoded)).unwrap())
     }
 
-    /// Builds the verifier of a case, with the options in a fixed order.
+    /// Builds the verifier of a case.
+    ///
+    /// The records come from an SDK whose verifier took each source of
+    /// trust as a separate option. Here each selects the config trust or
+    /// the artifact trust of the policy, and a case that selects two
+    /// config trusts is a usage error, as it was there.
     pub(crate) fn verifier(&self, case: &Object) -> Result<Verifier, Error> {
         let options = object(member(case, "options"));
-        let mut builder = Verifier::builder();
+        let mut policy = Policy::default();
         if let Some(pins) = options.get("pins").and_then(Value::as_object) {
             let register = |name: &str| self.resolve(text(pins, name));
             let pins = if text(pins, "platform") == "sev-snp" {
@@ -217,41 +222,45 @@ impl Fixture {
                     register("rtmr3"),
                 )
             };
-            builder = builder.pinned_registers(pins.unwrap());
+            policy.pinned_registers = Some(pins.unwrap());
         }
         let max_age = integer(options, "max_age_ns");
         if max_age != 0 {
-            builder = builder.freshness_max_age(Duration::from_nanos(max_age.unsigned_abs()));
+            policy.freshness_max_age = Duration::from_nanos(max_age.unsigned_abs());
         }
+        let mut configs = Vec::new();
         if let Some(keys) = self.keys(options, "config_keys_pem") {
-            builder = builder.config_signing_keys(keys);
-        }
-        if let Some(keys) = self.keys(options, "freshness_keys_pem") {
-            builder = builder.freshness_signing_keys(keys);
+            configs.push(ConfigTrust::SigningKeys(keys));
         }
         if let Some(ids) = options.get("registry_ids").and_then(Value::as_array) {
             let ids = ids
                 .iter()
                 .map(|id| self.resolve(id.as_str().unwrap()).to_owned())
                 .collect();
-            builder = builder.config_registry_ids(ids);
+            configs.push(ConfigTrust::Registries(ids));
         }
         let authorizer = self.resolve(text(options, "authorizer")).to_owned();
         if !authorizer.is_empty() {
-            builder = builder.config_authorizer(move |endorsement: &ConfigEndorsement| {
-                let digest = encode_lower_hex(&Sha256::digest(endorsement.config()));
-                let accepted = match authorizer.as_str() {
-                    "accept" => true,
-                    "refuse" => false,
-                    only => only.strip_prefix("sha256:") == Some(digest.as_str()),
-                };
-                if accepted {
-                    Ok(())
-                } else {
-                    Err(BoxError::from("config is not authorized"))
-                }
-            });
+            configs.push(ConfigTrust::Authorizer(ConfigAuthorizer::new(
+                move |endorsement: &ConfigEndorsement| {
+                    let digest = encode_lower_hex(&Sha256::digest(endorsement.config()));
+                    let accepted = match authorizer.as_str() {
+                        "accept" => true,
+                        "refuse" => false,
+                        only => only.strip_prefix("sha256:") == Some(digest.as_str()),
+                    };
+                    if accepted {
+                        Ok(())
+                    } else {
+                        Err(BoxError::from("config is not authorized"))
+                    }
+                },
+            )));
         }
+        let freshness_keys = self.keys(options, "freshness_keys_pem");
+        policy.artifacts = ArtifactTrust::Endorsed {
+            freshness_keys: freshness_keys.clone(),
+        };
         if let Some(embedded) = options.get("embedded").and_then(Value::as_object) {
             let name = Some(text(embedded, "config_name"))
                 .filter(|name| !name.is_empty())
@@ -272,19 +281,32 @@ impl Fixture {
             } else {
                 None
             };
-            builder = builder.embedded_references(EmbeddedReferences {
-                config,
-                runtime: self.blob(embedded, "runtime_b64"),
-                platform: self.blob(embedded, "platform_b64"),
-            });
+            let runtime = self.blob(embedded, "runtime_b64");
+            let platform = self.blob(embedded, "platform_b64");
+            // References with no component at all were refused; embedded
+            // artifacts with none still are.
+            if runtime.is_some() || platform.is_some() || config.is_none() {
+                policy.artifacts = ArtifactTrust::Embedded {
+                    runtime,
+                    platform,
+                    freshness_keys,
+                };
+            }
+            if let Some(config) = config {
+                configs.push(ConfigTrust::Embedded(config));
+            }
         }
-        let mut verifier = builder
-            .test_roots(
-                self.root(text(case, "sigstore")).as_deref(),
-                self.root(text(case, "amd")),
-                self.root(text(case, "intel")),
-            )
-            .build()?;
+        if configs.len() > 1 {
+            return Err(UsageError::new("two options select the config trust").into());
+        }
+        let config = configs.pop().unwrap_or_default();
+        let mut verifier = Verifier::with_test_roots(
+            config,
+            policy,
+            self.root(text(case, "sigstore")).as_deref(),
+            self.root(text(case, "amd")),
+            self.root(text(case, "intel")),
+        )?;
         // The registry's root keys cannot be minted for, so a case may put
         // its own in their place.
         if let Some(keys) = self.keys(options, "registry_root_keys_pem") {
@@ -557,9 +579,6 @@ fn replay(fixture: &Fixture, case: &Object) -> Outcome {
     }
     if repo_check.is_ok() != flag(recorded, "repo_check") {
         return Outcome::Differs(format!("repository check: {repo_check:?}"));
-    }
-    if verifier.caller_authorizes_config() != flag(recorded, "caller_authorizes") {
-        return Outcome::Differs("caller_authorizes_config".to_owned());
     }
     let name = text(case, "doc");
     if name.is_empty() {

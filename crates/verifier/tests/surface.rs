@@ -34,23 +34,22 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use tinfoil_verifier::{
-    ATTESTATION_V3_FORMAT, ArtifactVerification, BoxError, CRYPTO_MATERIAL_ID_HPKE,
-    CRYPTO_MATERIAL_ID_TLS, CRYPTO_MATERIAL_V1_FORMAT, ConfigEndorsement, ConfigVerification,
-    CryptoMaterialItem, DEVICE_EVIDENCE_V1_FORMAT, EmbeddedConfig, EmbeddedReferences, Error,
-    Expected, KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_SPKI_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT, Layer,
-    Measurement, NONCE_SIZE, NVIDIA_GPU_EVIDENCE_V1_FORMAT, PUBLIC_REGISTRY_ID, Pin, PublicKey,
-    REGISTER_SIZE, REPORT_DATA_V1_ALGORITHM, Reference, ReferenceSource, Register,
+    ATTESTATION_V3_FORMAT, ArtifactTrust, ArtifactVerification, BoxError, CRYPTO_MATERIAL_ID_HPKE,
+    CRYPTO_MATERIAL_ID_TLS, CRYPTO_MATERIAL_V1_FORMAT, ConfigAuthorizer, ConfigEndorsement,
+    ConfigTrust, ConfigVerification, CryptoMaterialItem, DEVICE_EVIDENCE_V1_FORMAT, EmbeddedConfig,
+    Error, Expected, KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_SPKI_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT,
+    Layer, Measurement, NONCE_SIZE, NVIDIA_GPU_EVIDENCE_V1_FORMAT, PUBLIC_REGISTRY_ID, Pin, Policy,
+    PublicKey, REGISTER_SIZE, REPORT_DATA_V1_ALGORITHM, Reference, ReferenceSource, Register,
     RuntimeReference, SEV_SNP_REPORT_V1_FORMAT, SoftwareIdentity, TDX_QUOTE_V1_FORMAT, UsageError,
-    Verification, VerificationError, VerificationMetadata, Verifier, VerifierBuilder,
-    cert_pubkey_fp, crypto_material_data, parse_reference, random_nonce,
+    Verification, VerificationError, VerificationMetadata, Verifier, cert_pubkey_fp,
+    crypto_material_data, parse_reference, random_nonce,
 };
 
 #[test]
 fn every_public_name_is_importable_and_has_its_signature() {
     // The verifier.
-    let _: fn() -> Verifier = Verifier::new;
+    let _: fn(ConfigTrust, Policy) -> Result<Verifier, Error> = Verifier::new;
     let _: fn() -> Verifier = Verifier::default;
-    let _: fn() -> VerifierBuilder = Verifier::builder;
     let _: fn(&Verifier, &[u8], &[u8], &Pin) -> Result<Verification, Error> = Verifier::verify_v3;
     let _: fn(&Verifier, &[u8], &[u8], &Pin, SystemTime) -> Result<Verification, Error> =
         Verifier::verify_v3_at;
@@ -63,22 +62,10 @@ fn every_public_name_is_importable_and_has_its_signature() {
     let pin = Pin::repo("owner/name").with_project("org/project");
     let _: (&Option<String>, &Option<String>) = (&pin.repo, &pin.project);
     assert_eq!(Pin::none(), Pin::default());
-    let _: fn(&Verifier) -> bool = Verifier::caller_authorizes_config;
     let _: for<'a> fn(&'a Verifier) -> Option<&'a Expected> = Verifier::pinned_registers;
     let _: fn(&Verifier) -> Duration = Verifier::freshness_max_age;
 
-    // Its options, one method each.
-    let _: fn(VerifierBuilder, Expected) -> VerifierBuilder = VerifierBuilder::pinned_registers;
-    let _: fn(VerifierBuilder, Duration) -> VerifierBuilder = VerifierBuilder::freshness_max_age;
-    let _: fn(VerifierBuilder, Vec<PublicKey>) -> VerifierBuilder =
-        VerifierBuilder::config_signing_keys;
-    let _: fn(VerifierBuilder, Vec<PublicKey>) -> VerifierBuilder =
-        VerifierBuilder::freshness_signing_keys;
-    let _: fn(VerifierBuilder, Vec<String>) -> VerifierBuilder =
-        VerifierBuilder::config_registry_ids;
-    let _: fn(VerifierBuilder, EmbeddedReferences) -> VerifierBuilder =
-        VerifierBuilder::embedded_references;
-    let _: fn(VerifierBuilder) -> Result<Verifier, Error> = VerifierBuilder::build;
+    // Its arguments: the config trust and the policy, plain values.
     let authorize = |endorsement: &ConfigEndorsement| -> Result<(), BoxError> {
         let _: &[u8] = endorsement.config();
         let _: Option<&str> = endorsement.reference();
@@ -86,35 +73,58 @@ fn every_public_name_is_importable_and_has_its_signature() {
         let _: Option<&[u8]> = endorsement.issuer_certificate_der();
         Err("no config is authorized here".into())
     };
-    let builder: VerifierBuilder = VerifierBuilder::default().config_authorizer(authorize);
-    let verifier: Verifier = builder.build().unwrap();
-    assert!(verifier.caller_authorizes_config());
+    let embedded = EmbeddedConfig::Reference {
+        digest: String::new(),
+        runtime: RuntimeReference {
+            repo: String::new(),
+            tag: String::new(),
+            digest: String::new(),
+        },
+        name: None,
+    };
+    for config in [
+        ConfigTrust::PublicRegistry,
+        ConfigTrust::Registries(vec![PUBLIC_REGISTRY_ID.to_owned()]),
+        ConfigTrust::SigningKeys(Vec::<PublicKey>::new()),
+        ConfigTrust::Authorizer(ConfigAuthorizer::new(authorize)),
+        ConfigTrust::Embedded(embedded),
+        ConfigTrust::Embedded(EmbeddedConfig::Bytes {
+            bytes: Vec::new(),
+            name: Some(String::new()),
+        }),
+    ] {
+        let _ = format!("{config:?}");
+    }
+    assert!(matches!(
+        ConfigTrust::default(),
+        ConfigTrust::PublicRegistry
+    ));
+    let policy = Policy {
+        pinned_registers: None::<Expected>,
+        freshness_max_age: Duration::ZERO,
+        artifacts: ArtifactTrust::Embedded {
+            runtime: Some(Vec::new()),
+            platform: None,
+            freshness_keys: None::<Vec<PublicKey>>,
+        },
+    };
+    let _ = policy.clone();
+    assert!(matches!(
+        Policy::default().artifacts,
+        ArtifactTrust::Endorsed {
+            freshness_keys: None
+        }
+    ));
+    let verifier: Verifier = Verifier::new(
+        ConfigTrust::Authorizer(ConfigAuthorizer::new(authorize)),
+        Policy::default(),
+    )
+    .unwrap();
+    let _ = verifier;
 
     let _: fn(&str) -> Result<PublicKey, Error> = PublicKey::from_pem;
     let _: fn(&[u8]) -> Result<PublicKey, Error> = PublicKey::from_spki_der;
     let _: fn(&PublicKey) -> Vec<u8> = PublicKey::to_spki_der;
-
-    let references = EmbeddedReferences {
-        config: Some(EmbeddedConfig::Reference {
-            digest: String::new(),
-            runtime: RuntimeReference {
-                repo: String::new(),
-                tag: String::new(),
-                digest: String::new(),
-            },
-            name: None,
-        }),
-        runtime: Some(Vec::new()),
-        platform: Some(Vec::new()),
-    };
-    let _ = EmbeddedReferences {
-        config: Some(EmbeddedConfig::Bytes {
-            bytes: Vec::new(),
-            name: Some(String::new()),
-        }),
-        ..references.clone()
-    };
-    assert_eq!(EmbeddedReferences::default().config, None);
 
     // The record of a verification.
     let _: fn(&Verification) -> &str = Verification::code_digest;
@@ -448,12 +458,10 @@ fn an_ordinary_build_lists_no_replaceable_trust_anchor() {
         .lines()
         .filter(|line| line.contains("dangerous") || line.contains("root"))
         .collect();
-    // Both injection methods are in the source, and only for the adapter.
+    // The one constructor that takes replacement anchors is in the source,
+    // and only for the adapter.
     assert_eq!(
         dangerous,
-        [
-            "fn VerifierBuilder::dangerous_test_only_sigstore_root [conformance build only]",
-            "fn VerifierBuilder::dangerous_test_only_vendor_roots [conformance build only]",
-        ]
+        ["fn Verifier::dangerous_test_only_new [conformance build only]"]
     );
 }
