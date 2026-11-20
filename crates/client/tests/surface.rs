@@ -19,8 +19,9 @@ use tinfoil::reqwest::header::{HeaderMap, HeaderValue};
 use tinfoil::reqwest::{Method, Request, Response, Url};
 use tinfoil::verifier::{BoxError, Policy, Verification};
 use tinfoil::{
-    EnclaveHttpClient, EnclaveHttpClientBuilder, Error, ErrorKind, RequestBuilder,
-    RouterHttpClient, RouterHttpClientBuilder, Transport, Trust, VERSION,
+    AttestationFetcher, AttestationRelay, EnclaveHttpClient, EnclaveHttpClientBuilder, Error,
+    ErrorKind, FetchFuture, RequestBuilder, RouterHttpClient, RouterHttpClientBuilder,
+    RouterListFetcher, RouterListRelay, Transport, Trust, VERSION,
 };
 
 fn handle<T: Clone + Send + Sync + std::fmt::Debug + 'static>() {}
@@ -82,6 +83,42 @@ fn the_accessors_have_their_signatures() {
     let _: for<'a> fn(&'a RouterHttpClient) -> &'a str = RouterHttpClient::enclave;
     let _: fn(&RouterHttpClient) -> Arc<Verification> = RouterHttpClient::current;
     let _: fn() -> RouterHttpClientBuilder = RouterHttpClient::builder;
+}
+
+#[test]
+fn the_fetchers_are_traits_that_async_closures_and_the_relays_implement() {
+    fn attestation<T: AttestationFetcher>(_: &T) {}
+    fn router_list<T: RouterListFetcher>(_: &T) {}
+    let _: fn(&str) -> Result<AttestationRelay, Error> = |url| AttestationRelay::new(url);
+    let _: fn(&str) -> Result<RouterListRelay, Error> = |url| RouterListRelay::new(url);
+    let relay = AttestationRelay::new("https://app.example/tinfoil").expect("a relay");
+    let list = RouterListRelay::new("http://localhost:8080/tinfoil").expect("a relay");
+    let _: &Url = relay.url();
+    let _: &Url = list.url();
+    attestation(&relay);
+    router_list(&list);
+    handle::<AttestationRelay>();
+    handle::<RouterListRelay>();
+
+    let fetch = |host: String, nonce: [u8; 32]| async move {
+        let _ = (host, nonce);
+        Ok::<Vec<u8>, BoxError>(Vec::new())
+    };
+    attestation(&fetch);
+    let future: FetchFuture<Vec<u8>> = fetch.fetch_attestation("h".into(), [0; 32]);
+    drop(future);
+    let routers = || async { Ok::<Vec<String>, BoxError>(Vec::new()) };
+    router_list(&routers);
+    let future: FetchFuture<Vec<String>> = routers.fetch_router_list();
+    drop(future);
+
+    let _: EnclaveHttpClientBuilder = EnclaveHttpClient::builder("e.example", Trust::repo("o/n"))
+        .fetch_attestation(relay.clone())
+        .fetch_attestation(fetch);
+    let _: RouterHttpClientBuilder = RouterHttpClient::builder()
+        .fetch_attestation(relay)
+        .fetch_router_list(list)
+        .fetch_router_list(routers);
 }
 
 #[test]

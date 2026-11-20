@@ -39,6 +39,13 @@ use crate::error::Error;
 /// ASCII form, a default port removed, and dot segments of the path
 /// resolved.
 pub(crate) fn validate(base_url: &str) -> Result<Url, Error> {
+    validate_as(base_url, "proxy URL")
+}
+
+/// [`validate`] for a URL that `name` describes in the errors, such as a
+/// relay URL, which follows the rules of a proxy URL.
+pub(crate) fn validate_as(base_url: &str, name: &str) -> Result<Url, Error> {
+    let invalid = |reason: &str| Error::configuration(format!("invalid {name}: {reason}"));
     if base_url.is_empty() {
         return Err(invalid("it is empty"));
     }

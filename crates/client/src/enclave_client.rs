@@ -7,6 +7,7 @@ use std::time::Duration;
 use reqwest::Url;
 
 use crate::error::Error;
+use crate::fetchers::{self, AttestationFetcher};
 use crate::internal::attested::{AttestedClient, Settings};
 use crate::internal::transport::base_url;
 use crate::internal::{enclave, system_clock};
@@ -266,6 +267,20 @@ impl EnclaveHttpClientBuilder {
         self
     }
 
+    /// How the client obtains attestation documents, in place of fetching
+    /// them directly from the enclave: an [`AttestationRelay`], or any
+    /// [`AttestationFetcher`], such as an async closure. It is used for
+    /// every verification: when the client connects, and whenever it
+    /// verifies again after an expiry or a key rotation. Whatever it returns is verified as a
+    /// directly fetched document is.
+    ///
+    /// [`AttestationRelay`]: crate::AttestationRelay
+    /// [`AttestationFetcher`]: crate::AttestationFetcher
+    pub fn fetch_attestation(mut self, fetcher: impl AttestationFetcher) -> Self {
+        self.options.common.attestation_fetcher = Some(Arc::new(fetcher));
+        self
+    }
+
     /// Checks the options, verifies the enclave and returns the client.
     ///
     /// Before any network I/O, in this order, each a configuration error:
@@ -303,10 +318,9 @@ impl EnclaveHttpClientBuilder {
     /// Dropping the future stops the verification and closes its
     /// connection. No client exists and nothing is left behind.
     pub async fn connect(self) -> Result<EnclaveHttpClient, Error> {
+        let fetch = fetchers::attestation_fetch(self.options.common.attestation_fetcher.clone());
         let (checked, settings, trust) = self.prepare()?;
-        let inner =
-            AttestedClient::connect(checked, settings, system_clock(), enclave::network_fetch())
-                .await?;
+        let inner = AttestedClient::connect(checked, settings, system_clock(), fetch).await?;
         Ok(EnclaveHttpClient {
             inner: Arc::new(inner),
             trust: Arc::new(trust),

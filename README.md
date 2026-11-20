@@ -165,6 +165,30 @@ async fn through_a_proxy(api_key: &str) -> Result<OpenAIClient, tinfoil::Error> 
 
 The proxy URL must be absolute and use HTTPS, without credentials, a query string or a fragment. `http://` is accepted only for the name `localhost` and for a loopback IP address: `127.0.0.0/8` or `[::1]`. An IPv4 address must be written as four decimal numbers. An enclave client refuses a proxy URL on the enclave's own origin; leave `proxy_url` unset to connect directly. The transport is the option and nothing else: a client never falls back from one transport to the other.
 
+## Reaching only your own origin
+
+A client fetches two things besides its requests: each enclave's attestation document, directly from the enclave, and, on the router route, the list of candidate routers, from `https://atc.tinfoil.sh/routers`. The builders' `fetch_attestation(..)` and `fetch_router_list(..)` let you choose how they are obtained, so that a client in a browser-like environment, or one that should not reveal its IP address to enclaves, reaches only your origin. Together with an EHBP proxy URL, every request goes there:
+
+```rust,no_run
+use tinfoil::{AttestationRelay, RouterHttpClient, RouterListRelay, Transport};
+
+async fn through_my_origin() -> Result<RouterHttpClient, tinfoil::Error> {
+    RouterHttpClient::builder()
+        // Requests, with sealed bodies.
+        .transport(Transport::Ehbp {
+            proxy_url: Some("https://app.example/tinfoil/proxy/".into()),
+        })
+        // GET https://app.example/tinfoil/.well-known/tinfoil-attestation?nonce=..&enclave=..
+        .fetch_attestation(AttestationRelay::new("https://app.example/tinfoil")?)
+        // GET https://app.example/tinfoil/routers
+        .fetch_router_list(RouterListRelay::new("https://app.example/tinfoil")?)
+        .connect()
+        .await
+}
+```
+
+The attestation relay forwards each request to `https://<enclave>/.well-known/tinfoil-attestation?nonce=<nonce>` and returns the body unchanged; it should forward only to the enclave hosts that you expect, so that it is not an open proxy. The router-list relay forwards to `https://atc.tinfoil.sh/routers`. A relay URL follows the rules of a proxy URL, and an invalid one is an error of `new`. Neither option changes what is trusted: every document is verified as a directly fetched one is, and discovery still runs and verifies every router. Any `Fn(String, [u8; 32])` closure that returns a future of the document's bytes is an attestation fetcher too, and any `Fn()` closure that returns a future of hosts is a router-list fetcher. A fetcher's error is a network error unless it is a `tinfoil::Error`, which keeps its kind; a router-list fetcher's error counts as an empty list.
+
 ## Limits of the protection
 
 - **EHBP mode does not authenticate the end of a response.** Each part of a sealed response body is authenticated, and so is the order of the parts, so the content cannot be forged, altered or reordered. Nothing marks the last part, though: whoever controls the connection (a proxy, for example) can end a sealed response early between two parts, or return one with no parts at all, and the read ends without an error. A response that is cut inside a part is an error. If you need to know that a response is complete, check its own terminator: that the JSON document is whole, or that the final event of a stream arrived. The SSE parser (`chat_relaxed().create_stream`, `sse::parse_event_stream`) reports a stream that is cut inside an event, and a stream that ends after a complete event without `[DONE]` ends without an error.
@@ -180,7 +204,7 @@ The proxy URL must be absolute and use HTTPS, without credentials, a query strin
   | a response of the HTTP clients | no limit: the caller reads the body |
 
   Within the 64 MiB of a typed stream, async-openai holds each event until it ends and reads ahead of the caller, without a limit of its own; `chat_relaxed().create_stream` bounds each event. To download something larger than 64 MiB (a file's content, for example), send the request through `http_client()` and read the body as a stream.
-- **The router list is not trusted.** The list that `RouterHttpClient` discovers routers from is fetched over ordinary HTTPS and is only a list of candidates: every router is verified like any other enclave before it is used. A wrong list can cause failed attempts within the 30 seconds that discovery may take, after which `inference.tinfoil.sh` is verified; it cannot make the client use an enclave that does not pass verification.
+- **The router list is not trusted.** The list that `RouterHttpClient` discovers routers from is fetched over ordinary HTTPS, or through your `fetch_router_list`, and is only a list of candidates, which are tried in a random order: every router is verified like any other enclave before it is used. A wrong list can cause failed attempts within the 30 seconds that discovery may take, after which `inference.tinfoil.sh` is verified; it cannot make the client use an enclave that does not pass verification. An attestation document does not name the host that serves it, though, so the list source is trusted not to name a host that relays another router's attestation: in EHBP mode such a host would receive the request headers, an API key among them, although not the sealed bodies.
 
 ## What verification covers
 

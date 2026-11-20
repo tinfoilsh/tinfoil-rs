@@ -115,10 +115,16 @@
 //!   process. A non-empty `user_cache_secret`
 //!   string in the body is kept.
 //! - **The router list is not trusted.** [`RouterHttpClient`] takes its
-//!   candidates from a list that is fetched over ordinary HTTPS, and
+//!   candidates from a list that is fetched over ordinary HTTPS, or from
+//!   the caller's [`RouterListFetcher`], tries them in a random order, and
 //!   verifies each router like any other enclave before it uses it. A
 //!   wrong list can only cause attempts that fail, within the fixed time
-//!   that discovery may take.
+//!   that discovery may take, except that the list source is trusted not
+//!   to name a host that relays another router's attestation (see
+//!   [`RouterListFetcher`]).
+//! - **Fetchers are not trusted.** A document that an
+//!   [`AttestationFetcher`] returns, such as an [`AttestationRelay`], is
+//!   verified as a directly fetched one is.
 //!
 //! # Features
 //!
@@ -164,6 +170,7 @@
 mod attested_client;
 mod enclave_client;
 mod error;
+mod fetchers;
 mod internal;
 #[cfg(feature = "openai")]
 mod openai;
@@ -198,6 +205,9 @@ pub use async_openai::types::embeddings;
 pub use attested_client::AttestedHttpClient;
 pub use enclave_client::{EnclaveHttpClient, EnclaveHttpClientBuilder};
 pub use error::{Error, ErrorKind};
+pub use fetchers::{
+    AttestationFetcher, AttestationRelay, FetchFuture, RouterListFetcher, RouterListRelay,
+};
 #[cfg(feature = "openai")]
 pub use openai::relaxed::{
     RelaxedChat, RelaxedChatRequestBuilder, RelaxedResponse, RelaxedStream, RelaxedStreamChunk,

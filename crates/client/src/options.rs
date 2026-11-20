@@ -7,6 +7,7 @@ use std::time::Duration;
 use reqwest::Url;
 
 use crate::error::Error;
+use crate::fetchers::AttestationFetcher;
 use crate::internal::transport::base_url;
 use crate::verifier::{BoxError, Policy, Verification};
 
@@ -120,6 +121,7 @@ pub(crate) struct CommonOptions {
     pub(crate) verification_check: Option<VerificationCheck>,
     pub(crate) user_cache_secret: Option<Secret>,
     pub(crate) timeout: Option<Duration>,
+    pub(crate) attestation_fetcher: Option<Arc<dyn AttestationFetcher>>,
 }
 
 impl CommonOptions {
@@ -172,6 +174,7 @@ impl fmt::Debug for CommonOptions {
             .field("verification_check", &self.verification_check.is_some())
             .field("user_cache_secret", &self.user_cache_secret)
             .field("timeout", &self.timeout)
+            .field("attestation_fetcher", &self.attestation_fetcher.is_some())
             .finish()
     }
 }

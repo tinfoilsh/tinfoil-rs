@@ -7,6 +7,7 @@ use std::time::Duration;
 use reqwest::Url;
 
 use crate::error::Error;
+use crate::fetchers::{self, AttestationFetcher, RouterListFetcher};
 use crate::internal::attested::{AttestedClient, Settings, mode_for};
 use crate::internal::enclave::{self, Enclave};
 use crate::internal::{cachesecret, router, system_clock};
@@ -44,6 +45,7 @@ impl RouterHttpClient {
     pub fn builder() -> RouterHttpClientBuilder {
         RouterHttpClientBuilder {
             options: RouteOptions::default(),
+            router_list_fetcher: None,
         }
     }
 
@@ -108,10 +110,20 @@ impl fmt::Debug for RouterHttpClient {
 /// nothing: [`connect`](Self::connect) checks every option before any
 /// network I/O. The `Debug` output shows neither the user cache secret nor
 /// the unchecked proxy URL.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[must_use = "a builder does nothing until `connect` is called"]
 pub struct RouterHttpClientBuilder {
     options: RouteOptions,
+    router_list_fetcher: Option<Arc<dyn RouterListFetcher>>,
+}
+
+impl fmt::Debug for RouterHttpClientBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RouterHttpClientBuilder")
+            .field("options", &self.options)
+            .field("router_list_fetcher", &self.router_list_fetcher.is_some())
+            .finish()
+    }
 }
 
 impl RouterHttpClientBuilder {
@@ -191,6 +203,36 @@ impl RouterHttpClientBuilder {
         self
     }
 
+    /// How the client obtains attestation documents, in place of fetching
+    /// them directly from the enclave: an [`AttestationRelay`], or any
+    /// [`AttestationFetcher`], such as an async closure. It is used for
+    /// every verification: for each router that discovery tries, for the
+    /// fallback router, and whenever the client verifies its router again. Whatever it returns is verified as a
+    /// directly fetched document is.
+    ///
+    /// [`AttestationRelay`]: crate::AttestationRelay
+    /// [`AttestationFetcher`]: crate::AttestationFetcher
+    pub fn fetch_attestation(mut self, fetcher: impl AttestationFetcher) -> Self {
+        self.options.common.attestation_fetcher = Some(Arc::new(fetcher));
+        self
+    }
+
+    /// How the client obtains its candidate routers, in place of fetching
+    /// Tinfoil's list from `https://atc.tinfoil.sh/routers`: a
+    /// [`RouterListRelay`], or any [`RouterListFetcher`], such as an async
+    /// closure. Discovery still runs: the list only proposes routers, each
+    /// of which is verified before it is used, and an error counts as an
+    /// empty list, after which the client falls back to
+    /// `inference.tinfoil.sh`. See [`RouterListFetcher`] for what the list
+    /// source is trusted with.
+    ///
+    /// [`RouterListRelay`]: crate::RouterListRelay
+    /// [`RouterListFetcher`]: crate::RouterListFetcher
+    pub fn fetch_router_list(mut self, fetcher: impl RouterListFetcher) -> Self {
+        self.router_list_fetcher = Some(Arc::new(fetcher));
+        self
+    }
+
     /// Checks the options, discovers and verifies a router, and returns
     /// the client.
     ///
@@ -225,6 +267,8 @@ impl RouterHttpClientBuilder {
     /// Dropping the future stops discovery and closes its connections. No
     /// client exists.
     pub async fn connect(self) -> Result<RouterHttpClient, Error> {
+        let fetch = fetchers::attestation_fetch(self.options.common.attestation_fetcher.clone());
+        let list_fetcher = self.router_list_fetcher.clone();
         let (fallback, settings) = self.prepare()?;
         let mode = mode_for(settings.mode)?;
         // Every router is verified under the policy that was checked, and
@@ -242,17 +286,17 @@ impl RouterHttpClientBuilder {
             Ok(Enclave::from_checked(
                 checked,
                 system_clock(),
-                enclave::network_fetch(),
+                Arc::clone(&fetch),
             ))
         };
-        let inner = router::connect(
-            router::router_list(),
-            enclave_for,
-            mode,
-            settings,
-            cachesecret::resolve,
-        )
-        .await?;
+        let list = async move {
+            match list_fetcher {
+                Some(fetcher) => fetchers::router_list(fetcher).await,
+                None => router::router_list().await,
+            }
+        };
+        let inner =
+            router::connect(list, enclave_for, mode, settings, cachesecret::resolve).await?;
         Ok(RouterHttpClient {
             inner: Arc::new(inner),
         })
