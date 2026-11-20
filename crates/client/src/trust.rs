@@ -1,5 +1,7 @@
 //! The trust argument of an enclave client.
 
+use std::fmt;
+
 use crate::error::Error;
 use crate::verifier::{ConfigAuthorizer, ConfigTrust, EmbeddedConfig, Pin, PublicKey};
 
@@ -23,7 +25,7 @@ use crate::verifier::{ConfigAuthorizer, ConfigTrust, EmbeddedConfig, Pin, Public
 /// };
 /// # let _ = (repo, project, either);
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub enum Trust {
     /// `attestation-collaterals/v2` collateral for a GitHub repository.
@@ -90,6 +92,40 @@ pub enum Trust {
         /// public registry.
         project: String,
     },
+}
+
+impl fmt::Debug for Trust {
+    /// The variant and its names. The bytes of an embedded config are not
+    /// printed, only their length, and keys are counted.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Trust::RepoPin { repo } => f.debug_struct("RepoPin").field("repo", repo).finish(),
+            Trust::ProjectPin {
+                project,
+                registry_ids,
+            } => f
+                .debug_struct("ProjectPin")
+                .field("project", project)
+                .field("registry_ids", registry_ids)
+                .finish(),
+            Trust::SignedBy { keys, project } => f
+                .debug_struct("SignedBy")
+                .field("keys", &keys.len())
+                .field("project", project)
+                .finish(),
+            Trust::AuthorizedBy(_) => f.write_str("AuthorizedBy"),
+            Trust::EmbeddedConfig { name, bytes } => f
+                .debug_struct("EmbeddedConfig")
+                .field("name", name)
+                .field("bytes", &format_args!("[{} bytes]", bytes.len()))
+                .finish(),
+            Trust::EitherPin { repo, project } => f
+                .debug_struct("EitherPin")
+                .field("repo", repo)
+                .field("project", project)
+                .finish(),
+        }
+    }
 }
 
 impl Trust {
@@ -181,6 +217,18 @@ mod tests {
         let error = trust.verifier_inputs().expect_err("refused");
         assert_eq!(error.kind(), ErrorKind::Configuration);
         error.to_string()
+    }
+
+    #[test]
+    fn debug_output_shows_no_config_bytes() {
+        let trust = Trust::EmbeddedConfig {
+            name: Some("/org/project/v1".into()),
+            bytes: b"cvm-version: secret-config".to_vec(),
+        };
+        let printed = format!("{trust:?}");
+        assert!(!printed.contains("secret-config"), "{printed}");
+        assert!(printed.contains("[26 bytes]"), "{printed}");
+        assert!(printed.contains("/org/project/v1"), "{printed}");
     }
 
     #[test]
