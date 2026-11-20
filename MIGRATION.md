@@ -193,7 +193,7 @@ async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
 | `client.with_user_cache_secret(secret)` | `.user_cache_secret(secret)` on the `RouterHttpClient` builder, before `connect()`. An empty string is an error; leave the option unset for the default |
 | `client.secure_client()` | `client.http_client()`, which returns the attested HTTP client as an `AttestedHttpClient` (a `Router` or an `Enclave` client) |
 | `client.http_client()` → `Result<&OriginBoundClient>` | `client.http_client()`, infallible, and it works in EHBP mode too |
-| `client.enclave()`, `client.repo()` | `client.http_client().enclave()`; the `trust()` of the `EnclaveHttpClient` |
+| `client.enclave()`, `client.repo()` | `client.http_client().enclave()`; `repo()` has no direct replacement: a router client's trust is fixed, and an `EnclaveHttpClient` (in `AttestedHttpClient::Enclave`) has `trust()` |
 
 ## `SecureClient`
 
@@ -203,7 +203,7 @@ async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
 | 0.2 | 0.3 |
 |---|---|
 | `SecureClient::new(host, repo, api_key)` + `verify()` | `EnclaveHttpClient::connect(host, Trust::repo(repo))` |
-| `SecureClient::new_with_proxy(host, repo, api_key, proxy_url)` + `verify()` | `EnclaveHttpClient::builder(host, Trust::repo(repo)).transport(Transport::Ehbp { proxy_url: Some(proxy_url) }).connect()` |
+| `SecureClient::new_with_proxy(host, repo, api_key, proxy_url)` + `verify()` | `EnclaveHttpClient::builder(host, Trust::repo(repo)).transport(Transport::Ehbp { proxy_url: Some(proxy_url.to_owned()) }).connect()` |
 | `SecureClient::new_default_client(api_key)` | `RouterHttpClient::connect()` |
 | `SecureClient::with_measurement(host, api_key, measurement)` | a `Policy` with `pinned_registers`; see below |
 | `is_verified()` | removed: a client is always verified. `current()` returns the last verification |

@@ -188,7 +188,7 @@ A verification passes only if all of the following hold. They are checked offlin
 
 - **The hardware evidence is authentic.** The AMD SEV-SNP report or Intel TDX quote is signed by a key that chains to the vendor's root, and it satisfies the platform policy.
 - **The evidence answers this request.** The document is bound to a fresh random nonce that the client sent.
-- **The enclave runs what the pin names.** The enclave's measurement matches reference values that are themselves authenticated, through signed endorsements and the Sigstore trusted root, for the GitHub repository or the config registry project that the trust argument names, or the config that it signs, authorizes or embeds.
+- **The enclave runs what the trust argument names.** The enclave's measurement matches reference values for the config that the trust accepts. For a repository or a project (`RepoPin`, `ProjectPin`, `EitherPin`, and the router), those values are authenticated through signed endorsements and the Sigstore trusted root. Otherwise the config is accepted on your own authority: endorsements signed by your keys (`SignedBy`), a config that your function authorizes (`AuthorizedBy`), or the config bytes that you embed (`EmbeddedConfig`); the runtime and the platform are still authenticated as the policy says.
 - **The evidence is fresh.** The signed freshness proofs are no older than the freshness window (seven days by default), and the verification expires when they stop vouching for the document.
 - **The keys belong to the enclave.** The TLS key fingerprint and the HPKE key that the client binds its traffic to are part of what the hardware signed.
 
