@@ -124,32 +124,50 @@ pub(crate) async fn connect<V: Evidence>(
     .await
 }
 
-/// Puts `routers` in a uniformly random order: a Fisher-Yates shuffle on
-/// the operating system's random bytes. When it supplies none, the order
-/// stays as it is.
+/// Puts `routers` in a uniformly random order: a Fisher-Yates shuffle
+/// driven by a generator that one read of the operating system's random
+/// bytes seeds, so that a long list costs no system call per entry. When
+/// the operating system supplies no random bytes, the order stays as it
+/// is. The order spreads clients across routers; it protects nothing, so
+/// the generator need not be cryptographic.
 pub(crate) fn shuffle(routers: &mut [String]) {
+    let mut seed = [0u8; 8];
+    if getrandom::fill(&mut seed).is_err() {
+        return;
+    }
+    let mut random = SplitMix64(u64::from_le_bytes(seed));
     for last in (1..routers.len()).rev() {
-        let Some(pick) = random_below(last.saturating_add(1)) else {
+        let Some(pick) = random.below(last.saturating_add(1)) else {
             return;
         };
         routers.swap(last, pick);
     }
 }
 
-/// A uniformly random number below `bound`, which is not zero, by
-/// rejection sampling; `None` when the operating system supplies no random
-/// bytes.
-fn random_below(bound: usize) -> Option<usize> {
-    let bound = u64::try_from(bound).ok()?;
-    // The largest multiple of `bound` that a `u64` holds, so that every
-    // remainder below `bound` is equally likely.
-    let limit = u64::MAX.checked_sub(u64::MAX.checked_rem(bound)?)?;
-    loop {
-        let mut bytes = [0u8; 8];
-        getrandom::fill(&mut bytes).ok()?;
-        let value = u64::from_le_bytes(bytes);
-        if value < limit {
-            return usize::try_from(value.checked_rem(bound)?).ok();
+/// The SplitMix64 generator.
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// A uniformly random number below `bound`, which is not zero, by
+    /// rejection sampling.
+    fn below(&mut self, bound: usize) -> Option<usize> {
+        let bound = u64::try_from(bound).ok()?;
+        // The largest multiple of `bound` that a `u64` holds, so that
+        // every remainder below `bound` is equally likely.
+        let limit = u64::MAX.checked_sub(u64::MAX.checked_rem(bound)?)?;
+        loop {
+            let value = self.next();
+            if value < limit {
+                return usize::try_from(value.checked_rem(bound)?).ok();
+            }
         }
     }
 }
