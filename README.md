@@ -127,7 +127,7 @@ The `Trust` argument names who vouches for the enclave's config. It is one of:
 
 The same name can belong to different owners as a repository and as a project, so neither is satisfied by the other's collateral. An empty repository or project, and an empty list of registry IDs, are configuration errors.
 
-`RouterHttpClient::connect()` takes no host: it tries the routers of Tinfoil's published list in order and keeps the first that passes verification, or else `inference.tinfoil.sh`.
+`RouterHttpClient::connect()` takes no host: it tries the routers of Tinfoil's published list in a random order and keeps the first that passes verification, or else `inference.tinfoil.sh`.
 
 On every client, `current()` returns the last successful verification without checking it, `ensure_verified()` returns one that is valid now (verifying first if needed), and `reverify()` verifies again unconditionally. On the OpenAI client, `http_client()` returns the HTTP client underneath as an `AttestedHttpClient`, which has these methods and the request methods; match on it for the concrete client.
 
@@ -187,7 +187,7 @@ async fn through_my_origin() -> Result<RouterHttpClient, tinfoil::Error> {
 }
 ```
 
-The attestation relay forwards each request to `https://<enclave>/.well-known/tinfoil-attestation?nonce=<nonce>` and returns the body unchanged; it should forward only to the enclave hosts that you expect, so that it is not an open proxy. The router-list relay forwards to `https://atc.tinfoil.sh/routers`. A relay URL follows the rules of a proxy URL, and an invalid one is an error of `new`. Neither option changes what is trusted: every document is verified as a directly fetched one is, and discovery still runs and verifies every router. Any `Fn(String, [u8; 32])` closure that returns a future of the document's bytes is an attestation fetcher too, and any `Fn()` closure that returns a future of hosts is a router-list fetcher. A fetcher's error is a network error unless it is a `tinfoil::Error`, which keeps its kind; a router-list fetcher's error counts as an empty list.
+The attestation relay forwards each request to `https://<enclave>/.well-known/tinfoil-attestation?nonce=<nonce>` and returns the body unchanged; it should forward only to the enclave hosts that you expect, so that it is not an open proxy. The router-list relay forwards to `https://atc.tinfoil.sh/routers`. A relay URL follows the rules of a proxy URL, and an invalid one is an error of `new`. Neither option changes what is trusted: every document is verified as a directly fetched one is, and discovery still runs and verifies every router. Any `Fn(String, [u8; 32])` closure whose future returns `Result<Vec<u8>, tinfoil::verifier::BoxError>` is an attestation fetcher too, and any `Fn()` closure whose future returns `Result<Vec<String>, tinfoil::verifier::BoxError>` is a router-list fetcher. A fetcher's error is a network error unless it is a `tinfoil::Error`, which keeps its kind; a router-list fetcher's error counts as an empty list.
 
 ## Limits of the protection
 

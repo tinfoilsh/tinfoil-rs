@@ -248,9 +248,11 @@ pub struct OpenAIOptions {
     /// It must be an RFC 3986 absolute path: it starts with `/`, but not
     /// with `//`, and holds only path characters (letters, digits,
     /// `-._~!$&'()*+,;=:@`), `/` between segments and well-formed `%XX`
-    /// escapes. A `.` or `..` segment, an encoded slash (`%2F`) and an
-    /// encoded backslash (`%5C`) are refused, percent-encoded or not, and
-    /// so are a query and a fragment. Any other escape is accepted, also
+    /// escapes. A segment that is `.` or `..` is refused, percent-encoded
+    /// or not, and so is a segment that holds a slash or a backslash once
+    /// it is percent-decoded (`%2F` or `%5C`); the `/` between segments is
+    /// what separates them. A query and a fragment are refused too. Any
+    /// other escape is accepted, also
     /// one of a byte that is not UTF-8. Each mistake, an empty string among
     /// them, is a configuration error.
     pub api_path: Option<String>,

@@ -19,8 +19,9 @@ use crate::verifier::{BoxError, ConfigTrust, Policy, Verification, Verifier};
 /// discovered.
 ///
 /// Tinfoil's router serves the inference API for every model. The client
-/// finds one when it is created: it takes the first router of Tinfoil's
-/// published list that passes verification, and otherwise
+/// finds one when it is created: it tries the routers of Tinfoil's
+/// published list in a random order, takes the first that passes
+/// verification, and otherwise
 /// `inference.tinfoil.sh`. From then on it behaves as an
 /// [`EnclaveHttpClient`](crate::EnclaveHttpClient) for that router: it
 /// verifies the same router again when the verification expires or the
@@ -246,7 +247,7 @@ impl RouterHttpClientBuilder {
     ///
     /// Then discovery runs, for at most 30 seconds in all. The router list
     /// is fetched; a list that cannot be fetched or read counts as empty.
-    /// Its routers are tried one at a time, in the order of the list, each
+    /// Its routers are tried one at a time, in a random order, each
     /// with a single verification, and the first that passes,
     /// `verification_check` included, becomes the client's router. A
     /// router that fails, for whatever reason, is skipped. When none
