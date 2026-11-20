@@ -63,18 +63,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`Client` dereferences to `async_openai::Client`, so the whole async-openai API is available on it, streaming included. Request and response types are re-exported as `tinfoil::chat`, `tinfoil::audio` and `tinfoil::embeddings`, and the crates themselves as `tinfoil::async_openai` and `tinfoil::reqwest`, so that the types in the API are the ones that the SDK was built with.
+`Client` (another name for `OpenAIClient`) dereferences to `async_openai::Client`, so the whole async-openai API is available on it, streaming included. Request and response types are re-exported as `tinfoil::chat`, `tinfoil::audio` and `tinfoil::embeddings`, and the crates themselves as `tinfoil::async_openai` and `tinfoil::reqwest`, so that the types in the API are the ones that the SDK was built with.
 
 The API key travels only in the `OpenAIConfig` that you pass. The SDK reads no API key from the environment. (`OpenAIConfig::new()` itself reads `OPENAI_API_KEY`; `with_api_key` replaces what it read.)
 
 ## Clients
 
-| route | HTTP client | OpenAI client |
-|---|---|---|
-| Tinfoil's router, discovered (recommended) | `RouterHttpClient` | `Client`, or `RouterOpenAIClient` to configure it |
-| an enclave that you name | `EnclaveHttpClient` | `EnclaveOpenAIClient` |
+| route | HTTP client |
+|---|---|
+| Tinfoil's router, discovered (recommended) | `RouterHttpClient` |
+| an enclave that you name | `EnclaveHttpClient` |
 
-Every client:
+The OpenAI client is a layer over either: `OpenAIClient::new(http, options, config)` takes a verified HTTP client and does no further network I/O, and `Client::connect(config)` builds one over a router in one line.
+
+Every HTTP client:
 
 - is created by `connect(..)`, with the defaults, or by `builder(..)` followed by setters and `connect()`. Options are checked before any network I/O, and the enclave is verified before `connect` returns;
 - verifies the enclave again by itself when the verification expires or the enclave's key changes;
@@ -127,7 +129,7 @@ The same name can belong to different owners as a repository and as a project, s
 
 `RouterHttpClient::connect()` takes no host: it tries the routers of Tinfoil's published list in order and keeps the first that passes verification, or else `inference.tinfoil.sh`.
 
-On every client, `current()` returns the last successful verification without checking it, `ensure_verified()` returns one that is valid now (verifying first if needed), and `reverify()` verifies again unconditionally. On the OpenAI clients, `http_client()` returns the HTTP client underneath, for these methods and for raw requests.
+On every client, `current()` returns the last successful verification without checking it, `ensure_verified()` returns one that is valid now (verifying first if needed), and `reverify()` verifies again unconditionally. On the OpenAI client, `http_client()` returns the HTTP client underneath as an `AttestedHttpClient`, which has these methods and the request methods; match on it for the concrete client.
 
 Redirects are not followed on attested requests: a `3xx` response is returned to the caller, except in the EHBP mode, where one that answers a sealed request fails the request.
 
@@ -144,18 +146,20 @@ A proxy exists only inside `Transport::Ehbp`: `proxy_url: None` connects directl
 use std::time::Duration;
 
 use tinfoil::async_openai::config::OpenAIConfig;
-use tinfoil::{RouterOpenAIClient, Transport};
+use tinfoil::{OpenAIClient, OpenAIOptions, RouterHttpClient, Transport};
 
-async fn through_a_proxy(api_key: &str) -> Result<RouterOpenAIClient, tinfoil::Error> {
-    // The key is sent in a header, which the proxy can read and replace.
-    let config = OpenAIConfig::new().with_api_key(api_key);
-    RouterOpenAIClient::builder(config)
+async fn through_a_proxy(api_key: &str) -> Result<OpenAIClient, tinfoil::Error> {
+    let http = RouterHttpClient::builder()
         .transport(Transport::Ehbp {
-            proxy_url: Some("https://api.example.com/tinfoil/v1/".into()),
+            proxy_url: Some("https://api.example.com/tinfoil/".into()),
         })
         .timeout(Duration::from_secs(120))
         .connect()
-        .await
+        .await?;
+    // The key is sent in a header, which the proxy can read and replace.
+    let config = OpenAIConfig::new().with_api_key(api_key);
+    // Requests go to https://api.example.com/tinfoil/v1/.
+    OpenAIClient::new(http, OpenAIOptions::default(), config)
 }
 ```
 
@@ -301,7 +305,10 @@ These bounds are fixed:
 - The OpenAI clients send a call again at most twice (three attempts) when the response has status `429` or `5xx`. The wait is half a second before the first retry and one second before the second, each shortened at random by up to a quarter. A response can name the wait itself, in `Retry-After-Ms` (milliseconds) or `Retry-After` (seconds, or a date in the form `Sun, 06 Nov 1994 08:49:37 GMT`; a date in another form is ignored, and the backoff applies); it is obeyed up to two minutes, or up to the `timeout` option if that is shorter. A response that asks for a longer wait is not tried again, and the call returns its error at once. A `429` whose error is `insufficient_quota` is not tried again; any other `429` is, also one whose body is not the API's error object, is larger than 1 MiB or cannot be read. An error of the SDK itself (a refused verification, a refused request, a failed connection, a deadline) is reported once. Nothing is tried again once a stream has started.
 - The HTTP clients do not retry on a status code.
 
-## More on the OpenAI clients
+## More on the OpenAI client
+
+The OpenAI client sets async-openai's API base itself, after your `OpenAIConfig`, so an API base in the configuration or in `OPENAI_BASE_URL` has no effect. The API base is the HTTP client's `base_url()` (the proxy URL, or `https://<enclave>/`) followed by `OpenAIOptions::api_path`, `/v1/` by default. An API path must be absolute, without a query, a fragment, an encoded slash, or a `.` or `..` segment.
+
 
 - `chat_relaxed()` sends and returns raw JSON, for request fields and response events that async-openai's types do not model (web search, vendor events). Its stream ends at `[DONE]`, and fails if the response ends inside an event.
 - `transcribe(request)` and `embed_batch(model, inputs)` are shortcuts; `embed_batch` returns one vector for each input, in input order.

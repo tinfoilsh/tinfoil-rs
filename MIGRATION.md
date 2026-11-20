@@ -46,7 +46,7 @@ async-openai moves from 0.41 to 0.42. Use the re-exports (`tinfoil::async_openai
 `tinfoil::chat`, `tinfoil::audio`, `tinfoil::embeddings`) rather than a
 dependency of your own, so that the versions cannot differ.
 
-The OpenAI clients are behind the cargo feature `openai`, which is on by
+The OpenAI client is behind the cargo feature `openai`, which is on by
 default. With `default-features = false` the crate is the HTTP clients and the
 verifier only.
 
@@ -73,12 +73,14 @@ async fn connect() -> Result<tinfoil::Client, Box<dyn std::error::Error>> {
 ```
 
 `Client::connect` discovers and verifies Tinfoil's router, as `new_default`
-did. It takes no other options; use `RouterOpenAIClient::builder(config)` to
-set a transport mode, a policy, a timeout or a cache secret on the same
-route.
+did. It takes no other options. To set a transport, a policy, a timeout or a
+cache secret on the same route, build a `RouterHttpClient` with its builder
+and pass it to `OpenAIClient::new` (`Client` is another name for
+`OpenAIClient`).
 
 The `OpenAIConfig` also carries the organization, the project and extra
-headers. Its API base is always replaced with the attested route.
+headers. Its API base is always replaced with the attested route; set
+`OpenAIOptions::api_path` to change the path of the API.
 
 ### `Client::new(enclave, repo, api_key)`
 
@@ -95,15 +97,16 @@ let client = tinfoil::Client::new(
 ```rust,no_run
 // 0.3
 use tinfoil::async_openai::config::OpenAIConfig;
-use tinfoil::{EnclaveOpenAIClient, Trust};
+use tinfoil::{EnclaveHttpClient, OpenAIClient, OpenAIOptions, Trust};
 
-async fn connect(api_key: &str) -> Result<EnclaveOpenAIClient, tinfoil::Error> {
-    EnclaveOpenAIClient::connect(
+async fn connect(api_key: &str) -> Result<OpenAIClient, tinfoil::Error> {
+    let http = EnclaveHttpClient::connect(
         "inference.tinfoil.sh",
         Trust::repo("tinfoilsh/confidential-model-router"),
-        OpenAIConfig::new().with_api_key(api_key),
     )
-    .await
+    .await?;
+    let config = OpenAIConfig::new().with_api_key(api_key);
+    OpenAIClient::new(http, OpenAIOptions::default(), config)
 }
 ```
 
@@ -126,35 +129,39 @@ let client = tinfoil::Client::new_with_proxy(enclave, repo, api_key, proxy_url).
 ```rust,no_run
 // 0.3
 use tinfoil::async_openai::config::OpenAIConfig;
-use tinfoil::{EnclaveOpenAIClient, Transport, Trust};
+use tinfoil::{EnclaveHttpClient, OpenAIClient, OpenAIOptions, Transport, Trust};
 
 async fn connect(
     enclave: &str,
     repo: &str,
     api_key: &str,
     proxy_url: &str,
-) -> Result<EnclaveOpenAIClient, tinfoil::Error> {
-    let config = OpenAIConfig::new().with_api_key(api_key);
-    EnclaveOpenAIClient::builder(enclave, Trust::repo(repo), config)
+) -> Result<OpenAIClient, tinfoil::Error> {
+    let http = EnclaveHttpClient::builder(enclave, Trust::repo(repo))
         .transport(Transport::Ehbp {
             proxy_url: Some(proxy_url.to_owned()),
         })
         .connect()
-        .await
+        .await?;
+    let config = OpenAIConfig::new().with_api_key(api_key);
+    OpenAIClient::new(http, OpenAIOptions::default(), config)
 }
 ```
 
-The OpenAI client uses the proxy URL verbatim as its API base, so include the
-path that your proxy serves the API under (for example `…/v1/`). The proxy URL
+The proxy URL is where the proxy is mounted, not the API path: the OpenAI
+client joins `OpenAIOptions::api_path`, `/v1/` by default, under it. A proxy
+that serves the API at `https://proxy.example.com/tinfoil/v1/` has the proxy
+URL `https://proxy.example.com/tinfoil/`. The proxy URL
 must be HTTPS, without credentials, a query string or a fragment. Plain
 `http://` is accepted only for a loopback host: the name `localhost` (not
 `localhost.` and not a subdomain), an IPv4 address in `127.0.0.0/8`, or the
 IPv6 address `[::1]` in any spelling (`[0:0:0:0:0:0:0:1]` is the same
 address). An IPv4 address must be written as four decimal numbers, so
 `127.1` and `0x7f.0.0.1` are refused, and an IPv4 address mapped into IPv6
-(`[::ffff:127.0.0.1]`) does not count as loopback. With the router, `RouterOpenAIClient::builder(config)` takes
-the same setter, and the router that discovery chooses is named to the
-proxy in the `X-Tinfoil-Enclave-Url` header.
+(`[::ffff:127.0.0.1]`) does not count as loopback. With the router,
+`RouterHttpClient::builder()` takes the same setter, and the router that
+discovery chooses is named to the proxy in the `X-Tinfoil-Enclave-Url`
+header.
 
 ### `Client::verify(&mut self)`
 
@@ -183,10 +190,10 @@ async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
 | `client.chat_relaxed()` | unchanged in shape; see [behaviour changes](#behaviour-changes-in-names-that-stayed) |
 | `client.transcribe(request)` | unchanged |
 | `client.embed_batch(model, inputs)` | unchanged in shape; now checks the response |
-| `client.with_user_cache_secret(secret)` | `.user_cache_secret(secret)` on a builder, before `connect()`. An empty string is an error; leave the option unset for the default |
-| `client.secure_client()` | `client.http_client()`, which returns the attested HTTP client (`RouterHttpClient` or `EnclaveHttpClient`) |
+| `client.with_user_cache_secret(secret)` | `.user_cache_secret(secret)` on the `RouterHttpClient` builder, before `connect()`. An empty string is an error; leave the option unset for the default |
+| `client.secure_client()` | `client.http_client()`, which returns the attested HTTP client as an `AttestedHttpClient` (a `Router` or an `Enclave` client) |
 | `client.http_client()` → `Result<&OriginBoundClient>` | `client.http_client()`, infallible, and it works in EHBP mode too |
-| `client.enclave()`, `client.repo()` | `client.http_client().enclave()`, `.trust()` |
+| `client.enclave()`, `client.repo()` | `client.http_client().enclave()`; the `trust()` of the `EnclaveHttpClient` |
 
 ## `SecureClient`
 

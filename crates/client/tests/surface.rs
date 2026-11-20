@@ -441,9 +441,9 @@ mod openai {
     use tinfoil::multimodal::{ImageUrlExt, InputAudioExt};
     use tinfoil::sse::{EventStream, parse_event_stream};
     use tinfoil::{
-        Client, EnclaveOpenAIClient, EnclaveOpenAIClientBuilder, RelaxedChat,
+        AttestedHttpClient, Client, OpenAIClient, OpenAIOptions, RelaxedChat,
         RelaxedChatRequestBuilder, RelaxedResponse, RelaxedStream, RelaxedStreamChunk,
-        RelaxedToolCall, RouterOpenAIClient, RouterOpenAIClientBuilder,
+        RelaxedToolCall,
     };
 
     type OpenAI = tinfoil::async_openai::Client<OpenAIConfig>;
@@ -451,56 +451,34 @@ mod openai {
     fn derefs<T: std::ops::Deref<Target = OpenAI>>() {}
 
     #[test]
-    fn the_openai_clients_are_handles_that_deref_to_async_openai() {
-        handle::<Client>();
-        handle::<EnclaveOpenAIClient>();
-        handle::<RouterOpenAIClient>();
-        handle::<EnclaveOpenAIClientBuilder>();
-        handle::<RouterOpenAIClientBuilder>();
-        derefs::<Client>();
-        derefs::<EnclaveOpenAIClient>();
-        derefs::<RouterOpenAIClient>();
+    fn the_openai_client_is_a_handle_that_derefs_to_async_openai() {
+        handle::<OpenAIClient>();
+        handle::<AttestedHttpClient>();
+        derefs::<OpenAIClient>();
+        // The drop-in name is the same type.
+        let _: fn(Client) -> OpenAIClient = |client| client;
 
-        let _: for<'a> fn(&'a Client) -> &'a RouterHttpClient = Client::http_client;
-        let _: for<'a> fn(&'a Client) -> &'a Url = Client::base_url;
-        let _: for<'a> fn(&'a EnclaveOpenAIClient) -> &'a EnclaveHttpClient =
-            EnclaveOpenAIClient::http_client;
-        let _: for<'a> fn(&'a RouterOpenAIClient) -> &'a RouterHttpClient =
-            RouterOpenAIClient::http_client;
-        let _: for<'a> fn(&'a Client) -> RelaxedChat<'a> = Client::chat_relaxed;
-        let _: for<'a> fn(&'a EnclaveOpenAIClient) -> RelaxedChat<'a> =
-            EnclaveOpenAIClient::chat_relaxed;
-        let _: for<'a> fn(&'a RouterOpenAIClient) -> RelaxedChat<'a> =
-            RouterOpenAIClient::chat_relaxed;
+        // `new` takes either HTTP client, or the enum itself.
+        let _: fn(EnclaveHttpClient, OpenAIOptions, OpenAIConfig) -> Result<OpenAIClient, Error> =
+            |http, options, config| OpenAIClient::new(http, options, config);
+        let _: fn(RouterHttpClient, OpenAIOptions, OpenAIConfig) -> Result<OpenAIClient, Error> =
+            |http, options, config| OpenAIClient::new(http, options, config);
+        let _: fn(AttestedHttpClient, OpenAIOptions, OpenAIConfig) -> Result<OpenAIClient, Error> =
+            |http, options, config| OpenAIClient::new(http, options, config);
+        let _: for<'a> fn(&'a OpenAIClient) -> &'a AttestedHttpClient = OpenAIClient::http_client;
+        let _: for<'a> fn(&'a OpenAIClient) -> &'a Url = OpenAIClient::base_url;
+        let _: for<'a> fn(&'a OpenAIClient) -> RelaxedChat<'a> = OpenAIClient::chat_relaxed;
         let _: for<'a> fn(&'a OpenAIError) -> Option<&'a Error> = Error::from_openai;
-    }
 
-    #[tokio::test]
-    async fn an_empty_repository_pin_is_refused_by_the_openai_client() {
-        let error =
-            EnclaveOpenAIClient::connect("enclave.invalid", Trust::repo(""), OpenAIConfig::new())
-                .await
-                .expect_err("an empty pin is refused");
-        assert_eq!(error.kind(), ErrorKind::Configuration);
-        assert!(
-            error.to_string().contains("requires a repository"),
-            "{error}"
-        );
-    }
+        let _: for<'a> fn(&'a AttestedHttpClient) -> &'a Url = AttestedHttpClient::base_url;
+        let _: for<'a> fn(&'a AttestedHttpClient) -> &'a str = AttestedHttpClient::enclave;
+        let _: fn(&AttestedHttpClient) -> Arc<Verification> = AttestedHttpClient::current;
 
-    #[test]
-    fn an_openai_builder_prints_no_api_key() {
-        let config = OpenAIConfig::new().with_api_key("sk-secret-key");
-        let builder =
-            EnclaveOpenAIClient::builder("enclave.example.com", Trust::repo("org/repo"), config)
-                .transport(Transport::Tls)
-                .policy(Policy::default())
-                .verification_check(check)
-                .user_cache_secret("cache-scope-value")
-                .timeout(Duration::from_secs(30));
-        let printed = format!("{builder:?}");
-        assert!(!printed.contains("sk-secret-key"));
-        assert!(!printed.contains("cache-scope-value"));
+        let options = OpenAIOptions {
+            api_path: Some("/v1/".into()),
+        };
+        assert_eq!(OpenAIOptions::default().api_path, None);
+        let _ = options;
     }
 
     #[test]
@@ -564,8 +542,16 @@ mod openai {
     ) -> Result<(), Box<dyn StdError>> {
         // The drop-in.
         let client: Client = send(Client::connect(OpenAIConfig::new().with_api_key(&key))).await?;
-        let router: &RouterHttpClient = client.http_client();
+        let router: &AttestedHttpClient = client.http_client();
         let _: Arc<Verification> = router.ensure_verified().await?;
+        let _: Arc<Verification> = router.reverify().await?;
+        match router {
+            AttestedHttpClient::Router(router) => {
+                let _: &RouterHttpClient = router;
+            }
+            AttestedHttpClient::Enclave(_) => unreachable!("the drop-in is over a router"),
+            _ => {}
+        }
         let _: Response = router.get(client.base_url().join("models")?).send().await?;
 
         // `async_openai`'s own API, through `Deref`.
@@ -602,41 +588,40 @@ mod openai {
         fn values(_: &impl Stream<Item = Result<Value, OpenAIError>>) {}
         values(&events);
 
-        // An explicit enclave.
+        // An explicit enclave, through a proxy, with its own API path.
         let config = OpenAIConfig::new().with_api_key(&key);
-        let enclave: EnclaveOpenAIClient = send(EnclaveOpenAIClient::connect(
-            "enclave.example.com",
-            Trust::repo("org/repo"),
-            config.clone(),
-        ))
-        .await?;
-        let _: &EnclaveHttpClient = enclave.http_client();
-        let builder: EnclaveOpenAIClientBuilder = EnclaveOpenAIClient::builder(
-            "enclave.example.com",
-            Trust::repo("org/repo"),
-            config.clone(),
+        let http = send(
+            EnclaveHttpClient::builder("enclave.example.com", Trust::repo("org/repo"))
+                .transport(Transport::Ehbp {
+                    proxy_url: Some("https://proxy.example.com/".into()),
+                })
+                .connect(),
         )
-        .transport(Transport::Ehbp {
-            proxy_url: Some("https://proxy.example.com/v1/".into()),
-        });
-        let _: EnclaveOpenAIClient = send(builder.connect()).await?;
+        .await?;
+        let options = OpenAIOptions {
+            api_path: Some("/openai/v1/".into()),
+        };
+        let enclave: OpenAIClient = OpenAIClient::new(http, options, config.clone())?;
+        let _: &AttestedHttpClient = enclave.http_client();
 
         // The router, configured.
-        let _: RouterOpenAIClient = send(RouterOpenAIClient::connect(config.clone())).await?;
-        let builder: RouterOpenAIClientBuilder = RouterOpenAIClient::builder(config)
-            .transport(Transport::Tls)
-            .policy(Policy::default())
-            .verification_check(check)
-            .user_cache_secret("opaque-random-value")
-            .timeout(Duration::from_secs(60));
-        let configured: RouterOpenAIClient = send(builder.connect()).await?;
-        let _: &RouterHttpClient = configured.http_client();
+        let http = send(
+            RouterHttpClient::builder()
+                .transport(Transport::Tls)
+                .policy(Policy::default())
+                .verification_check(check)
+                .user_cache_secret("opaque-random-value")
+                .timeout(Duration::from_secs(60))
+                .connect(),
+        )
+        .await?;
+        let configured = OpenAIClient::new(http, OpenAIOptions::default(), config)?;
         let _ = configured.chat_relaxed();
         Ok(())
     }
 
     /// Each `openai-*` feature adds its API family to the OpenAI clients.
-    fn api_families(client: &Client) {
+    fn api_families(client: &OpenAIClient) {
         // In the `openai` feature itself.
         let _ = client.chat();
         let _ = client.embeddings();

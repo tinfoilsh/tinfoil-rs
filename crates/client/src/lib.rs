@@ -11,12 +11,17 @@
 //!
 //! # Choosing a client
 //!
-//! | route | HTTP client | OpenAI client |
-//! |---|---|---|
-//! | Tinfoil's router, discovered (recommended) | [`RouterHttpClient`] | `Client`, or `RouterOpenAIClient` to configure it |
-//! | an enclave that the caller names | [`EnclaveHttpClient`] | `EnclaveOpenAIClient` |
+//! | route | HTTP client |
+//! |---|---|
+//! | Tinfoil's router, discovered (recommended) | [`RouterHttpClient`] |
+//! | an enclave that the caller names | [`EnclaveHttpClient`] |
 //!
-//! The OpenAI clients need the `openai` feature, which is on by default.
+//! The OpenAI client, `OpenAIClient`, is a layer over either HTTP client:
+//! `OpenAIClient::new(http, options, config)` builds one without further
+//! network I/O, and `Client::connect(config)` (the same type) is the
+//! one-line drop-in over a router. It needs the `openai` feature, which is
+//! on by default; without it the crate is the HTTP clients and the
+//! verifier, and does not depend on `async_openai`.
 //!
 #![cfg_attr(feature = "openai", doc = "```no_run")]
 #![cfg_attr(not(feature = "openai"), doc = "```ignore")]
@@ -119,10 +124,10 @@
 //!
 //! | feature | what it adds |
 //! |---|---|
-//! | `openai` (default) | the OpenAI clients over `async_openai`, with its chat completion, embedding, audio and responses APIs; the relaxed chat helper; the `sse` and `multimodal` modules |
+//! | `openai` (default) | the OpenAI client over `async_openai`, with its chat completion, embedding, audio and responses APIs; the relaxed chat helper; the `sse` and `multimodal` modules |
 //!
 //! The other API families of `async_openai` are opt-in. Each feature below
-//! implies `openai` and adds the family's calls to the OpenAI clients,
+//! implies `openai` and adds the family's calls to the OpenAI client,
 //! where they go through the attested HTTP client like every other call.
 //! Whether an enclave serves a family is up to the enclave.
 //!
@@ -156,6 +161,7 @@
 // lints (see clippy.toml). Overflow in a test is a test failure.
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
 
+mod attested_client;
 mod enclave_client;
 mod error;
 mod internal;
@@ -189,6 +195,7 @@ pub use async_openai::types::chat;
 #[cfg(feature = "openai")]
 pub use async_openai::types::embeddings;
 
+pub use attested_client::AttestedHttpClient;
 pub use enclave_client::{EnclaveHttpClient, EnclaveHttpClientBuilder};
 pub use error::{Error, ErrorKind};
 #[cfg(feature = "openai")]
@@ -197,10 +204,7 @@ pub use openai::relaxed::{
     RelaxedToolCall,
 };
 #[cfg(feature = "openai")]
-pub use openai::{
-    Client, EnclaveOpenAIClient, EnclaveOpenAIClientBuilder, RouterOpenAIClient,
-    RouterOpenAIClientBuilder,
-};
+pub use openai::{Client, OpenAIClient, OpenAIOptions};
 pub use options::Transport;
 pub use request::RequestBuilder;
 pub use router_client::{RouterHttpClient, RouterHttpClientBuilder};

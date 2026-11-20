@@ -91,6 +91,13 @@ impl RouterHttpClient {
 
 http_request_methods!(RouterHttpClient);
 
+impl RouterHttpClient {
+    /// The attested client that requests go through.
+    pub(crate) fn attested(&self) -> &Arc<AttestedClient> {
+        &self.inner
+    }
+}
+
 impl fmt::Debug for RouterHttpClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RouterHttpClient")

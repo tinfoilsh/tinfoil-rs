@@ -44,10 +44,6 @@ pub(crate) struct AttestedClient<V = Verification> {
     /// Where requests go: the proxy URL, or the enclave's origin with the
     /// path `/`.
     base_url: Url,
-    /// Where an OpenAI client sends: the proxy URL, or the enclave's
-    /// origin with the path `/v1/`.
-    #[cfg_attr(not(any(test, feature = "openai")), allow(dead_code))]
-    openai_url: Url,
     /// The `timeout` option.
     timeout: Option<Duration>,
 }
@@ -131,12 +127,6 @@ impl<V: Evidence> AttestedClient<V> {
         }
         let origin = authority_url(&host)?;
         let allowed = allowed_origins(Some(&host), base_url.as_ref())?;
-        let openai_url = match &base_url {
-            Some(base_url) => base_url.clone(),
-            None => origin
-                .join("v1/")
-                .map_err(|_| Error::configuration("the enclave host yields no URL"))?,
-        };
         let parts = fetch::tls_builder()?
             .build()
             .map_err(|error| Error::wrap(crate::ErrorKind::Configuration, error))?;
@@ -153,18 +143,12 @@ impl<V: Evidence> AttestedClient<V> {
             parts,
             mode,
             base_url: base_url.unwrap_or(origin),
-            openai_url,
             timeout,
         })
     }
 
     pub(crate) fn base_url(&self) -> &Url {
         &self.base_url
-    }
-
-    #[cfg(any(test, feature = "openai"))]
-    pub(crate) fn openai_url(&self) -> &Url {
-        &self.openai_url
     }
 
     /// The `timeout` option.

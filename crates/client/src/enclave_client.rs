@@ -162,6 +162,13 @@ impl EnclaveHttpClient {
 
 http_request_methods!(EnclaveHttpClient);
 
+impl EnclaveHttpClient {
+    /// The attested client that requests go through.
+    pub(crate) fn attested(&self) -> &Arc<AttestedClient> {
+        &self.inner
+    }
+}
+
 impl fmt::Debug for EnclaveHttpClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EnclaveHttpClient")

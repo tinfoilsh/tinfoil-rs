@@ -65,7 +65,7 @@ struct Kit {
 
 impl Kit {
     fn new(client: AttestedClient<Record>, mode: TransportMode) -> Self {
-        let api_base = client.openai_url().clone();
+        let api_base = crate::openai::api_path::join(client.base_url(), None).unwrap();
         let waits = Waits {
             timeout: client.timeout(),
             clock: tokio_clock(),
@@ -1792,7 +1792,7 @@ mod over_ehbp {
             transport,
             Settings {
                 mode: TransportMode::Ehbp,
-                base_url: Some(server.url.join("v1/").unwrap()),
+                base_url: Some(server.url.clone()),
                 secret: Some(Secret::new("s3cret-scope")),
                 timeout: None,
             },
@@ -2097,7 +2097,7 @@ mod over_ehbp {
             transport,
             Settings {
                 mode: TransportMode::Ehbp,
-                base_url: Some(server.url.join("v1/").unwrap()),
+                base_url: Some(server.url.clone()),
                 secret: None,
                 timeout: None,
             },

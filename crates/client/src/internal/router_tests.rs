@@ -690,7 +690,6 @@ async fn the_client_is_bound_to_the_router_that_discovery_chose() {
         .unwrap();
         assert_eq!(client.enclave(), "b.example:8443");
         assert_eq!(client.base_url().as_str(), "https://b.example:8443/");
-        assert_eq!(client.openai_url().as_str(), "https://b.example:8443/v1/");
         assert_eq!(client.current().name, "b");
     })
     .await
@@ -716,7 +715,6 @@ async fn through_a_proxy_the_requests_name_the_router_that_was_chosen() {
         .unwrap();
         assert_eq!(client.enclave(), "b.example");
         assert_eq!(client.base_url(), &proxy);
-        assert_eq!(client.openai_url(), &proxy);
     })
     .await
 }

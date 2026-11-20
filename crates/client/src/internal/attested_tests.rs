@@ -317,10 +317,6 @@ async fn the_client_reports_its_route_and_its_last_verification() {
         assert_eq!(f.client.pin(), &Pin::none());
         assert_eq!(f.client.transport_mode(), TransportMode::Tls);
         assert_eq!(f.client.base_url().as_str(), "https://enclave.example.com/");
-        assert_eq!(
-            f.client.openai_url().as_str(),
-            "https://enclave.example.com/v1/"
-        );
         assert_eq!(f.client.current().name, "first");
         assert_eq!(f.client.ensure_verified().await.unwrap().name, "first");
         assert_eq!(f.script.calls(), 1);

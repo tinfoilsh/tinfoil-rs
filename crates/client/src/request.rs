@@ -185,8 +185,8 @@ pub(crate) fn into_url(url: impl reqwest::IntoUrl) -> Result<reqwest::Url, Error
         .map_err(|error| Error::wrap(ErrorKind::Configuration, error.without_url()))
 }
 
-/// The request methods of an HTTP client whose `inner` field is an `Arc` of
-/// a type that implements [`Execute`].
+/// The request methods of an HTTP client whose `attested()` method returns
+/// the `Arc` of the attested client that it sends through.
 macro_rules! http_request_methods {
     ($client:ident) => {
         impl $client {
@@ -237,7 +237,8 @@ macro_rules! http_request_methods {
                 method: reqwest::Method,
                 url: impl reqwest::IntoUrl,
             ) -> $crate::RequestBuilder {
-                let executor: std::sync::Arc<dyn $crate::request::Execute> = self.inner.clone();
+                let executor: std::sync::Arc<dyn $crate::request::Execute> =
+                    self.attested().clone();
                 $crate::RequestBuilder::new(executor, method, $crate::request::into_url(url))
             }
 
@@ -305,7 +306,7 @@ macro_rules! http_request_methods {
                 &self,
                 request: reqwest::Request,
             ) -> Result<reqwest::Response, $crate::Error> {
-                $crate::request::Execute::execute(&*self.inner, request).await
+                $crate::request::Execute::execute(&**self.attested(), request).await
             }
         }
     };
