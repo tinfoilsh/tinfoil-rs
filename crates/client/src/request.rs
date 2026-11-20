@@ -64,7 +64,7 @@ impl fmt::Debug for ResponseFuture {
 /// then goes out under the keys of the current verification.
 ///
 /// The `Host` header belongs to the client, and so do the headers of the
-/// sealed-body protocol in [`TransportMode::Ehbp`](crate::TransportMode::Ehbp);
+/// sealed-body protocol in [`Transport::Ehbp`](crate::Transport::Ehbp);
 /// a request that sets one of them is refused with a configuration error.
 ///
 /// Its `Debug` output names no header value, because a header can hold a
@@ -108,7 +108,7 @@ impl RequestBuilder {
     }
 
     /// Sets `Authorization: Bearer <token>`. In
-    /// [`TransportMode::Ehbp`](crate::TransportMode::Ehbp) a proxy sees this
+    /// [`Transport::Ehbp`](crate::Transport::Ehbp) a proxy sees this
     /// header.
     pub fn bearer_auth(self, token: impl fmt::Display) -> Self {
         self.map(|inner| inner.bearer_auth(token))
@@ -251,7 +251,7 @@ macro_rules! http_request_methods {
             ///    refused, so that its headers are never disclosed to
             ///    another host. A request that the transport mode cannot
             ///    protect is refused too: plaintext `http://` in
-            ///    [`TransportMode::Tls`](crate::TransportMode::Tls); a
+            ///    [`Transport::Tls`](crate::Transport::Tls); a
             ///    protocol upgrade or `CONNECT` wherever bodies are sealed.
             ///    A `Host` header, or a header that the sealed-body protocol
             ///    owns, is refused. These are configuration errors, and they

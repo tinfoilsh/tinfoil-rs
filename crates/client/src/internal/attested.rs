@@ -11,7 +11,7 @@ use tokio::time::Instant;
 use crate::error::Error;
 use crate::internal::body::{self, DEADLINE_PASSED};
 use crate::internal::enclave::{Checked, Enclave, Evidence, Fetch};
-use crate::internal::transport::base_url::{self, authority_url};
+use crate::internal::transport::base_url::authority_url;
 use crate::internal::transport::cachesecret::with_cache_secret;
 use crate::internal::transport::ehbp::EhbpMode;
 use crate::internal::transport::header::with_enclave_url;
@@ -41,11 +41,11 @@ pub(crate) struct AttestedClient<V = Verification> {
     /// Collects the parts of a request; it never sends.
     parts: reqwest::Client,
     mode: TransportMode,
-    /// Where requests go: the `base_url` option, or the enclave's origin
-    /// with the path `/`.
+    /// Where requests go: the proxy URL, or the enclave's origin with the
+    /// path `/`.
     base_url: Url,
-    /// Where an OpenAI client sends: the `base_url` option, or the
-    /// enclave's origin with the path `/v1/`.
+    /// Where an OpenAI client sends: the proxy URL, or the enclave's
+    /// origin with the path `/v1/`.
     #[cfg_attr(not(any(test, feature = "openai")), allow(dead_code))]
     openai_url: Url,
     /// The `timeout` option.
@@ -56,7 +56,8 @@ pub(crate) struct AttestedClient<V = Verification> {
 /// checks.
 pub(crate) struct Settings {
     pub(crate) mode: TransportMode,
-    /// The `base_url` option, checked ([`base_url::validate`]).
+    /// The proxy URL of the `transport` option, checked
+    /// ([`base_url::validate`]).
     pub(crate) base_url: Option<Url>,
     pub(crate) secret: Option<Secret>,
     pub(crate) timeout: Option<Duration>,
@@ -96,7 +97,7 @@ impl<V: Evidence> AttestedClient<V> {
     /// Assembles a client around a transport that already holds a
     /// verification. In order, each a configuration error:
     ///
-    /// 1. in the TLS mode, a base URL off the enclave's origin;
+    /// 1. in the TLS mode, a proxy URL;
     /// 2. an enclave host that yields no origin.
     ///
     /// The chain is, from the caller inward: origin restriction, cache
@@ -123,8 +124,10 @@ impl<V: Evidence> AttestedClient<V> {
             timeout,
         } = settings;
         let host = transport.enclave().host().to_owned();
-        if let (TransportMode::Tls, Some(base_url)) = (mode, &base_url) {
-            base_url::validate_for_tls(base_url, &host)?;
+        if mode == TransportMode::Tls && base_url.is_some() {
+            // The public options cannot express this: a proxy exists only
+            // inside `Transport::Ehbp`.
+            return Err(Error::configuration("a proxy URL requires Transport::Ehbp"));
         }
         let origin = authority_url(&host)?;
         let allowed = allowed_origins(Some(&host), base_url.as_ref())?;

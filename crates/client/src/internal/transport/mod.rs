@@ -6,7 +6,7 @@
 //! inward, an enclave or router client sends through:
 //!
 //! 1. [`origin`]: refuses a request to any origin other than the enclave's
-//!    or the configured base URL's;
+//!    or the proxy URL's;
 //! 2. [`cachesecret`]: adds the user cache secret to the bodies that carry
 //!    it, above the sealing layer, so that the field is sealed with the
 //!    rest of the body or sent over the pinned connection;

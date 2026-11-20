@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use tinfoil::verifier::{Error as VerifierError, Layer, Pin};
-use tinfoil::{EnclaveHttpClient, ErrorKind, TransportMode, Trust};
+use tinfoil::{EnclaveHttpClient, ErrorKind, Transport, Trust};
 
 use crate::{
     CODE_ENVELOPE_REJECTED, CODE_POLICY_REJECTED, EXIT_ACCEPTED, EXIT_INTERNAL, EXIT_REJECTED,
@@ -223,7 +223,7 @@ pub fn run(stdin: &[u8]) -> Outcome {
 async fn verify(request: &Request) -> Outcome {
     let host = &request.host;
     let connected = EnclaveHttpClient::builder(host.as_str(), request.trust())
-        .transport_mode(TransportMode::Tls)
+        .transport(Transport::Tls)
         .timeout(VERIFY_TIMEOUT)
         .connect()
         .await;

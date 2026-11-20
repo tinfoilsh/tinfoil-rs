@@ -331,26 +331,7 @@ async fn the_client_reports_its_route_and_its_last_verification() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_base_url_replaces_the_enclaves_origin_for_both_urls() {
-    unstuck(async {
-        let base = Url::parse("https://enclave.example.com/prefix/").unwrap();
-        let f = fake(
-            vec![ready("first")],
-            Settings {
-                base_url: Some(base.clone()),
-                ..settings()
-            },
-            |_| Answer::Text("ok"),
-        )
-        .await;
-        assert_eq!(f.client.base_url(), &base);
-        assert_eq!(f.client.openai_url(), &base);
-    })
-    .await
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_pinned_client_takes_no_base_url_on_another_origin() {
+async fn a_pinned_client_takes_no_proxy() {
     unstuck(async {
         let script = Script::new([ready("first")]);
         let mode = Scripted {
@@ -372,7 +353,10 @@ async fn a_pinned_client_takes_no_base_url_on_another_origin() {
         .err()
         .expect("a proxy needs sealed bodies");
         assert_eq!(error.kind(), ErrorKind::Configuration);
-        assert!(error.to_string().contains("TransportMode::Ehbp"), "{error}");
+        assert!(
+            error.to_string().contains("requires Transport::Ehbp"),
+            "{error}"
+        );
 
         AttestedClient::new(
             transport,
@@ -1568,15 +1552,19 @@ mod options {
             keys: Vec::new(),
             project: None,
         };
-        // An empty host, before the base URL.
-        let message = refusal(builder("", Trust::repo("")).base_url("ftp://proxy.example/"));
+        let proxy = |url: &str| crate::Transport::Ehbp {
+            proxy_url: Some(url.into()),
+        };
+        // An empty host, before the proxy URL.
+        let message =
+            refusal(builder("", Trust::repo("")).transport(proxy("ftp://proxy.example/")));
         assert!(message.contains("enclave host is required"), "{message}");
-        // The base URL, before a host that is no host.
+        // The proxy URL, before a host that is no host.
         let message = refusal(
             builder("https://enclave.example.com", Trust::repo(""))
-                .base_url("ftp://proxy.example/"),
+                .transport(proxy("ftp://proxy.example/")),
         );
-        assert!(message.contains("invalid base URL"), "{message}");
+        assert!(message.contains("invalid proxy URL"), "{message}");
         // The other options, before a host that is no host.
         let message = refusal(
             builder("https://enclave.example.com", Trust::repo("")).timeout(Duration::ZERO),
@@ -1608,7 +1596,7 @@ mod options {
             Trust::repo("not a reference"),
         ));
         assert!(message.contains("host with an optional port"), "{message}");
-        // The pin, before the proxy rule of the pinned mode.
+        // The pin, before a proxy on the enclave's own origin.
         let message = refusal(
             builder(
                 "enclave.example.com",
@@ -1617,14 +1605,19 @@ mod options {
                     project: Some(String::new()),
                 },
             )
-            .base_url("https://proxy.example/"),
+            .transport(proxy("https://enclave.example.com/")),
         );
         assert!(message.contains("project pin is empty"), "{message}");
-        let message = refusal(
-            builder("enclave.example.com", Trust::repo("owner/name"))
-                .base_url("https://proxy.example/"),
-        );
-        assert!(message.contains("TransportMode::Ehbp"), "{message}");
+        for own_origin in [
+            "https://enclave.example.com/",
+            "https://ENCLAVE.example.com:443/proxy/",
+        ] {
+            let message = refusal(
+                builder("enclave.example.com", Trust::repo("owner/name"))
+                    .transport(proxy(own_origin)),
+            );
+            assert!(message.contains("enclave's own origin"), "{message}");
+        }
     }
 
     /// Tinfoil's public config signing key.
@@ -1639,8 +1632,9 @@ mod options {
             "enclave.example.com:8443",
             Trust::repo("owner/name@v1.2.3"),
         )
-        .transport_mode(TransportMode::Ehbp)
-        .base_url("https://proxy.example.com/tinfoil")
+        .transport(crate::Transport::Ehbp {
+            proxy_url: Some("https://proxy.example.com/tinfoil".into()),
+        })
         .user_cache_secret("opaque")
         .timeout(Duration::from_secs(1))
         .prepare()
@@ -1662,13 +1656,20 @@ mod options {
         assert!(settings.base_url.is_none() && settings.secret.is_none());
         assert!(settings.timeout.is_none());
 
-        for accepted in [
-            EnclaveHttpClient::builder("enclave.example.com", Trust::repo("owner/name"))
-                .base_url("https://enclave.example.com/api/"),
-            EnclaveHttpClient::builder("enclave.example.com", Trust::repo("owner/name"))
-                .transport_mode(TransportMode::Ehbp)
-                .base_url("http://localhost:8080/"),
-        ] {
+        for accepted in
+            [
+                EnclaveHttpClient::builder("enclave.example.com", Trust::repo("owner/name"))
+                    .transport(crate::Transport::Ehbp { proxy_url: None }),
+                EnclaveHttpClient::builder("enclave.example.com", Trust::repo("owner/name"))
+                    .transport(crate::Transport::Ehbp {
+                        proxy_url: Some("http://localhost:8080/".into()),
+                    }),
+                EnclaveHttpClient::builder("enclave.example.com", Trust::repo("owner/name"))
+                    .transport(crate::Transport::Ehbp {
+                        proxy_url: Some("https://enclave.example.com:8443/".into()),
+                    }),
+            ]
+        {
             accepted.prepare().expect("accepted");
         }
     }
@@ -1819,25 +1820,6 @@ mod over_tls {
         // One verification, one connection.
         assert_eq!(script.calls(), 1);
         assert_eq!(server.accepted(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_base_url_on_the_enclaves_origin_is_where_requests_go() {
-        let server = serve().await;
-        let base = Url::parse(&format!("https://127.0.0.1:{}/api/", server.port)).unwrap();
-        let (_, client) = client(
-            &server,
-            vec![evidence("a", &LEAF_A)],
-            Settings {
-                base_url: Some(base),
-                ..settings()
-            },
-        )
-        .await;
-        let response = soon(get(&client, &url(&client, "v1/models")).send())
-            .await
-            .unwrap();
-        assert_eq!(soon(response.text()).await.unwrap(), "/api/v1/models");
     }
 
     #[tokio::test]

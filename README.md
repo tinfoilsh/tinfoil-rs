@@ -131,34 +131,35 @@ On every client, `current()` returns the last successful verification without ch
 
 Redirects are not followed on attested requests: a `3xx` response is returned to the caller, except in the EHBP mode, where one that answers a sealed request fails the request.
 
-## Transport modes
+## Transports
 
-| mode | what is protected | when to use it |
+| transport | what is protected | when to use it |
 |---|---|---|
-| `TransportMode::Tls` (default) | The whole request and response. Every connection is pinned to the attested TLS key: the standard certificate checks run, then the server's public key is compared with the attested fingerprint, on every handshake. | A direct connection to the enclave. |
-| `TransportMode::Ehbp` | Request and response bodies, which are sealed to the attested HPKE key ([EHBP](https://docs.tinfoil.sh/resources/ehbp)). The method, the URL and the headers are **not** sealed, and neither is a request without a body or the response to it. | Routing through your own backend or another proxy. |
+| `Transport::Tls` (default) | The whole request and response. Every connection is pinned to the attested TLS key: the standard certificate checks run, then the server's public key is compared with the attested fingerprint, on every handshake. | A direct connection to the enclave. |
+| `Transport::Ehbp { proxy_url }` | Request and response bodies, which are sealed to the attested HPKE key ([EHBP](https://docs.tinfoil.sh/resources/ehbp)). The method, the URL and the headers are **not** sealed, and neither is a request without a body or the response to it. | Routing through your own backend or another proxy. |
 
-A `base_url` on another origin than the enclave is a proxy, and requires `TransportMode::Ehbp`. Requests to it carry the header `X-Tinfoil-Enclave-Url`, so that the proxy knows where to forward them. The proxy sees the headers of every request, an API key among them. See the [proxy server guide](https://docs.tinfoil.sh/guides/proxy-server).
+A proxy exists only inside `Transport::Ehbp`: `proxy_url: None` connects directly to the enclave, and `Some(url)` sends requests to a proxy that forwards them. Requests to it carry the header `X-Tinfoil-Enclave-Url`, so that the proxy knows where to forward them. The proxy sees the headers of every request, an API key among them. See the [proxy server guide](https://docs.tinfoil.sh/guides/proxy-server).
 
 ```rust,no_run
 use std::time::Duration;
 
 use tinfoil::async_openai::config::OpenAIConfig;
-use tinfoil::{RouterOpenAIClient, TransportMode};
+use tinfoil::{RouterOpenAIClient, Transport};
 
 async fn through_a_proxy(api_key: &str) -> Result<RouterOpenAIClient, tinfoil::Error> {
     // The key is sent in a header, which the proxy can read and replace.
     let config = OpenAIConfig::new().with_api_key(api_key);
     RouterOpenAIClient::builder(config)
-        .transport_mode(TransportMode::Ehbp)
-        .base_url("https://api.example.com/tinfoil/v1/")
+        .transport(Transport::Ehbp {
+            proxy_url: Some("https://api.example.com/tinfoil/v1/".into()),
+        })
         .timeout(Duration::from_secs(120))
         .connect()
         .await
 }
 ```
 
-The base URL must be absolute and use HTTPS, without credentials, a query string or a fragment. `http://` is accepted only for the name `localhost` and for a loopback IP address: `127.0.0.0/8` or `[::1]`. An IPv4 address must be written as four decimal numbers. The mode is the option and nothing else: a client never falls back from one mode to the other.
+The proxy URL must be absolute and use HTTPS, without credentials, a query string or a fragment. `http://` is accepted only for the name `localhost` and for a loopback IP address: `127.0.0.0/8` or `[::1]`. An IPv4 address must be written as four decimal numbers. An enclave client refuses a proxy URL on the enclave's own origin; leave `proxy_url` unset to connect directly. The transport is the option and nothing else: a client never falls back from one transport to the other.
 
 ## Limits of the protection
 

@@ -63,15 +63,15 @@
 //!
 //! # What is protected
 //!
-//! In [`TransportMode::Tls`], the default, every connection is pinned to
+//! In [`Transport::Tls`], the default, every connection is pinned to
 //! the attested TLS key, which protects the whole request and response. In
-//! [`TransportMode::Ehbp`], request and response bodies are sealed to the
+//! [`Transport::Ehbp`], request and response bodies are sealed to the
 //! attested HPKE key and stay private through a proxy; the method, URL and
 //! headers are not sealed, and neither is a request without a body.
 //!
 //! # Limits of the protection
 //!
-//! - **[`TransportMode::Ehbp`] does not authenticate the end of a
+//! - **[`Transport::Ehbp`] does not authenticate the end of a
 //!   response.** Each part of a sealed response body is authenticated, and
 //!   so is the order of the parts: the content cannot be forged, altered
 //!   or reordered. Nothing marks the last part, so whoever controls the
@@ -82,7 +82,7 @@
 //!   terminator: that the JSON document is whole, or that the final event
 //!   of a stream arrived. The event-stream parser reports a stream that
 //!   is cut inside an event.
-//! - **In [`TransportMode::Ehbp`] a request without a body is sent as it
+//! - **In [`Transport::Ehbp`] a request without a body is sent as it
 //!   is**, and its response is returned as it arrives, neither encrypted
 //!   nor authenticated. An error response to a sealed request that is not
 //!   sealed itself is passed through as received, since a proxy may
@@ -201,7 +201,7 @@ pub use openai::{
     Client, EnclaveOpenAIClient, EnclaveOpenAIClientBuilder, RouterOpenAIClient,
     RouterOpenAIClientBuilder,
 };
-pub use options::TransportMode;
+pub use options::Transport;
 pub use request::RequestBuilder;
 pub use router_client::{RouterHttpClient, RouterHttpClientBuilder};
 pub use trust::Trust;

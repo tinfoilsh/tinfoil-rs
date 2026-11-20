@@ -13,7 +13,7 @@ use reqwest::Url;
 
 use crate::enclave_client::{EnclaveHttpClient, EnclaveHttpClientBuilder};
 use crate::error::Error;
-use crate::options::TransportMode;
+use crate::options::Transport;
 use crate::router_client::{RouterHttpClient, RouterHttpClientBuilder};
 use crate::trust::Trust;
 use crate::verifier::{BoxError, Policy, Verification};
@@ -175,7 +175,7 @@ pub(crate) async fn embed_batch(
 /// the `timeout` option if that is shorter. A response that asks for a
 /// longer wait is not tried again: the call returns it at once, as the
 /// error that it is. A value that cannot be read is ignored. In
-/// [`TransportMode::Ehbp`] these headers are not authenticated, which is
+/// [`Transport::Ehbp`] these headers are not authenticated, which is
 /// why they are bounded.
 ///
 /// The `timeout` option bounds each request that a call sends and each
@@ -380,17 +380,11 @@ impl fmt::Debug for RouterOpenAIClient {
 macro_rules! forward_route_setters {
     ($builder:ident, $http:ident) => {
         impl $builder {
-            #[doc = concat!("See [`", stringify!($http), "::transport_mode`].")]
-            pub fn transport_mode(mut self, mode: TransportMode) -> Self {
-                self.http = self.http.transport_mode(mode);
-                self
-            }
-
-            #[doc = concat!("See [`", stringify!($http), "::base_url`]. The OpenAI client then")]
-            /// sends to this URL as its API base, in place of the `/v1/`
-            /// API of the enclave.
-            pub fn base_url(mut self, url: impl Into<String>) -> Self {
-                self.http = self.http.base_url(url);
+            #[doc = concat!("See [`", stringify!($http), "::transport`]. The OpenAI client")]
+            /// sends to a proxy URL as its API base, in place of the
+            /// `/v1/` API of the enclave.
+            pub fn transport(mut self, transport: Transport) -> Self {
+                self.http = self.http.transport(transport);
                 self
             }
 
@@ -464,7 +458,7 @@ impl EnclaveOpenAIClientBuilder {
             self.config,
             &api_base,
             executor,
-            http.transport_mode(),
+            http.inner.transport_mode(),
             waits,
         )?;
         Ok(EnclaveOpenAIClient {
@@ -503,7 +497,7 @@ impl RouterOpenAIClientBuilder {
             self.config,
             &api_base,
             executor,
-            http.transport_mode(),
+            http.inner.transport_mode(),
             waits,
         )?;
         Ok(RouterOpenAIClient {

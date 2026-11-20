@@ -10,7 +10,7 @@ use crate::error::Error;
 use crate::internal::attested::{AttestedClient, Settings, mode_for};
 use crate::internal::enclave::{self, Enclave};
 use crate::internal::{cachesecret, router, system_clock};
-use crate::options::{RouteOptions, Secret, TransportMode};
+use crate::options::{RouteOptions, Secret, Transport};
 use crate::request::http_request_methods;
 use crate::verifier::{BoxError, ConfigTrust, Pin, Policy, Verification, Verifier};
 
@@ -47,14 +47,15 @@ impl RouterHttpClient {
         }
     }
 
-    /// Where requests are sent: the `base_url` option, or else the
+    /// Where requests are sent: the proxy URL of [`Transport::Ehbp`], or
+    /// else the
     /// router's own origin, `https://<router>/`. The path ends in `/`.
     pub fn base_url(&self) -> &Url {
         self.inner.base_url()
     }
 
     /// The host of the router that the client discovered and verifies. It
-    /// stays the router's host when `base_url` is a proxy.
+    /// stays the router's host when requests go through a proxy.
     pub fn enclave(&self) -> &str {
         self.inner.enclave()
     }
@@ -63,11 +64,6 @@ impl RouterHttpClient {
     /// Tinfoil's router.
     pub fn pin(&self) -> &Pin {
         self.inner.pin()
-    }
-
-    /// The transport mode that the client was created with.
-    pub fn transport_mode(&self) -> TransportMode {
-        self.inner.transport_mode()
     }
 
     /// The last successful verification of the router, without checking
@@ -101,7 +97,7 @@ impl fmt::Debug for RouterHttpClient {
             .field("enclave", &self.enclave())
             .field("pin", &self.pin())
             .field("base_url", &self.base_url().as_str())
-            .field("transport_mode", &self.transport_mode())
+            .field("transport", &self.inner.transport_mode())
             .finish_non_exhaustive()
     }
 }
@@ -111,7 +107,7 @@ impl fmt::Debug for RouterHttpClient {
 /// An option is unset until its setter is called. The setters check
 /// nothing: [`connect`](Self::connect) checks every option before any
 /// network I/O. The `Debug` output shows neither the user cache secret nor
-/// the unchecked base URL.
+/// the unchecked proxy URL.
 #[derive(Clone, Debug)]
 #[must_use = "a builder does nothing until `connect` is called"]
 pub struct RouterHttpClientBuilder {
@@ -119,23 +115,15 @@ pub struct RouterHttpClientBuilder {
 }
 
 impl RouterHttpClientBuilder {
-    /// How the client protects its traffic. Unset, it is
-    /// [`TransportMode::Tls`].
-    pub fn transport_mode(mut self, mode: TransportMode) -> Self {
-        self.options.transport_mode = Some(mode);
-        self
-    }
-
-    /// A proxy that forwards requests to the router that discovery
-    /// chooses. It requires [`TransportMode::Ehbp`]: the router is not
-    /// known before discovery, so a base URL cannot name its origin.
+    /// How the client protects its traffic, and whether it goes through a
+    /// proxy. Unset, it is [`Transport::Tls`].
     ///
-    /// Requests carry the `X-Tinfoil-Enclave-Url` header so that the proxy
-    /// can forward them, and the proxy sees the method, the URL and the
-    /// headers of every request. The rules for the URL are those of
-    /// [`EnclaveHttpClientBuilder::base_url`](crate::EnclaveHttpClientBuilder::base_url).
-    pub fn base_url(mut self, url: impl Into<String>) -> Self {
-        self.options.base_url = Some(url.into());
+    /// A proxy URL of [`Transport::Ehbp`] forwards requests to the router
+    /// that discovery chooses, which the `X-Tinfoil-Enclave-Url` header
+    /// names to it. The rules for the URL are those of
+    /// [`Transport::Ehbp`].
+    pub fn transport(mut self, transport: Transport) -> Self {
+        self.options.transport = transport;
         self
     }
 
@@ -208,11 +196,10 @@ impl RouterHttpClientBuilder {
     ///
     /// Before any network I/O, in this order, each a configuration error:
     ///
-    /// 1. `base_url` is invalid, by the rules of
+    /// 1. The proxy URL of [`Transport::Ehbp`] is invalid, by the rules of
     ///    [`EnclaveHttpClientBuilder::connect`](crate::EnclaveHttpClientBuilder::connect).
-    /// 2. `base_url` is set and the mode is [`TransportMode::Tls`].
-    /// 3. `user_cache_secret` is empty, or `timeout` is zero.
-    /// 4. The verifier cannot be built from the policy. The verifier's
+    /// 2. `user_cache_secret` is empty, or `timeout` is zero.
+    /// 3. The verifier cannot be built from the policy. The verifier's
     ///    usage error is the source.
     ///
     /// Then discovery runs, for at most 30 seconds in all. The router list
@@ -276,13 +263,8 @@ impl RouterHttpClientBuilder {
     /// the verifier for every router, and what the client is made from. It
     /// does no I/O.
     pub(crate) fn prepare(self) -> Result<(enclave::Checked, Settings), Error> {
-        let base_url = self.options.checked_base_url()?;
+        let base_url = self.options.checked_proxy_url()?;
         let mode = self.options.mode();
-        if base_url.is_some() && mode == TransportMode::Tls {
-            return Err(Error::configuration(
-                "a base URL is a proxy when the router is discovered, which requires TransportMode::Ehbp",
-            ));
-        }
         self.options.common.check()?;
         let common = self.options.common;
         let verifier = Verifier::new(ConfigTrust::PublicRegistry, common.policy)

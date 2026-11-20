@@ -51,7 +51,7 @@ mod openai {
         ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest,
         CreateChatCompletionRequestArgs,
     };
-    use tinfoil::{Client, RouterOpenAIClient, TransportMode};
+    use tinfoil::{Client, RouterOpenAIClient, Transport};
 
     use super::{CACHE_SECRET, TIMEOUT};
 
@@ -92,7 +92,7 @@ mod openai {
     #[ignore = "uses the network and needs TINFOIL_API_KEY"]
     async fn a_chat_with_sealed_bodies_completes() {
         let client = RouterOpenAIClient::builder(openai_config())
-            .transport_mode(TransportMode::Ehbp)
+            .transport(Transport::Ehbp { proxy_url: None })
             .user_cache_secret(CACHE_SECRET)
             .timeout(TIMEOUT)
             .connect()

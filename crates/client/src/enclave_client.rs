@@ -10,7 +10,7 @@ use crate::error::Error;
 use crate::internal::attested::{AttestedClient, Settings};
 use crate::internal::transport::base_url;
 use crate::internal::{enclave, system_clock};
-use crate::options::{RouteOptions, Secret, TransportMode};
+use crate::options::{RouteOptions, Secret, Transport};
 use crate::request::http_request_methods;
 use crate::trust::Trust;
 use crate::verifier::{BoxError, Policy, Verification, Verifier};
@@ -32,7 +32,7 @@ use crate::verifier::{BoxError, Policy, Verification, Verifier};
 /// same verification and connections. It is `Send` and `Sync`. There is
 /// nothing to close; dropping the last clone releases the connections.
 ///
-/// What is protected depends on the [`TransportMode`]: in `Tls`, the whole
+/// What is protected depends on the [`Transport`]: in `Tls`, the whole
 /// request and response; in `Ehbp`, the bodies only, and not a request
 /// without a body or the response to it.
 ///
@@ -80,15 +80,15 @@ impl EnclaveHttpClient {
         }
     }
 
-    /// Where requests are sent: the `base_url` option, or else the
-    /// enclave's own origin, `https://<host>/`. The path ends in `/`, so
-    /// `base_url().join("v1/models")` stays under it.
+    /// Where requests are sent: the proxy URL of [`Transport::Ehbp`], or
+    /// else the enclave's own origin, `https://<host>/`. The path ends in
+    /// `/`, so `base_url().join("v1/models")` stays under it.
     pub fn base_url(&self) -> &Url {
         self.inner.base_url()
     }
 
     /// The host of the enclave that the client verifies. It stays the
-    /// enclave's host when `base_url` is a proxy.
+    /// enclave's host when requests go through a proxy.
     pub fn enclave(&self) -> &str {
         self.inner.enclave()
     }
@@ -97,11 +97,6 @@ impl EnclaveHttpClient {
     /// client was created with.
     pub fn trust(&self) -> &Trust {
         &self.trust
-    }
-
-    /// The transport mode that the client was created with.
-    pub fn transport_mode(&self) -> TransportMode {
-        self.inner.transport_mode()
     }
 
     /// The last successful verification, without checking it: it may have
@@ -173,7 +168,7 @@ impl fmt::Debug for EnclaveHttpClient {
             .field("enclave", &self.enclave())
             .field("trust", &self.trust())
             .field("base_url", &self.base_url().as_str())
-            .field("transport_mode", &self.transport_mode())
+            .field("transport", &self.inner.transport_mode())
             .finish_non_exhaustive()
     }
 }
@@ -184,7 +179,7 @@ impl fmt::Debug for EnclaveHttpClient {
 /// "unset". The setters check nothing: [`connect`](Self::connect) checks
 /// every option before any network I/O.
 ///
-/// The `Debug` output shows neither the user cache secret nor the base
+/// The `Debug` output shows neither the user cache secret nor the proxy
 /// URL, which has not been checked for credentials yet.
 #[derive(Clone, Debug)]
 #[must_use = "a builder does nothing until `connect` is called"]
@@ -195,29 +190,11 @@ pub struct EnclaveHttpClientBuilder {
 }
 
 impl EnclaveHttpClientBuilder {
-    /// How the client protects its traffic. Unset, it is
-    /// [`TransportMode::Tls`].
-    pub fn transport_mode(mut self, mode: TransportMode) -> Self {
-        self.options.transport_mode = Some(mode);
-        self
-    }
-
-    /// Where requests are sent instead of `https://<host>/`: a path on the
-    /// enclave's own origin, or a proxy on another origin that forwards to
-    /// the enclave.
-    ///
-    /// A proxy requires [`TransportMode::Ehbp`], since a pinned connection
-    /// cannot pass through one. Requests to a proxy carry the
-    /// `X-Tinfoil-Enclave-Url` header, set to `https://<host>`, so that the
-    /// proxy can forward them. The proxy sees the method, the URL and the
-    /// headers of every request, an API key among them.
-    ///
-    /// The URL must be absolute and use HTTPS; `http://` is accepted only
-    /// for `localhost` or a loopback IP address, for a local development
-    /// proxy or a sidecar. It must not carry a user name, a password, a
-    /// query string or a fragment. Its path is made to end in `/`.
-    pub fn base_url(mut self, url: impl Into<String>) -> Self {
-        self.options.base_url = Some(url.into());
+    /// How the client protects its traffic, and whether it goes through a
+    /// proxy. Unset, it is [`Transport::Tls`]. See [`Transport::Ehbp`] for
+    /// the rules of a proxy URL.
+    pub fn transport(mut self, transport: Transport) -> Self {
+        self.options.transport = transport;
         self
     }
 
@@ -299,14 +276,15 @@ impl EnclaveHttpClientBuilder {
     /// Before any network I/O, in this order, each a configuration error:
     ///
     /// 1. `host` is empty.
-    /// 2. `base_url` is empty, is not an absolute `http` or `https` URL, or
-    ///    carries a user name or password (this error does not repeat the
-    ///    URL), a query string or a fragment; or it uses `http://` for a
-    ///    host other than `localhost` or a loopback IP address.
+    /// 2. The proxy URL of [`Transport::Ehbp`] is empty, is not an absolute
+    ///    `http` or `https` URL, or carries a user name or password (this
+    ///    error does not repeat the URL), a query string or a fragment; or
+    ///    it uses `http://` for a host other than `localhost` or a loopback
+    ///    IP address.
     /// 3. `user_cache_secret` is empty, or `timeout` is zero.
     /// 4. The trust argument lacks a field that its variant requires: an
-    ///    empty repository or project, both parts of
-    ///    [`Trust::EitherPin`], or registry IDs of
+    ///    empty repository or project, in either part of
+    ///    [`Trust::EitherPin`] too, or registry IDs of
     ///    [`Trust::ProjectPin`] that are an empty list.
     /// 5. The verifier cannot be built from the trust argument and the
     ///    policy: a value that the verifier refuses, such as empty signing
@@ -315,16 +293,15 @@ impl EnclaveHttpClientBuilder {
     /// 6. `host` is not a host with an optional port; a part of the pin
     ///    that the trust argument sets is `Some("")`, or is not a
     ///    reference, or the verifier cannot verify against it.
-    /// 7. The mode is [`TransportMode::Tls`] and `base_url` is on another
-    ///    origin than the enclave: that is a proxy, which requires
-    ///    [`TransportMode::Ehbp`].
+    /// 7. The proxy URL is on the enclave's own origin, which is no proxy:
+    ///    leave it unset to connect directly.
     ///
     /// Then the enclave is verified, as
     /// [`ensure_verified`](EnclaveHttpClient::ensure_verified) describes,
-    /// with its errors. The transport mode is the option and nothing else:
-    /// an enclave whose attestation endorses no key for the mode fails
-    /// the verification with an attestation error; the client does not
-    /// fall back to the other mode.
+    /// with its errors. The transport is the option and nothing else: an
+    /// enclave whose attestation endorses no key for it fails the
+    /// verification with an attestation error; the client does not fall
+    /// back to the other transport.
     ///
     /// # Cancel safety
     ///
@@ -350,7 +327,7 @@ impl EnclaveHttpClientBuilder {
         if self.host.is_empty() {
             return Err(Error::configuration("an enclave host is required"));
         }
-        let base_url = self.options.checked_base_url()?;
+        let base_url = self.options.checked_proxy_url()?;
         self.options.common.check()?;
         let mode = self.options.mode();
         let common = self.options.common;
@@ -363,8 +340,8 @@ impl EnclaveHttpClientBuilder {
             verification_check: common.verification_check,
         }
         .check()?;
-        if let (TransportMode::Tls, Some(base_url)) = (mode, &base_url) {
-            base_url::validate_for_tls(base_url, checked.host())?;
+        if let Some(proxy_url) = &base_url {
+            base_url::refuse_enclave_origin(proxy_url, checked.host())?;
         }
         Ok((
             checked,

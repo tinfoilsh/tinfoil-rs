@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use tinfoil::{EnclaveHttpClient, ErrorKind, TransportMode, Trust};
+use tinfoil::{EnclaveHttpClient, ErrorKind, Transport, Trust};
 
 const ENCLAVE: &str = "inference.tinfoil.sh";
 const REPO: &str = "tinfoilsh/confidential-model-router";
@@ -57,8 +57,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
     let proxied = EnclaveHttpClient::builder(ENCLAVE, trust())
-        .transport_mode(TransportMode::Ehbp)
-        .base_url(proxy_url)
+        .transport(Transport::Ehbp {
+            proxy_url: Some(proxy_url),
+        })
         .timeout(Duration::from_secs(60))
         .connect()
         .await?;

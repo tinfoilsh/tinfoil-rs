@@ -844,8 +844,9 @@ mod options {
 
         let day = Duration::from_secs(24 * 60 * 60);
         let (fallback, settings) = RouterHttpClient::builder()
-            .transport_mode(TransportMode::Ehbp)
-            .base_url("https://proxy.example.com/tinfoil")
+            .transport(crate::Transport::Ehbp {
+                proxy_url: Some("https://proxy.example.com/tinfoil".into()),
+            })
             .policy(Policy {
                 freshness_max_age: day,
                 ..Policy::default()
@@ -884,10 +885,10 @@ mod options {
                 .policy(unbounded())
                 .timeout(Duration::ZERO)
         };
-        let message = refusal(all_wrong().base_url("ftp://proxy.example/"));
-        assert!(message.contains("invalid base URL"), "{message}");
-        let message = refusal(all_wrong().base_url("https://proxy.example/"));
-        assert!(message.contains("TransportMode::Ehbp"), "{message}");
+        let message = refusal(all_wrong().transport(crate::Transport::Ehbp {
+            proxy_url: Some("ftp://proxy.example/".into()),
+        }));
+        assert!(message.contains("invalid proxy URL"), "{message}");
         let message = refusal(all_wrong());
         assert!(message.contains("timeout is zero"), "{message}");
         let message = refusal(RouterHttpClient::builder().policy(unbounded()));
@@ -900,8 +901,8 @@ mod options {
             let world = World::new(vec![("a.example", vec![good("a")])]);
             let resolved = Arc::new(Mutex::new(0));
             let count = Arc::clone(&resolved);
-            // A pinned client cannot take a base URL on another origin:
-            // the client is refused once its router is known.
+            // A pinned client cannot take a proxy: the client is refused
+            // once its router is known.
             let error = connect(
                 hosts(&["a.example"]),
                 world.enclave_for(),

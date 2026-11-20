@@ -116,7 +116,7 @@ project is an error.
 
 ### `Client::new_with_proxy(enclave, repo, api_key, proxy_url)`
 
-Proxy mode is a transport mode plus a base URL, on any client:
+Proxy mode is the sealed-body transport with a proxy URL, on any client:
 
 ```rust,ignore
 // 0.2
@@ -126,7 +126,7 @@ let client = tinfoil::Client::new_with_proxy(enclave, repo, api_key, proxy_url).
 ```rust,no_run
 // 0.3
 use tinfoil::async_openai::config::OpenAIConfig;
-use tinfoil::{EnclaveOpenAIClient, TransportMode, Trust};
+use tinfoil::{EnclaveOpenAIClient, Transport, Trust};
 
 async fn connect(
     enclave: &str,
@@ -136,15 +136,16 @@ async fn connect(
 ) -> Result<EnclaveOpenAIClient, tinfoil::Error> {
     let config = OpenAIConfig::new().with_api_key(api_key);
     EnclaveOpenAIClient::builder(enclave, Trust::repo(repo), config)
-        .transport_mode(TransportMode::Ehbp)
-        .base_url(proxy_url)
+        .transport(Transport::Ehbp {
+            proxy_url: Some(proxy_url.to_owned()),
+        })
         .connect()
         .await
 }
 ```
 
-The OpenAI client uses the base URL verbatim as its API base, so include the
-path that your proxy serves the API under (for example `…/v1/`). The base URL
+The OpenAI client uses the proxy URL verbatim as its API base, so include the
+path that your proxy serves the API under (for example `…/v1/`). The proxy URL
 must be HTTPS, without credentials, a query string or a fragment. Plain
 `http://` is accepted only for a loopback host: the name `localhost` (not
 `localhost.` and not a subdomain), an IPv4 address in `127.0.0.0/8`, or the
@@ -152,7 +153,7 @@ IPv6 address `[::1]` in any spelling (`[0:0:0:0:0:0:0:1]` is the same
 address). An IPv4 address must be written as four decimal numbers, so
 `127.1` and `0x7f.0.0.1` are refused, and an IPv4 address mapped into IPv6
 (`[::ffff:127.0.0.1]`) does not count as loopback. With the router, `RouterOpenAIClient::builder(config)` takes
-the same two setters, and the router that discovery chooses is named to the
+the same setter, and the router that discovery chooses is named to the
 proxy in the `X-Tinfoil-Enclave-Url` header.
 
 ### `Client::verify(&mut self)`
@@ -195,7 +196,7 @@ async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
 | 0.2 | 0.3 |
 |---|---|
 | `SecureClient::new(host, repo, api_key)` + `verify()` | `EnclaveHttpClient::connect(host, Trust::repo(repo))` |
-| `SecureClient::new_with_proxy(host, repo, api_key, proxy_url)` + `verify()` | `EnclaveHttpClient::builder(host, Trust::repo(repo)).transport_mode(TransportMode::Ehbp).base_url(proxy_url).connect()` |
+| `SecureClient::new_with_proxy(host, repo, api_key, proxy_url)` + `verify()` | `EnclaveHttpClient::builder(host, Trust::repo(repo)).transport(Transport::Ehbp { proxy_url: Some(proxy_url) }).connect()` |
 | `SecureClient::new_default_client(api_key)` | `RouterHttpClient::connect()` |
 | `SecureClient::with_measurement(host, api_key, measurement)` | a `Policy` with `pinned_registers`; see below |
 | `is_verified()` | removed: a client is always verified. `current()` returns the last verification |
@@ -242,7 +243,7 @@ to another origin is refused, and redirects are not followed: a `3xx` response
 is returned.
 
 In 0.2, `http_client()` failed in proxy mode. In 0.3 the same request methods
-work in both modes; in `TransportMode::Ehbp` they seal the body.
+work in both modes; in `Transport::Ehbp` they seal the body.
 
 ### A pinned measurement
 
@@ -469,7 +470,7 @@ the `tinfoil-verifier` crate:
 ## New in 0.3
 
 - `RouterHttpClient` and `EnclaveHttpClient` as first-class HTTP clients, with
-  `TransportMode::Tls` and `TransportMode::Ehbp` on both.
+  `Transport::Tls` and `Transport::Ehbp` on both.
 - Intel TDX enclaves, in addition to AMD SEV-SNP.
 - `verification_check`, a veto over every verification that a client relies
   on.

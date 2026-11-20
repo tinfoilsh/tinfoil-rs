@@ -25,7 +25,7 @@ const INSUFFICIENT_QUOTA: &str = "insufficient_quota";
 
 /// The largest body of an error response that this crate reads into
 /// memory by itself. An error of the API is a small JSON object; in
-/// [`TransportMode::Ehbp`] an error response can come from a proxy and is
+/// [`Transport::Ehbp`](crate::Transport::Ehbp) an error response can come from a proxy and is
 /// not authenticated, so its size is not left to whoever sent it.
 pub(crate) const MAX_ERROR_BODY_BYTES: usize = 1 << 20;
 
@@ -73,7 +73,7 @@ pub(crate) const MAX_RESPONSE_BYTES: usize = 64 << 20;
 ///   the new verification. If that attempt fails too, its error is
 ///   returned with the rejection attached.
 /// - **Lengths.** `reqwest` declares the length of a multipart body in a
-///   `Content-Length` header. In [`TransportMode::Ehbp`] the body that is
+///   `Content-Length` header. In [`Transport::Ehbp`](crate::Transport::Ehbp) the body that is
 ///   sent is the sealed one, whose length the transport declares, and the
 ///   mode refuses a request that sets the header; so there the header is
 ///   removed from the request that `async_openai` built.

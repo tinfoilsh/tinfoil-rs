@@ -31,13 +31,13 @@ pub enum ErrorKind {
     ///   `verification_check` refused it, or the document endorses no key
     ///   for the transport mode. No connection for the request was
     ///   opened, and nothing was sent. In
-    ///   [`TransportMode::Tls`](crate::TransportMode::Tls) the one other
+    ///   [`Transport::Tls`](crate::Transport::Tls) the one other
     ///   attestation error is the pin: the server's certificate fails the
     ///   standard checks or does not carry the attested key. That fails
     ///   the handshake, before the request is written. So in that mode no
     ///   attestation error leaves a request delivered.
     /// - **Possibly delivered.** In
-    ///   [`TransportMode::Ehbp`](crate::TransportMode::Ehbp) the body is
+    ///   [`Transport::Ehbp`](crate::Transport::Ehbp) the body is
     ///   sealed to the attested key, so nobody else can read it, but the
     ///   error can arise after the sealed request has left: the answer
     ///   says that the enclave does not hold the key, a success response
@@ -155,7 +155,7 @@ impl Error {
     /// It is **not** found in an item of a stream that a typed call
     /// returned (`chat().create_stream(..)`, `responses().create_stream(..)`
     /// and the like). When the body of such a stream fails while it is
-    /// read (in [`TransportMode::Ehbp`](crate::TransportMode::Ehbp) a
+    /// read (in [`Transport::Ehbp`](crate::Transport::Ehbp) a
     /// part that does not authenticate; a broken connection; a deadline),
     /// the stream still ends with an error and delivers nothing after it,
     /// but `async_openai` keeps only a message in
@@ -186,7 +186,7 @@ impl Error {
     /// `reqwest::Error`, and this returns it, with its [`kind`](Self::kind):
     ///
     /// - An attestation error: in
-    ///   [`TransportMode::Ehbp`](crate::TransportMode::Ehbp), a part of the
+    ///   [`Transport::Ehbp`](crate::Transport::Ehbp), a part of the
     ///   body did not authenticate, or the body ended inside a sealed
     ///   frame. What was read before it was authentic; nothing of the
     ///   failing frame or after it was delivered.

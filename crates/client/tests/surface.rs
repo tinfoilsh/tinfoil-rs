@@ -20,7 +20,7 @@ use tinfoil::reqwest::{Method, Request, Response, Url};
 use tinfoil::verifier::{BoxError, Pin, Policy, Verification};
 use tinfoil::{
     EnclaveHttpClient, EnclaveHttpClientBuilder, Error, ErrorKind, RequestBuilder,
-    RouterHttpClient, RouterHttpClientBuilder, TransportMode, Trust, VERSION,
+    RouterHttpClient, RouterHttpClientBuilder, Transport, Trust, VERSION,
 };
 
 fn handle<T: Clone + Send + Sync + std::fmt::Debug + 'static>() {}
@@ -35,15 +35,11 @@ fn check(_: &Verification) -> Result<(), BoxError> {
 fn the_version_and_the_enums_read_as_documented() {
     assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
 
-    assert_eq!(TransportMode::default(), TransportMode::Tls);
-    let _: fn(&TransportMode) -> &'static str = TransportMode::as_str;
-    assert_eq!(
-        [
-            TransportMode::Tls.to_string(),
-            TransportMode::Ehbp.to_string()
-        ],
-        ["tls", "ehbp"]
-    );
+    assert_eq!(Transport::default(), Transport::Tls);
+    let proxied = Transport::Ehbp {
+        proxy_url: Some("https://user:hunter2@proxy.example.com/".into()),
+    };
+    assert!(!format!("{proxied:?}").contains("hunter2"));
 
     let _: fn(&ErrorKind) -> &'static str = ErrorKind::as_str;
     assert_eq!(
@@ -80,13 +76,11 @@ fn the_accessors_have_their_signatures() {
     let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a Url = EnclaveHttpClient::base_url;
     let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a str = EnclaveHttpClient::enclave;
     let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a Trust = EnclaveHttpClient::trust;
-    let _: fn(&EnclaveHttpClient) -> TransportMode = EnclaveHttpClient::transport_mode;
     let _: fn(&EnclaveHttpClient) -> Arc<Verification> = EnclaveHttpClient::current;
 
     let _: for<'a> fn(&'a RouterHttpClient) -> &'a Url = RouterHttpClient::base_url;
     let _: for<'a> fn(&'a RouterHttpClient) -> &'a str = RouterHttpClient::enclave;
     let _: for<'a> fn(&'a RouterHttpClient) -> &'a Pin = RouterHttpClient::pin;
-    let _: fn(&RouterHttpClient) -> TransportMode = RouterHttpClient::transport_mode;
     let _: fn(&RouterHttpClient) -> Arc<Verification> = RouterHttpClient::current;
     let _: fn() -> RouterHttpClientBuilder = RouterHttpClient::builder;
 }
@@ -94,8 +88,9 @@ fn the_accessors_have_their_signatures() {
 #[test]
 fn a_builder_does_no_io_and_prints_no_secret() {
     let builder = EnclaveHttpClient::builder("enclave.example.com", Trust::repo("org/repo"))
-        .transport_mode(TransportMode::Ehbp)
-        .base_url("https://user:hunter2@proxy.example.com/")
+        .transport(Transport::Ehbp {
+            proxy_url: Some("https://user:hunter2@proxy.example.com/".into()),
+        })
         .policy(Policy::default())
         .verification_check(check)
         .user_cache_secret("cache-scope-value")
@@ -117,8 +112,9 @@ async fn enclave_client(policy: Policy) -> Result<(), Box<dyn StdError>> {
         String::from("enclave.example.com"),
         Trust::repo("org/repo@v1.2.3"),
     )
-    .transport_mode(TransportMode::Ehbp)
-    .base_url("https://proxy.example.com/")
+    .transport(Transport::Ehbp {
+        proxy_url: Some("https://proxy.example.com/".into()),
+    })
     .policy(policy)
     .verification_check(|verified: &Verification| {
         if verified.code_tag().is_empty() {
@@ -172,8 +168,9 @@ async fn router_client() -> Result<(), Error> {
     let client: RouterHttpClient = send(RouterHttpClient::connect()).await?;
     let configured: RouterHttpClient = send(
         RouterHttpClient::builder()
-            .transport_mode(TransportMode::Ehbp)
-            .base_url("https://proxy.example.com/")
+            .transport(Transport::Ehbp {
+                proxy_url: Some("https://proxy.example.com/".into()),
+            })
             .policy(Policy::default())
             .verification_check(check)
             .user_cache_secret("opaque-random-value")
@@ -215,7 +212,11 @@ async fn router_refusal(builder: RouterHttpClientBuilder) -> String {
 #[tokio::test]
 async fn an_enclave_client_checks_its_options_before_any_io() {
     let builder = || EnclaveHttpClient::builder("enclave.invalid", Trust::repo("owner/name"));
-    let ehbp = || builder().transport_mode(TransportMode::Ehbp);
+    let proxy = |url: &str| {
+        builder().transport(Transport::Ehbp {
+            proxy_url: Some(url.into()),
+        })
+    };
     let cases: Vec<(EnclaveHttpClientBuilder, &str)> = vec![
         (
             EnclaveHttpClient::builder("", Trust::repo("owner/name")),
@@ -229,20 +230,11 @@ async fn an_enclave_client_checks_its_options_before_any_io() {
             EnclaveHttpClient::builder("enclave.invalid/v1", Trust::repo("owner/name")),
             "enclave host",
         ),
-        (ehbp().base_url(""), "invalid base URL"),
-        (ehbp().base_url("proxy.invalid"), "invalid base URL"),
-        (
-            ehbp().base_url("http://proxy.invalid/"),
-            "HTTP is allowed only",
-        ),
-        (
-            ehbp().base_url("https://user:hunter2@proxy.invalid/"),
-            "user name",
-        ),
-        (
-            ehbp().base_url("https://proxy.invalid/?key=1"),
-            "query string",
-        ),
+        (proxy(""), "invalid proxy URL"),
+        (proxy("proxy.invalid"), "invalid proxy URL"),
+        (proxy("http://proxy.invalid/"), "HTTP is allowed only"),
+        (proxy("https://user:hunter2@proxy.invalid/"), "user name"),
+        (proxy("https://proxy.invalid/?key=1"), "query string"),
         (
             builder().user_cache_secret(""),
             "user cache secret is empty",
@@ -256,16 +248,10 @@ async fn an_enclave_client_checks_its_options_before_any_io() {
             EnclaveHttpClient::builder("enclave.invalid", Trust::repo("not a reference")),
             "",
         ),
-        // A proxy needs sealed bodies: the default mode pins connections.
+        // A proxy on the enclave's own origin is no proxy.
         (
-            builder().base_url("https://proxy.invalid/"),
-            "requires TransportMode::Ehbp",
-        ),
-        (
-            builder()
-                .transport_mode(TransportMode::Tls)
-                .base_url("https://enclave.invalid:8443/"),
-            "requires TransportMode::Ehbp",
+            proxy("https://enclave.invalid/relay/"),
+            "enclave's own origin",
         ),
     ];
     for (builder, reason) in cases {
@@ -278,19 +264,23 @@ async fn an_enclave_client_checks_its_options_before_any_io() {
 #[tokio::test]
 async fn an_enclave_client_reports_its_options_in_the_documented_order() {
     // Each builder is wrong in two ways; the earlier check answers.
-    let message = enclave_refusal(
-        EnclaveHttpClient::builder("", Trust::repo("")).base_url("ftp://proxy.invalid/"),
-    )
+    let message = enclave_refusal(EnclaveHttpClient::builder("", Trust::repo("")).transport(
+        Transport::Ehbp {
+            proxy_url: Some("ftp://proxy.invalid/".into()),
+        },
+    ))
     .await;
     assert!(message.contains("enclave host"), "{message}");
 
     let message = enclave_refusal(
         EnclaveHttpClient::builder("enclave.invalid", Trust::repo(""))
-            .base_url("ftp://proxy.invalid/")
+            .transport(Transport::Ehbp {
+                proxy_url: Some("ftp://proxy.invalid/".into()),
+            })
             .timeout(Duration::ZERO),
     )
     .await;
-    assert!(message.contains("invalid base URL"), "{message}");
+    assert!(message.contains("invalid proxy URL"), "{message}");
 
     let message = enclave_refusal(
         EnclaveHttpClient::builder("enclave.invalid", Trust::repo("")).timeout(Duration::ZERO),
@@ -299,8 +289,9 @@ async fn an_enclave_client_reports_its_options_in_the_documented_order() {
     assert!(message.contains("timeout is zero"), "{message}");
 
     let message = enclave_refusal(
-        EnclaveHttpClient::builder("enclave.invalid", Trust::repo(""))
-            .base_url("https://proxy.invalid/"),
+        EnclaveHttpClient::builder("enclave.invalid", Trust::repo("")).transport(Transport::Ehbp {
+            proxy_url: Some("https://enclave.invalid/".into()),
+        }),
     )
     .await;
     assert!(message.contains("requires a repository"), "{message}");
@@ -342,10 +333,10 @@ async fn an_enclave_that_serves_no_attestation_document_is_a_network_error_after
     // The retry comes one second after the first failure, on real time:
     // the public constructor has no other clock.
     let (host, accepted) = plain_server(b"HTTP/1.1 200 OK\r\n\r\nnot a TLS server").await;
-    for mode in [TransportMode::Tls, TransportMode::Ehbp] {
+    for transport in [Transport::Tls, Transport::Ehbp { proxy_url: None }] {
         let before = accepted.load(Ordering::SeqCst);
         let connect = EnclaveHttpClient::builder(host.as_str(), Trust::repo("owner/name"))
-            .transport_mode(mode)
+            .transport(transport.clone())
             .connect();
         let error = tokio::time::timeout(PATIENCE, connect)
             .await
@@ -356,7 +347,7 @@ async fn an_enclave_that_serves_no_attestation_document_is_a_network_error_after
         assert!(error.source().is_some());
         let first = error.earlier_attempt().expect("the first attempt");
         assert_eq!(first.kind(), ErrorKind::Network);
-        assert_eq!(accepted.load(Ordering::SeqCst) - before, 2, "{mode}");
+        assert_eq!(accepted.load(Ordering::SeqCst) - before, 2, "{transport:?}");
     }
 }
 
@@ -380,23 +371,15 @@ async fn connecting_to_an_enclave_that_never_answers_ends_at_the_timeout() {
 
 #[tokio::test]
 async fn a_router_client_checks_its_options_before_any_io() {
-    let ehbp = || RouterHttpClient::builder().transport_mode(TransportMode::Ehbp);
+    let proxy = |url: &str| {
+        RouterHttpClient::builder().transport(Transport::Ehbp {
+            proxy_url: Some(url.into()),
+        })
+    };
     let cases: Vec<(RouterHttpClientBuilder, &str)> = vec![
-        (ehbp().base_url(""), "invalid base URL"),
-        (
-            ehbp().base_url("http://proxy.invalid/"),
-            "HTTP is allowed only",
-        ),
-        (
-            ehbp().base_url("https://user:hunter2@proxy.invalid/"),
-            "user name",
-        ),
-        // The router is not known before discovery, so any base URL is a
-        // proxy, and the default mode cannot go through one.
-        (
-            RouterHttpClient::builder().base_url("https://proxy.invalid/"),
-            "requires TransportMode::Ehbp",
-        ),
+        (proxy(""), "invalid proxy URL"),
+        (proxy("http://proxy.invalid/"), "HTTP is allowed only"),
+        (proxy("https://user:hunter2@proxy.invalid/"), "user name"),
         (
             RouterHttpClient::builder().user_cache_secret(""),
             "user cache secret is empty",
@@ -510,8 +493,7 @@ mod openai {
         let config = OpenAIConfig::new().with_api_key("sk-secret-key");
         let builder =
             EnclaveOpenAIClient::builder("enclave.example.com", Trust::repo("org/repo"), config)
-                .transport_mode(TransportMode::Tls)
-                .base_url("https://enclave.example.com/api/")
+                .transport(Transport::Tls)
                 .policy(Policy::default())
                 .verification_check(check)
                 .user_cache_secret("cache-scope-value")
@@ -634,14 +616,15 @@ mod openai {
             Trust::repo("org/repo"),
             config.clone(),
         )
-        .transport_mode(TransportMode::Ehbp)
-        .base_url("https://proxy.example.com/v1/");
+        .transport(Transport::Ehbp {
+            proxy_url: Some("https://proxy.example.com/v1/".into()),
+        });
         let _: EnclaveOpenAIClient = send(builder.connect()).await?;
 
         // The router, configured.
         let _: RouterOpenAIClient = send(RouterOpenAIClient::connect(config.clone())).await?;
         let builder: RouterOpenAIClientBuilder = RouterOpenAIClient::builder(config)
-            .transport_mode(TransportMode::Tls)
+            .transport(Transport::Tls)
             .policy(Policy::default())
             .verification_check(check)
             .user_cache_secret("opaque-random-value")
