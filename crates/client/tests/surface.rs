@@ -105,7 +105,8 @@ fn the_fetchers_are_traits_that_async_closures_and_the_relays_implement() {
         Ok::<Vec<u8>, BoxError>(Vec::new())
     };
     attestation(&fetch);
-    let future: FetchFuture<Vec<u8>> = fetch.fetch_attestation("h".into(), [0; 32]);
+    let nonce = tinfoil::verifier::random_nonce().expect("a nonce");
+    let future: FetchFuture<Vec<u8>> = fetch.fetch_attestation("h".into(), nonce);
     drop(future);
     let routers = || async { Ok::<Vec<String>, BoxError>(Vec::new()) };
     router_list(&routers);

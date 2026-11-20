@@ -17,14 +17,14 @@ async fn unstuck<T>(test: impl std::future::Future<Output = T>) -> T {
         .expect("the test can make no progress")
 }
 
-const NONCE: [u8; NONCE_SIZE] = [0xab; NONCE_SIZE];
-
-fn nonce_hex() -> String {
-    "ab".repeat(NONCE_SIZE)
+/// A nonce drawn at random, as a client draws each one.
+fn nonce() -> [u8; NONCE_SIZE] {
+    crate::verifier::random_nonce().unwrap()
 }
 
 #[test]
 fn a_relay_url_joins_the_request_path_under_its_own_path() {
+    let nonce = nonce();
     let cases = [
         (
             "https://app.example/tinfoil",
@@ -50,13 +50,13 @@ fn a_relay_url_joins_the_request_path_under_its_own_path() {
     for (relay, root) in cases {
         let attestation = AttestationRelay::new(relay).unwrap();
         let url = attestation
-            .document_url("enclave.example.com", &NONCE)
+            .document_url("enclave.example.com", &nonce)
             .unwrap();
         assert_eq!(
             url.as_str(),
             format!(
                 "{root}.well-known/tinfoil-attestation?nonce={}&enclave=enclave.example.com",
-                nonce_hex()
+                fetch::lower_hex(&nonce)
             )
         );
         let list = RouterListRelay::new(relay).unwrap();
@@ -66,20 +66,27 @@ fn a_relay_url_joins_the_request_path_under_its_own_path() {
 
 #[test]
 fn the_enclave_host_is_encoded_as_a_query_value_with_its_port() {
+    let nonce = nonce();
     let relay = AttestationRelay::new("https://app.example/tinfoil").unwrap();
-    let url = relay.document_url("enclave.example:8443", &NONCE).unwrap();
+    let url = relay.document_url("enclave.example:8443", &nonce).unwrap();
     assert_eq!(
         url.query(),
-        Some(format!("nonce={}&enclave=enclave.example%3A8443", nonce_hex()).as_str())
+        Some(
+            format!(
+                "nonce={}&enclave=enclave.example%3A8443",
+                fetch::lower_hex(&nonce)
+            )
+            .as_str()
+        )
     );
-    let url = relay.document_url("[::1]:8443", &NONCE).unwrap();
+    let url = relay.document_url("[::1]:8443", &nonce).unwrap();
     assert!(
         url.as_str().ends_with("&enclave=%5B%3A%3A1%5D%3A8443"),
         "{url}"
     );
     // A host that is no host is refused before anything is sent.
     for host in ["", "https://enclave.example", "enclave.example/x", "a&b=c"] {
-        let error = relay.document_url(host, &NONCE).expect_err(host);
+        let error = relay.document_url(host, &nonce).expect_err(host);
         assert_eq!(error.kind(), ErrorKind::Configuration, "{host:?}");
     }
 }
@@ -145,8 +152,9 @@ async fn a_fetcher_that_does_not_answer_is_dropped_after_the_bound_of_a_direct_f
     unstuck(async {
         let fetcher = |_: String, _: [u8; NONCE_SIZE]| std::future::pending();
         let fetch = attestation_fetch(Some(Arc::new(fetcher)));
+        let nonce = nonce();
         let started = tokio::time::Instant::now();
-        let error = fetch("enclave.example".into(), NONCE)
+        let error = fetch("enclave.example".into(), nonce)
             .await
             .expect_err("no document");
         assert_eq!(error.kind(), ErrorKind::Network);
@@ -400,11 +408,12 @@ async fn serve_once(answer: &'static [u8]) -> (String, tokio::task::JoinHandle<S
 
 #[tokio::test]
 async fn a_relayed_document_is_requested_with_the_sdk_headers_and_returned_as_it_is() {
+    let nonce = nonce();
     let (relay, request) =
         serve_once(b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\n\r\ndocument").await;
     let relay = AttestationRelay::new(relay).unwrap();
     let document = relay
-        .fetch_attestation("enclave.example:8443".into(), NONCE)
+        .fetch_attestation("enclave.example:8443".into(), nonce)
         .await
         .unwrap();
     assert_eq!(document, b"document");
@@ -414,7 +423,7 @@ async fn a_relayed_document_is_requested_with_the_sdk_headers_and_returned_as_it
         line,
         format!(
             "get /tinfoil/.well-known/tinfoil-attestation?nonce={}&enclave=enclave.example%3a8443 http/1.1",
-            nonce_hex()
+            fetch::lower_hex(&nonce)
         )
     );
     assert!(head.contains("\r\ntinfoil-sdk: "), "{head}");
@@ -424,6 +433,7 @@ async fn a_relayed_document_is_requested_with_the_sdk_headers_and_returned_as_it
 
 #[tokio::test]
 async fn a_relay_failure_is_a_network_error() {
+    let nonce = nonce();
     for answer in [
         &b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\n\r\n"[..],
         b"HTTP/1.1 200 OK\r\ncontent-length: 99999999999\r\n\r\n",
@@ -431,7 +441,7 @@ async fn a_relay_failure_is_a_network_error() {
         let (relay, _) = serve_once(answer).await;
         let error = AttestationRelay::new(relay)
             .unwrap()
-            .fetch_attestation("enclave.example".into(), NONCE)
+            .fetch_attestation("enclave.example".into(), nonce)
             .await
             .expect_err("a failure");
         let error = from_fetcher(error);
@@ -444,7 +454,7 @@ async fn a_relay_failure_is_a_network_error() {
     };
     let error = AttestationRelay::new(format!("http://127.0.0.1:{unreachable}/"))
         .unwrap()
-        .fetch_attestation("enclave.example".into(), NONCE)
+        .fetch_attestation("enclave.example".into(), nonce)
         .await
         .expect_err("unreachable");
     assert_eq!(from_fetcher(error).kind(), ErrorKind::Network);
