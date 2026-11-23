@@ -36,13 +36,15 @@ use std::time::{Duration, SystemTime};
 use tinfoil_verifier::{
     ATTESTATION_V3_FORMAT, ArtifactTrust, ArtifactVerification, BoxError, CRYPTO_MATERIAL_ID_HPKE,
     CRYPTO_MATERIAL_ID_TLS, CRYPTO_MATERIAL_V1_FORMAT, ConfigAuthorizer, ConfigEndorsement,
-    ConfigTrust, ConfigVerification, CryptoMaterialItem, DEVICE_EVIDENCE_V1_FORMAT, EmbeddedConfig,
-    Error, Expected, KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_SPKI_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT,
-    Layer, Measurement, NONCE_SIZE, NVIDIA_GPU_EVIDENCE_V1_FORMAT, PUBLIC_REGISTRY_ID, Pin, Policy,
-    PublicKey, REGISTER_SIZE, REPORT_DATA_V1_ALGORITHM, Reference, ReferenceSource, Register,
-    RuntimeReference, SEV_SNP_REPORT_V1_FORMAT, SoftwareIdentity, TDX_QUOTE_V1_FORMAT, UsageError,
-    Verification, VerificationError, VerificationMetadata, Verifier, cert_pubkey_fp,
-    crypto_material_data, parse_reference, random_nonce,
+    ConfigTrust, ConfigVerification, CpuEvidence, CryptoMaterialItem, DEVICE_EVIDENCE_V1_FORMAT,
+    EmbeddedConfig, Error, Expected, ExpectedFacts, KEY_SPKI_FP_SHA256_V1_FORMAT,
+    KEY_SPKI_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT, Layer, MeasuredFacts, Measurement, NONCE_SIZE,
+    NVIDIA_GPU_EVIDENCE_V1_FORMAT, PUBLIC_REGISTRY_ID, PartialFacts, Pin, Policy, PublicKey,
+    REGISTER_SIZE, REPORT_DATA_V1_ALGORITHM, Reference, ReferenceSource, Register,
+    RuntimeReference, SEV_SNP_REPORT_V1_FORMAT, SoftwareIdentity, Step, StepStatus,
+    TDX_QUOTE_V1_FORMAT, UsageError, VerificationError, VerificationMetadata, VerificationReport,
+    VerifiedFacts, Verifier, cert_pubkey_fp, crypto_material_data, hpke_public_key_fp,
+    parse_reference, random_nonce,
 };
 
 #[test]
@@ -50,8 +52,9 @@ fn every_public_name_is_importable_and_has_its_signature() {
     // The verifier.
     let _: fn(ConfigTrust, Policy) -> Result<Verifier, Error> = Verifier::new;
     let _: fn() -> Verifier = Verifier::default;
-    let _: fn(&Verifier, &[u8], &[u8], &Pin) -> Result<Verification, Error> = Verifier::verify_v3;
-    let _: fn(&Verifier, &[u8], &[u8], &Pin, SystemTime) -> Result<Verification, Error> =
+    let _: fn(&Verifier, &[u8], &[u8], &Pin) -> Result<VerificationReport, Error> =
+        Verifier::verify_v3;
+    let _: fn(&Verifier, &[u8], &[u8], &Pin, SystemTime) -> Result<VerificationReport, Error> =
         Verifier::verify_v3_at;
     let _: fn(&Verifier, &Pin) -> Result<(), Error> = Verifier::check_pin_verifiability;
     let _: fn() -> Pin = Pin::none;
@@ -127,24 +130,63 @@ fn every_public_name_is_importable_and_has_its_signature() {
     let _: fn(&PublicKey) -> Vec<u8> = PublicKey::to_spki_der;
 
     // The record of a verification.
-    let _: fn(&Verification) -> &str = Verification::code_digest;
-    let _: fn(&Verification) -> &str = Verification::code_tag;
-    let _: fn(&Verification) -> &str = Verification::config_repo;
-    let _: fn(&Verification) -> &Expected = Verification::code_measurement;
-    let _: fn(&Verification) -> &Measurement = Verification::enclave_measurement;
-    let _: fn(&Verification) -> Option<&str> = Verification::tls_public_key_fp;
-    let _: fn(&Verification) -> Option<&str> = Verification::hpke_public_key;
-    let _: fn(&Verification) -> &[CryptoMaterialItem] = Verification::crypto_material;
-    let _: for<'a> fn(&'a Verification, &str, &str) -> Option<&'a str> =
-        Verification::crypto_material_data;
-    let _: fn(&Verification) -> Option<SystemTime> = Verification::freshness_expires_at;
-    let _: fn(&Verification) -> Option<&ConfigVerification> = Verification::config;
-    let _: fn(&Verification) -> Option<&ArtifactVerification> = Verification::runtime;
-    let _: fn(&Verification) -> Option<&ArtifactVerification> = Verification::platform;
-    let _: fn(&Verification) -> &VerificationMetadata = Verification::metadata;
-    let _: fn(&Verification) -> String = Verification::to_json;
-    let _: fn(&Verification) -> Verification = Verification::clone;
+    let _: fn(&VerifiedFacts) -> &str = VerifiedFacts::code_digest;
+    let _: fn(&VerifiedFacts) -> &str = VerifiedFacts::code_tag;
+    let _: fn(&VerifiedFacts) -> &str = VerifiedFacts::config_repo;
+    let _: fn(&VerifiedFacts) -> &Expected = VerifiedFacts::code_measurement;
+    let _: fn(&VerifiedFacts) -> &Measurement = VerifiedFacts::enclave_measurement;
+    let _: fn(&VerifiedFacts) -> Option<&str> = VerifiedFacts::tls_public_key_fp;
+    let _: fn(&VerifiedFacts) -> Option<&str> = VerifiedFacts::hpke_public_key;
+    let _: fn(&VerifiedFacts) -> &[CryptoMaterialItem] = VerifiedFacts::crypto_material;
+    let _: for<'a> fn(&'a VerifiedFacts, &str, &str) -> Option<&'a str> =
+        VerifiedFacts::crypto_material_data;
+    let _: fn(&VerifiedFacts) -> Option<SystemTime> = VerifiedFacts::freshness_expires_at;
+    let _: fn(&VerifiedFacts) -> Option<&ConfigVerification> = VerifiedFacts::config;
+    let _: fn(&VerifiedFacts) -> Option<&ArtifactVerification> = VerifiedFacts::runtime;
+    let _: fn(&VerifiedFacts) -> Option<&ArtifactVerification> = VerifiedFacts::platform;
+    let _: fn(&VerifiedFacts) -> String = VerifiedFacts::to_json;
+    let _: fn(&VerifiedFacts) -> VerifiedFacts = VerifiedFacts::clone;
 
+    // The report of a verification.
+    let _: fn(&VerificationReport) -> &[Step] = VerificationReport::steps;
+    let _: fn(&VerificationReport) -> Option<&VerifiedFacts> = VerificationReport::verified_facts;
+    let _: fn(&VerificationReport) -> Option<&PartialFacts> = VerificationReport::partial_facts;
+    let _: fn(&VerificationReport) -> &VerificationMetadata = VerificationReport::metadata;
+    let _: fn(&VerificationReport) -> Option<&Step> = VerificationReport::failed_step;
+    let _: fn(&VerificationReport) -> String = VerificationReport::to_json;
+    let _: fn(&VerificationReport) -> VerificationReport = VerificationReport::clone;
+    let _: fn(&StepStatus) -> &'static str = StepStatus::as_str;
+    let _: fn(&str) -> Option<String> = hpke_public_key_fp;
+    fn step_fields(step: &Step) {
+        let _: Layer = step.layer;
+        let _: StepStatus = step.status;
+        let _: &String = &step.message;
+        let _ = [
+            StepStatus::Passed,
+            StepStatus::Failed,
+            StepStatus::Skipped,
+            StepStatus::NotRun,
+        ];
+    }
+    fn partial_fields(partial: &PartialFacts) {
+        let expected: &Option<ExpectedFacts> = &partial.expected;
+        let measured: &Option<MeasuredFacts> = &partial.measured;
+        if let Some(expected) = expected {
+            let _: &String = &expected.config_repo;
+            let _: &ArtifactVerification = &expected.artifact;
+            let _: &Option<ConfigVerification> = &expected.config;
+            let _: &Option<ArtifactVerification> = &expected.platform;
+            let _: &Option<Expected> = &expected.code_measurement;
+            let _: &Option<Measurement> = &expected.measurement;
+        }
+        if let Some(measured) = measured {
+            let cpu: &Option<CpuEvidence> = &measured.cpu;
+            let _: Option<&Measurement> = cpu.as_ref().map(|cpu| &cpu.measurement);
+            let _: &Option<String> = &measured.tls_public_key_fp;
+            let _: &Option<String> = &measured.hpke_public_key_fp;
+        }
+    }
+    let _ = (step_fields, partial_fields);
     fn config_fields(config: &ConfigVerification) {
         let _: ReferenceSource = config.source;
         let _: (&Option<String>, &String) = (&config.name, &config.digest);
@@ -247,6 +289,9 @@ fn every_public_name_is_importable_and_has_its_signature() {
             assert_eq!(layer, Layer::Envelope);
             assert_eq!(layer.as_str(), "envelope");
             assert!(rejected.source().is_some());
+            let report: &VerificationReport = rejected.report();
+            assert_eq!(report.failed_step().map(|step| step.layer), Some(layer));
+            assert!(report.verified_facts().is_none());
         }
         Error::Usage(usage) => {
             let usage: UsageError = usage;
@@ -275,9 +320,10 @@ fn every_public_name_is_importable_and_has_its_signature() {
 }
 
 /// The files that define the items of the public types.
-const SOURCES: [&str; 8] = [
+const SOURCES: [&str; 9] = [
     "verifier.rs",
     "options.rs",
+    "report.rs",
     "verification.rs",
     "embedded.rs",
     "fingerprint.rs",

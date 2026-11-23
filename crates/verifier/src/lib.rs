@@ -2,8 +2,9 @@
 //!
 //! This crate is the functional core of the SDK. It opens no connections,
 //! reads no files and keeps no state between calls: a caller hands it an
-//! attestation document and gets back either the verified facts or the reason
-//! the document must not be trusted. Fetching documents and binding
+//! attestation document and gets back either a report with the verified
+//! facts or the reason that the document must not be trusted, with a report
+//! of the step that rejected it. Fetching documents and binding
 //! connections to a verified enclave belong to the `tinfoil` client crate.
 //!
 //! # Verifying a document
@@ -15,7 +16,8 @@
 //! sources of trust that would conflict cannot be configured together. Its
 //! [`verify_v3`](Verifier::verify_v3) takes the document, the nonce that the
 //! caller sent with its request, and a [`Pin`], and returns a
-//! [`Verification`] with the endorsed keys to bind traffic to.
+//! [`VerificationReport`]: the [`Step`] that each layer took, and the
+//! [`VerifiedFacts`] with the endorsed keys to bind traffic to.
 //!
 //! ```no_run
 //! use tinfoil_verifier::{Error, Pin, Verifier, random_nonce};
@@ -26,8 +28,15 @@
 //! let document = fetch(&nonce);
 //! let verifier = Verifier::default();
 //! match verifier.verify_v3(&document, &nonce, &Pin::repo("owner/repository")) {
-//!     Ok(verified) => println!("TLS key: {:?}", verified.tls_public_key_fp()),
-//!     Err(Error::Verification(rejected)) => println!("rejected at {}", rejected.layer()),
+//!     Ok(report) => {
+//!         let verified = report.verified_facts().expect("an accepted document is verified");
+//!         println!("TLS key: {:?}", verified.tls_public_key_fp());
+//!     }
+//!     Err(Error::Verification(rejected)) => {
+//!         for step in rejected.report().steps() {
+//!             println!("{}: {} {}", step.layer, step.status, step.message);
+//!         }
+//!     }
 //!     Err(other) => return Err(other.into()),
 //! }
 //! # Ok(())
@@ -36,7 +45,11 @@
 //!
 //! An error is either a [`UsageError`], for a verifier that was built or
 //! called with invalid inputs, or a [`VerificationError`], for a document
-//! that must not be trusted, with the [`Layer`] that rejected it.
+//! that must not be trusted, with the [`Layer`] that rejected it and its
+//! report. The report of a rejection holds [`PartialFacts`]: what the steps
+//! before the failed one established, such as the expected and the measured
+//! registers of a measurement that does not match. They authorize nothing;
+//! only verified facts carry the keys that a channel may be bound to.
 //!
 //! # Trust anchors
 //!
@@ -64,9 +77,10 @@
 //!
 //! # Features
 //!
-//! - `serde`: implements `serde::Serialize` for [`Verification`],
-//!   [`Register`], [`Measurement`] and [`Expected`], in the shape of
-//!   [`Verification::to_json`]. Off by default.
+//! - `serde`: implements `serde::Serialize` for [`VerificationReport`],
+//!   [`VerifiedFacts`], [`Register`], [`Measurement`] and [`Expected`], in
+//!   the shape of [`VerificationReport::to_json`] and
+//!   [`VerifiedFacts::to_json`]. Off by default.
 
 // Clippy has no test exemption for this lint, unlike the other denied
 // lints (see clippy.toml). Overflow in a test is a test failure, not a risk.
@@ -82,6 +96,7 @@ mod measurement;
 mod options;
 #[cfg(test)]
 mod probes;
+mod report;
 mod semver;
 mod stub;
 mod verification;
@@ -136,9 +151,13 @@ pub use measurement::{Expected, Measurement, REGISTER_SIZE, Register};
 pub use options::{
     ArtifactTrust, ConfigAuthorizer, ConfigEndorsement, ConfigTrust, Policy, PublicKey,
 };
+pub use report::{
+    CpuEvidence, ExpectedFacts, MeasuredFacts, PartialFacts, Step, StepStatus, VerificationReport,
+    hpke_public_key_fp,
+};
 pub use verification::{
-    ArtifactVerification, ConfigVerification, ReferenceSource, SoftwareIdentity, Verification,
-    VerificationMetadata, crypto_material_data,
+    ArtifactVerification, ConfigVerification, ReferenceSource, SoftwareIdentity,
+    VerificationMetadata, VerifiedFacts, crypto_material_data,
 };
 pub use verifier::{Pin, Verifier, parse_reference};
 

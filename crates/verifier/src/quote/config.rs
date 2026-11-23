@@ -4,7 +4,7 @@ use super::resolve::{MR_CONFIG_ID_SIZE, ResolvedValues, apply_pins, register, re
 use super::{AssemblyError, Authenticated};
 use crate::canonical;
 use crate::measurement::Expected;
-use crate::policy::Artifact;
+use crate::policy::{Artifact, PLATFORM_SEV_SNP, PLATFORM_TDX};
 use crate::runtime::Measurements;
 
 /// Reference values of the endorsed-config contract: a platform policy
@@ -21,6 +21,37 @@ pub struct ConfigReferenceValues<'a> {
 }
 
 impl<'a> ConfigReferenceValues<'a> {
+    /// The registers that the runtime fixes on `platform`
+    /// ([`PLATFORM_SEV_SNP`] or [`PLATFORM_TDX`]): its SEV-SNP launch
+    /// measurement, or its MRTD and four RTMRs. An error for a register
+    /// that is not a register, or for another platform.
+    pub fn code(&self, platform: &str) -> Result<Expected, AssemblyError> {
+        if platform == PLATFORM_SEV_SNP {
+            Ok(Expected::SevSnp {
+                launch: Some(register(
+                    "runtime SNP launch measurement",
+                    &self.runtime.snp_launch.measurement,
+                )?),
+            })
+        } else if platform == PLATFORM_TDX {
+            let [mrtd, rtmr0, rtmr1, rtmr2, rtmr3] = self.runtime.tdx_launch.registers();
+            let parse = |index: usize, value: &str| {
+                register(format_args!("runtime TDX register {index}"), value).map(Some)
+            };
+            Ok(Expected::Tdx {
+                mrtd: parse(0, mrtd)?,
+                rtmr0: parse(1, rtmr0)?,
+                rtmr1: parse(2, rtmr1)?,
+                rtmr2: parse(3, rtmr2)?,
+                rtmr3: parse(4, rtmr3)?,
+            })
+        } else {
+            Err(AssemblyError::new(format!(
+                "unsupported platform {platform:?}"
+            )))
+        }
+    }
+
     /// Resolves the policy and the expected registers for a quote.
     ///
     /// In order: the machine's policy is looked up
@@ -44,7 +75,7 @@ impl<'a> ConfigReferenceValues<'a> {
         let (policy_name, policy) = resolve_policy(self.endorsements, quote)?;
         let mut host_data = String::new();
         let mut config_id = [0; MR_CONFIG_ID_SIZE];
-        let code = match quote {
+        match quote {
             Authenticated::SevSnp(_) => {
                 let sev_snp = policy.as_sev_snp().ok_or_else(|| {
                     AssemblyError::new(format!("policy {policy_name:?} is not for sev-snp"))
@@ -55,12 +86,6 @@ impl<'a> ConfigReferenceValues<'a> {
                     ));
                 }
                 host_data = canonical::encode_lower_hex(&self.hash);
-                Expected::SevSnp {
-                    launch: Some(register(
-                        "runtime SNP launch measurement",
-                        &self.runtime.snp_launch.measurement,
-                    )?),
-                }
             }
             Authenticated::Tdx(_) => {
                 let tdx = policy.as_tdx().ok_or_else(|| {
@@ -74,19 +99,9 @@ impl<'a> ConfigReferenceValues<'a> {
                 for (target, byte) in config_id.iter_mut().zip(self.hash) {
                     *target = byte;
                 }
-                let [mrtd, rtmr0, rtmr1, rtmr2, rtmr3] = self.runtime.tdx_launch.registers();
-                let parse = |index: usize, value: &str| {
-                    register(format_args!("runtime TDX register {index}"), value).map(Some)
-                };
-                Expected::Tdx {
-                    mrtd: parse(0, mrtd)?,
-                    rtmr0: parse(1, rtmr0)?,
-                    rtmr1: parse(2, rtmr1)?,
-                    rtmr2: parse(3, rtmr2)?,
-                    rtmr3: parse(4, rtmr3)?,
-                }
             }
-        };
+        }
+        let code = self.code(quote.platform())?;
         let expected = apply_pins(&code, pins)?;
         Ok(ResolvedValues {
             policy,

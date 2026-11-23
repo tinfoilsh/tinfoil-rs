@@ -29,12 +29,13 @@ use crate::policy::{self, ARTIFACT_FORMAT, ARTIFACT_FORMAT_V2, Shape};
 use crate::quote::{
     self, ConfigReferenceValues, LegacyReferenceValues, ReferenceValues, VendorRoots,
 };
+use crate::report::{ExpectedFacts, ReportBuilder, VerificationReport};
 use crate::runtime::{
     MAX_CONFIG_SIZE, Measurements, RuntimeReference, parse_manifest, runtime_from_config,
 };
 use crate::verification::{
-    ArtifactVerification, ConfigVerification, ReferenceSource, SoftwareIdentity, Verification,
-    VerificationMetadata,
+    ArtifactVerification, ConfigVerification, ReferenceSource, SoftwareIdentity,
+    VerificationMetadata, VerifiedFacts,
 };
 
 /// The name that a verification records for this SDK.
@@ -231,11 +232,45 @@ struct Selected {
 struct Endorsed {
     references: References,
     selected: Selected,
+    /// The code release, or the runtime for a config-based verification.
+    artifact: ArtifactVerification,
     config: Option<ConfigVerification>,
     runtime: Option<ArtifactVerification>,
     platform: Option<ArtifactVerification>,
     freshness_expires_at: Option<Instant>,
 }
+
+impl Endorsed {
+    /// Whether the caller embedded every reference value in the verifier,
+    /// so that provenance authenticated nothing.
+    fn embedded(&self) -> bool {
+        let embedded = |source: ReferenceSource| source == ReferenceSource::Embedded;
+        self.config
+            .as_ref()
+            .is_some_and(|config| embedded(config.source))
+            && self
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| embedded(runtime.source))
+            && self
+                .platform
+                .as_ref()
+                .is_some_and(|platform| embedded(platform.source))
+    }
+}
+
+/// Why a verification stopped before it accepted the document.
+#[derive(Debug)]
+enum Stopped {
+    /// The caller's mistake: no report.
+    Usage(UsageError),
+    /// A layer rejected the document.
+    Rejected(Layer, BoxError),
+}
+
+/// The reason that a report gives for a skipped provenance step.
+const EMBEDDED_PROVENANCE: &str =
+    "the verifier embeds every reference value, so there is no endorsement to authenticate";
 
 /// An accepted artifact with the time of its approval, when it has one.
 #[derive(Debug)]
@@ -515,9 +550,16 @@ impl Verifier {
     /// `nonce` is the challenge that the caller generated. The document's
     /// collateral decides which part of `pin` applies.
     ///
-    /// On success the caller must bind its traffic to the returned keys
-    /// and enforce
-    /// [`freshness_expires_at`](Verification::freshness_expires_at) when
+    /// An accepted document is reported as a [`VerificationReport`] whose
+    /// [`verified_facts`](VerificationReport::verified_facts) hold what it
+    /// proved. A rejected one is an [`Error::Verification`] whose
+    /// [`report`](VerificationError::report) shows the step that failed
+    /// and what the steps before it established. A usage error comes with
+    /// no report, because verification never started.
+    ///
+    /// On success the caller must bind its traffic to the keys of the
+    /// verified facts and enforce their
+    /// [`freshness_expires_at`](VerifiedFacts::freshness_expires_at) when
     /// it is set. Hardware collateral bounds the result even when every
     /// reference is embedded.
     ///
@@ -530,15 +572,20 @@ impl Verifier {
     /// [`Error::Usage`] for a pin part of `Some("")`, a nonce of the wrong length,
     /// a malformed pin or a project that this verifier cannot verify against, or a clock outside the years
     /// 0000 to 9999; [`Error::Verification`], with the layer that rejected
-    /// it, for a document that must not be trusted.
-    pub fn verify_v3(&self, doc: &[u8], nonce: &[u8], pin: &Pin) -> Result<Verification, Error> {
+    /// it and the report, for a document that must not be trusted.
+    pub fn verify_v3(
+        &self,
+        doc: &[u8],
+        nonce: &[u8],
+        pin: &Pin,
+    ) -> Result<VerificationReport, Error> {
         // The only clock read.
         self.verify_v3_at(doc, nonce, pin, SystemTime::now())
     }
 
     /// [`verify_v3`](Self::verify_v3) for an archived document:
     /// `verification_time` replaces the current time in every check that is
-    /// bound to time, and the verification's metadata reports it.
+    /// bound to time, and the report's metadata reports it.
     ///
     /// The caller must authenticate `verification_time` independently, for
     /// example from a trusted timestamp recorded when the document was
@@ -554,7 +601,7 @@ impl Verifier {
         nonce: &[u8],
         pin: &Pin,
         verification_time: SystemTime,
-    ) -> Result<Verification, Error> {
+    ) -> Result<VerificationReport, Error> {
         pin.references()?;
         let now = Instant::from_system_time(verification_time)
             .ok_or_else(|| UsageError::new("verification time is out of range"))?;
@@ -569,7 +616,7 @@ impl Verifier {
         nonce: &[u8],
         pin: &Pin,
         now: Instant,
-    ) -> Result<Verification, Error> {
+    ) -> Result<VerificationReport, Error> {
         // A malformed pin is a usage error for any document.
         let references = pin.references()?;
         let pins = self.check_references(references)?;
@@ -579,16 +626,49 @@ impl Verifier {
         let verified_at = now
             .to_system_time()
             .ok_or_else(|| UsageError::new("verification time is out of range"))?;
-        let rejected_at =
-            |layer: Layer| move |cause: BoxError| Error::from(VerificationError::new(layer, cause));
+        let metadata = VerificationMetadata {
+            verifier: SoftwareIdentity {
+                name: VERIFIER_NAME.to_owned(),
+                version: VERIFIER_VERSION.to_owned(),
+            },
+            verified_at,
+        };
+        let mut steps = ReportBuilder::new();
+        match self.appraise(trust, doc, nonce, references, pins, now, &mut steps) {
+            Ok(facts) => Ok(steps.passed_all(facts, metadata)),
+            Err(Stopped::Usage(usage)) => Err(Error::Usage(usage)),
+            Err(Stopped::Rejected(layer, cause)) => {
+                let report = steps.failed(layer, cause.to_string(), metadata);
+                Err(VerificationError::new(layer, cause, report).into())
+            }
+        }
+    }
 
+    /// The layers of a verification, in the order that they run. It marks
+    /// each step in `steps` as it passes, and records the facts that the
+    /// step establishes, from the values that the step already computes.
+    #[allow(clippy::too_many_arguments)]
+    fn appraise(
+        &self,
+        trust: &Trust,
+        doc: &[u8],
+        nonce: &[u8],
+        references: PinReferences<'_>,
+        pins: Pins,
+        now: Instant,
+        steps: &mut ReportBuilder,
+    ) -> Result<VerifiedFacts, Stopped> {
         let document = document::parse(doc, nonce).map_err(|cause| {
             if cause.is_invalid_input() {
-                Error::from(UsageError::new(cause))
+                Stopped::Usage(UsageError::new(cause))
             } else {
-                rejected_at(Layer::Envelope)(cause.into())
+                Stopped::Rejected(Layer::Envelope, cause.into())
             }
         })?;
+        steps.passed(Layer::Envelope);
+        // Parsing checked only that the document is consistent with itself,
+        // so the keys stay unverified until the policy step binds them.
+        steps.measured_keys(document.crypto_material_items());
 
         // Reference values and CPU evidence are appraised at one instant.
         let format = document.collateral_format();
@@ -617,12 +697,28 @@ impl Verifier {
             )))
         };
         let endorsed = endorsed.map_err(|refused| match refused {
-            Refused::Usage(usage) => Error::Usage(usage),
+            Refused::Usage(usage) => Stopped::Usage(usage),
             Refused::Authorizer(cause) => {
-                rejected_at(Layer::Provenance)(AuthorizerRefusal(cause).into())
+                Stopped::Rejected(Layer::Provenance, AuthorizerRefusal(cause).into())
             }
-            Refused::Rejected(cause) => rejected_at(Layer::Provenance)(cause.into()),
+            Refused::Rejected(cause) => Stopped::Rejected(Layer::Provenance, cause.into()),
         })?;
+        if endorsed.embedded() {
+            steps.skipped(Layer::Provenance, EMBEDDED_PROVENANCE);
+        } else {
+            steps.passed(Layer::Provenance);
+        }
+        steps.expected(ExpectedFacts {
+            config_repo: endorsed.selected.repo.clone(),
+            artifact: endorsed.artifact.clone(),
+            config: endorsed.config.clone(),
+            platform: endorsed.platform.clone(),
+            code_measurement: quote::code_measurement(
+                &endorsed.references.values(),
+                &document.cpu_evidence().format,
+            ),
+            measurement: None,
+        });
 
         let authenticated = quote::authenticate(
             document.cpu_evidence(),
@@ -630,18 +726,7 @@ impl Verifier {
             now,
             &self.vendor_roots,
         )
-        .map_err(|cause| rejected_at(Layer::Quote)(cause.into()))?;
-        let assembled = quote::assemble(
-            &document,
-            &endorsed.references.values(),
-            self.pinned_registers.as_ref(),
-            &authenticated,
-        )
-        .map_err(|cause| rejected_at(Layer::Policy)(cause.into()))?;
-        assembled
-            .validate()
-            .map_err(|cause| rejected_at(Layer::Policy)(cause.into()))?;
-
+        .map_err(|cause| Stopped::Rejected(Layer::Quote, cause.into()))?;
         let expires_at = authenticated.expires_at();
         let freshness_expires_at = Some(
             system_time(
@@ -649,9 +734,30 @@ impl Verifier {
                     .freshness_expires_at
                     .map_or(expires_at, |at| at.min(expires_at)),
             )
-            .map_err(|cause| rejected_at(Layer::Quote)(cause.into()))?,
+            .map_err(|cause| Stopped::Rejected(Layer::Quote, cause.into()))?,
         );
-        Ok(Verification {
+        steps.passed(Layer::Quote);
+        steps.cpu(authenticated.measurement());
+
+        let assembled = quote::assemble_resolving(
+            &document,
+            &endorsed.references.values(),
+            self.pinned_registers.as_ref(),
+            &authenticated,
+        )
+        .map_err(|failure| {
+            if let Some(expected) = failure.expected {
+                steps.expected_measurement(*expected);
+            }
+            Stopped::Rejected(Layer::Policy, failure.error.into())
+        })?;
+        steps.expected_measurement(assembled.resolution().expected.clone());
+        assembled
+            .validate()
+            .map_err(|cause| Stopped::Rejected(Layer::Policy, cause.into()))?;
+        steps.passed(Layer::Policy);
+
+        Ok(VerifiedFacts {
             config_repo: endorsed.selected.repo,
             code_digest: endorsed.selected.digest,
             code_tag: endorsed.selected.tag,
@@ -662,13 +768,6 @@ impl Verifier {
             enclave_measurement: authenticated.measurement(),
             crypto_material: document.crypto_material_items().to_vec(),
             freshness_expires_at,
-            metadata: VerificationMetadata {
-                verifier: SoftwareIdentity {
-                    name: VERIFIER_NAME.to_owned(),
-                    version: VERIFIER_VERSION.to_owned(),
-                },
-                verified_at,
-            },
         })
     }
 
@@ -733,6 +832,9 @@ impl Verifier {
             self.freshness_max_age,
             &[Some(code_witnessed_at), Some(platform_witnessed_at)],
         )?;
+        // Like the facts of a verified code release, the record carries no
+        // approval time: the witness is not an approval.
+        let artifact = endorsed_artifact(code.artifact.clone(), None)?.record;
         Ok(Endorsed {
             references: References::Legacy {
                 endorsements: platform.policy,
@@ -746,6 +848,7 @@ impl Verifier {
                 tag: code.artifact.tag,
                 digest: code.artifact.digest,
             },
+            artifact,
             config: None,
             runtime: None,
             platform: None,
@@ -875,6 +978,7 @@ impl Verifier {
                 hash,
             },
             selected,
+            artifact: runtime.record.clone(),
             config: Some(config),
             runtime: Some(runtime.record),
             platform: Some(platform.record),

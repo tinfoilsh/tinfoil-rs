@@ -3,7 +3,7 @@
 use super::resolve::{MR_CONFIG_ID_SIZE, ResolvedValues, apply_pins, register, resolve_policy};
 use super::{AssemblyError, Authenticated};
 use crate::measurement::{Expected, REGISTER_SIZE, Register};
-use crate::policy::{Artifact, Shape};
+use crate::policy::{Artifact, PLATFORM_SEV_SNP, PLATFORM_TDX, Shape};
 
 /// Reference values of the repository-release contract: a platform policy
 /// artifact and the registers and VM shape of a code release.
@@ -22,6 +22,28 @@ pub struct LegacyReferenceValues<'a> {
 }
 
 impl<'a> LegacyReferenceValues<'a> {
+    /// The registers that the release fixes on `platform`
+    /// ([`PLATFORM_SEV_SNP`] or [`PLATFORM_TDX`]): the SEV-SNP launch
+    /// measurement, or the TDX RTMR1 and RTMR2. `None` for another
+    /// platform.
+    pub fn code(&self, platform: &str) -> Option<Expected> {
+        if platform == PLATFORM_SEV_SNP {
+            Some(Expected::SevSnp {
+                launch: Some(self.sev_snp_launch),
+            })
+        } else if platform == PLATFORM_TDX {
+            Some(Expected::Tdx {
+                mrtd: None,
+                rtmr0: None,
+                rtmr1: Some(self.tdx_rtmr1),
+                rtmr2: Some(self.tdx_rtmr2),
+                rtmr3: None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// Resolves the policy and the expected registers for a quote.
     ///
     /// In order: the machine's policy is looked up
@@ -43,18 +65,9 @@ impl<'a> LegacyReferenceValues<'a> {
         pins: Option<&Expected>,
     ) -> Result<ResolvedValues<'a>, AssemblyError> {
         let (policy_name, policy) = resolve_policy(self.endorsements, quote)?;
-        let code = match quote {
-            Authenticated::SevSnp(_) => Expected::SevSnp {
-                launch: Some(self.sev_snp_launch),
-            },
-            Authenticated::Tdx(_) => Expected::Tdx {
-                mrtd: None,
-                rtmr0: None,
-                rtmr1: Some(self.tdx_rtmr1),
-                rtmr2: Some(self.tdx_rtmr2),
-                rtmr3: None,
-            },
-        };
+        let code = self.code(quote.platform()).ok_or_else(|| {
+            AssemblyError::new(format!("unsupported platform {:?}", quote.platform()))
+        })?;
         let mut expected = apply_pins(&code, pins)?;
         let mut host_data = String::new();
         let mut platform_measurement_name = None;

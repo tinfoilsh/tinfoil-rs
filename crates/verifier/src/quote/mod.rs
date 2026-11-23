@@ -237,6 +237,53 @@ pub enum ReferenceValues<'a> {
     Config(ConfigReferenceValues<'a>),
 }
 
+/// The registers that `references` fix on the platform that
+/// `evidence_format` names, or `None` when the format names no platform
+/// that the verifier knows or the references fix nothing usable on it.
+///
+/// It reads only the reference values, which provenance authenticated, so
+/// it is known before the quote is: the format, which the quote has not
+/// yet proven, only selects the platform. Nothing of the evidence is
+/// parsed.
+pub fn code_measurement(
+    references: &ReferenceValues<'_>,
+    evidence_format: &str,
+) -> Option<Expected> {
+    let platform = if evidence_format == crate::document::SEV_SNP_REPORT_V1_FORMAT {
+        crate::policy::PLATFORM_SEV_SNP
+    } else if evidence_format == crate::document::TDX_QUOTE_V1_FORMAT {
+        crate::policy::PLATFORM_TDX
+    } else {
+        return None;
+    };
+    match references {
+        ReferenceValues::Legacy(values) => values.code(platform),
+        ReferenceValues::Config(values) => values.code(platform).ok(),
+    }
+}
+
+/// An assembly that failed, with every register that the quote had to
+/// attest when they were all resolved before the failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssemblyFailure {
+    /// Why assembly failed.
+    pub error: AssemblyError,
+    /// The registers that the quote had to attest, as
+    /// [`Resolution::expected`] describes them; `None` when assembly failed
+    /// before it resolved them. Boxed, so that a `Result` that carries the
+    /// failure stays small.
+    pub expected: Option<Box<Measurement>>,
+}
+
+impl From<AssemblyError> for AssemblyFailure {
+    fn from(error: AssemblyError) -> Self {
+        Self {
+            error,
+            expected: None,
+        }
+    }
+}
+
 /// The complete expected state of one quote, resolved before validation
 /// runs. It borrows the quote that it was assembled for, so it cannot be
 /// applied to any other.
@@ -267,6 +314,10 @@ pub enum AssembledPolicy<'q> {
 pub struct Resolution {
     /// The registers that the release fixes on the quote's platform.
     pub code_measurement: Expected,
+    /// Every register that the quote must attest: the code measurement,
+    /// the caller's pins and, for the repository-release contract on TDX,
+    /// the platform registers that the policy artifact supplies.
+    pub expected: Measurement,
     /// The name of the matched policy.
     pub policy_name: String,
     /// The name of the resolved TDX platform measurement; `None` for
@@ -322,15 +373,26 @@ pub fn assemble<'q>(
     pins: Option<&Expected>,
     quote: &'q Authenticated,
 ) -> Result<AssembledPolicy<'q>, AssemblyError> {
+    assemble_resolving(document, references, pins, quote).map_err(|failure| failure.error)
+}
+
+/// [`assemble`], whose failure carries the expected registers when they
+/// were all resolved before it.
+pub fn assemble_resolving<'q>(
+    document: &Document,
+    references: &ReferenceValues<'_>,
+    pins: Option<&Expected>,
+    quote: &'q Authenticated,
+) -> Result<AssembledPolicy<'q>, AssemblyFailure> {
     let report_data = document.expected_report_data().ok_or_else(|| {
         AssemblyError::new("a document whose challenge was checked against a nonce is required")
     })?;
     if !quote.is_evidence(document.cpu_evidence()) {
-        return Err(AssemblyError::new(
-            "authenticated quote is not this document's CPU evidence",
-        ));
+        return Err(
+            AssemblyError::new("authenticated quote is not this document's CPU evidence").into(),
+        );
     }
-    assemble_with_report_data(references, pins, &report_data, quote)
+    assemble_resolving_with_report_data(references, pins, &report_data, quote)
 }
 
 /// Assembles the policy for a quote against an explicit report data value.
@@ -352,17 +414,45 @@ pub fn assemble_with_report_data<'q>(
     report_data: &[u8; REPORT_DATA_SIZE],
     quote: &'q Authenticated,
 ) -> Result<AssembledPolicy<'q>, AssemblyError> {
+    assemble_resolving_with_report_data(references, pins, report_data, quote)
+        .map_err(|failure| failure.error)
+}
+
+/// [`assemble_with_report_data`], whose failure carries the expected
+/// registers when they were all resolved before it: a failure of step 3 or
+/// 4 does, and a failure of step 1 or 2 does not.
+pub fn assemble_resolving_with_report_data<'q>(
+    references: &ReferenceValues<'_>,
+    pins: Option<&Expected>,
+    report_data: &[u8; REPORT_DATA_SIZE],
+    quote: &'q Authenticated,
+) -> Result<AssembledPolicy<'q>, AssemblyFailure> {
     let resolved = match references {
         ReferenceValues::Legacy(values) => values.resolve(quote, pins)?,
         ReferenceValues::Config(values) => values.resolve(quote, pins)?,
     };
     let expected = resolve::complete(&resolved.expected)?;
+    assemble_resolved(resolved, &expected, report_data, quote).map_err(|error| AssemblyFailure {
+        error,
+        expected: Some(Box::new(expected)),
+    })
+}
+
+/// Steps 3 and 4 of [`assemble_with_report_data`], once `resolved` and
+/// every register of `expected` are resolved.
+fn assemble_resolved<'q>(
+    resolved: resolve::ResolvedValues<'_>,
+    expected: &Measurement,
+    report_data: &[u8; REPORT_DATA_SIZE],
+    quote: &'q Authenticated,
+) -> Result<AssembledPolicy<'q>, AssemblyError> {
     let resolution = Resolution {
         code_measurement: resolved.code,
+        expected: expected.clone(),
         policy_name: resolved.policy_name,
         platform_measurement_name: resolved.platform_measurement_name,
     };
-    match (&expected, quote) {
+    match (expected, quote) {
         (Measurement::SevSnp { launch }, Authenticated::SevSnp(quote)) => {
             let Some(policy) = resolved.policy.as_sev_snp() else {
                 return Err(AssemblyError::new(format!(
@@ -386,7 +476,7 @@ pub fn assemble_with_report_data<'q>(
                     resolution.policy_name
                 )));
             };
-            let expectations = tdx::assemble(policy, &expected, report_data, &resolved.config_id)?;
+            let expectations = tdx::assemble(policy, expected, report_data, &resolved.config_id)?;
             Ok(AssembledPolicy::Tdx {
                 quote,
                 expectations: Box::new(expectations),

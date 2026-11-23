@@ -6,7 +6,8 @@ use sha2::{Digest, Sha256};
 use super::resolve::{apply_pins, complete};
 use super::{
     Authenticated, ConfigReferenceValues, LegacyReferenceValues, ReferenceValues, VendorRoots,
-    assemble, assemble_with_report_data, authenticate,
+    assemble, assemble_resolving, assemble_resolving_with_report_data, assemble_with_report_data,
+    authenticate, code_measurement,
 };
 use crate::canonical::encode_lower_hex;
 use crate::differential_tests::{Fixture, instant, member, object, text};
@@ -459,4 +460,66 @@ fn a_quote_is_not_appraised_against_another_document() {
             "{other}"
         );
     }
+}
+
+#[test]
+fn the_code_measurement_follows_the_evidence_format() {
+    let fixture = Fixture::load();
+    let Quoted { document, quote } = quoted(&fixture, "legacy-sev/default");
+    let artifact = legacy_artifact(&fixture, &document);
+    let shape = Shape {
+        cpus: 1,
+        memory_mb: 1,
+        gpus: None,
+        disks: 1,
+    };
+    let references = ReferenceValues::Legacy(LegacyReferenceValues {
+        endorsements: &artifact,
+        sev_snp_launch: register(1),
+        tdx_rtmr1: register(2),
+        tdx_rtmr2: register(3),
+        shape: &shape,
+    });
+    assert_eq!(
+        code_measurement(&references, document::SEV_SNP_REPORT_V1_FORMAT),
+        Some(sev_snp(Some(register(1))))
+    );
+    assert_eq!(
+        code_measurement(&references, document::TDX_QUOTE_V1_FORMAT),
+        Some(tdx([
+            None,
+            None,
+            Some(register(2)),
+            Some(register(3)),
+            None
+        ]))
+    );
+    assert_eq!(code_measurement(&references, "unknown"), None);
+
+    // A release with another launch measurement resolves every register
+    // and fails afterwards, so the failure carries them.
+    let report_data = document.expected_report_data().unwrap();
+    let assembled = assemble_resolving(&document, &references, None, &quote).unwrap();
+    assert_eq!(
+        assembled.resolution().expected,
+        Measurement::SevSnp {
+            launch: register(1)
+        }
+    );
+    assert!(assembled.validate().is_err());
+
+    // A failure before the registers are resolved carries none: here a pin
+    // for the wrong platform.
+    let pins = tdx([Some(register(4)), None, None, None, None]);
+    let failure =
+        assemble_resolving_with_report_data(&references, Some(&pins), &report_data, &quote)
+            .unwrap_err();
+    assert_eq!(failure.expected, None);
+
+    // So does an assembly whose report data the document did not bind.
+    let case = fixture.case("legacy-sev/default");
+    let bytes = fixture.document(text(case, "doc")).unwrap();
+    let unbound = document::decode(&bytes).unwrap();
+    let failure = assemble_resolving(&unbound, &references, None, &quote).unwrap_err();
+    assert_eq!(failure.expected, None);
 }
