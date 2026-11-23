@@ -26,7 +26,8 @@ async fn the_router_is_discovered_verified_and_reached_over_a_pinned_connection(
         .await
         .unwrap();
 
-    let verified = client.current();
+    let report = client.last_verification().unwrap();
+    let verified = report.verified_facts().unwrap();
     assert_eq!(
         verified.config_repo(),
         "tinfoilsh/confidential-model-router"
@@ -102,7 +103,8 @@ mod openai {
             .await
             .unwrap();
         let client = OpenAIClient::new(http, OpenAIOptions::default(), openai_config()).unwrap();
-        assert!(client.http_client().current().hpke_public_key().is_some());
+        let report = client.http_client().last_verification().unwrap();
+        assert!(report.verified_facts().unwrap().hpke_public_key().is_some());
         let response = client.chat().create(chat_request()).await.unwrap();
         assert!(!response.choices.is_empty());
     }

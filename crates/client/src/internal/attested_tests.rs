@@ -1600,6 +1600,7 @@ mod options {
             pin,
             verifier,
             verification_check: None,
+            on_verification: None,
         }
     }
 

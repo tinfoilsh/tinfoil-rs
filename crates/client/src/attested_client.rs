@@ -10,7 +10,7 @@ use crate::error::Error;
 use crate::internal::attested::AttestedClient;
 use crate::request::http_request_methods;
 use crate::router_client::RouterHttpClient;
-use crate::verifier::Verification;
+use crate::verifier::VerificationReport;
 
 /// One of this crate's attested HTTP clients: what an `OpenAIClient`
 /// sends through.
@@ -56,24 +56,24 @@ impl AttestedHttpClient {
         self.attested().enclave()
     }
 
-    /// The last successful verification, without checking it. See
-    /// [`EnclaveHttpClient::current`].
-    pub fn current(&self) -> Arc<Verification> {
-        self.attested().current()
+    /// The outcome of the most recent attempt to verify the enclave, without
+    /// I/O. See [`EnclaveHttpClient::last_verification`].
+    pub fn last_verification(&self) -> Result<VerificationReport, Error> {
+        self.attested().last_verification()
     }
 
-    /// A verification that is valid now, verifying first only if the
-    /// current one has expired or was discarded. The behaviour, the errors
-    /// and the cancel safety are those of
+    /// The report of a verification that is valid now, verifying first
+    /// only if the current one has expired or was discarded. The behaviour,
+    /// the errors and the cancel safety are those of
     /// [`EnclaveHttpClient::ensure_verified`].
-    pub async fn ensure_verified(&self) -> Result<Arc<Verification>, Error> {
+    pub async fn ensure_verified(&self) -> Result<VerificationReport, Error> {
         self.attested().ensure_verified().await
     }
 
     /// Verifies the enclave again even if the current verification is still
     /// valid. The behaviour, the errors and the cancel safety are those of
     /// [`EnclaveHttpClient::reverify`].
-    pub async fn reverify(&self) -> Result<Arc<Verification>, Error> {
+    pub async fn reverify(&self) -> Result<VerificationReport, Error> {
         self.attested().reverify().await
     }
 

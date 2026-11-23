@@ -13,23 +13,30 @@ use std::time::{Duration, SystemTime};
 use crate::error::{Error, ErrorKind};
 use crate::internal::transport::base_url::authority_url;
 use crate::internal::{BoxFuture, Clock, fetch};
-use crate::options::{Check, VerificationCheck};
+use crate::options::{Check, Notify, OnVerification, VerificationCheck};
 use crate::verifier::{
     BoxError, CRYPTO_MATERIAL_ID_HPKE, CRYPTO_MATERIAL_ID_TLS, CryptoMaterialItem,
-    KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT, NONCE_SIZE, Pin, Verification,
-    Verifier, random_nonce,
+    KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT, NONCE_SIZE, Pin, VerificationReport,
+    VerifiedFacts, Verifier, random_nonce,
 };
 
 /// The pause before the one retry of a failed verification.
 pub(crate) const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// What the transports read from a verification: the keys to bind traffic
-/// to and the time until which it authorizes requests.
+/// to and the time until which it authorizes requests, and the facts that
+/// the caller's veto judges.
 ///
-/// The clients use [`Verification`]. The trait exists so that the tests of
-/// this crate's state handling can run on a record of their own, since
-/// only the verifier can build a `Verification`.
-pub(crate) trait Evidence: Send + Sync + 'static {
+/// The clients use a [`VerificationReport`], whose verified facts hold
+/// those keys. The trait exists so that the tests of this crate's state
+/// handling can run on a record of their own, since only the verifier can
+/// build a report.
+pub(crate) trait Evidence: Clone + Send + Sync + 'static {
+    /// What the caller's veto is given.
+    type Facts: 'static;
+    /// The facts of evidence that passed the verifier. `None` for evidence
+    /// that holds none, which is not a verification.
+    fn facts(&self) -> Option<&Self::Facts>;
     /// The endorsed TLS key fingerprint.
     fn tls_public_key_fp(&self) -> Option<&str>;
     /// The endorsed HPKE public key.
@@ -40,17 +47,26 @@ pub(crate) trait Evidence: Send + Sync + 'static {
     fn freshness_expires_at(&self) -> Option<SystemTime>;
 }
 
-impl Evidence for Verification {
+/// The keys and the deadline come from the verified facts alone; a report
+/// without them has no keys and no deadline, so that it never authorizes a
+/// request.
+impl Evidence for VerificationReport {
+    type Facts = VerifiedFacts;
+
+    fn facts(&self) -> Option<&VerifiedFacts> {
+        self.verified_facts()
+    }
+
     fn tls_public_key_fp(&self) -> Option<&str> {
-        Verification::tls_public_key_fp(self)
+        self.verified_facts()?.tls_public_key_fp()
     }
 
     fn hpke_public_key(&self) -> Option<&str> {
-        Verification::hpke_public_key(self)
+        self.verified_facts()?.hpke_public_key()
     }
 
     fn freshness_expires_at(&self) -> Option<SystemTime> {
-        Verification::freshness_expires_at(self)
+        self.verified_facts()?.freshness_expires_at()
     }
 }
 
@@ -81,15 +97,18 @@ pub(crate) struct Config {
     pub(crate) verifier: Option<Arc<Verifier>>,
     /// The caller's veto.
     pub(crate) verification_check: Option<VerificationCheck>,
+    /// The caller's observer of each attempt.
+    pub(crate) on_verification: Option<OnVerification>,
 }
 
 /// One enclave and the policy that its attestation is verified against.
-pub(crate) struct Enclave<V = Verification> {
+pub(crate) struct Enclave<V: Evidence = VerificationReport> {
     host: String,
     #[cfg(test)]
     verifier: Option<Arc<Verifier>>,
     source: Source<V>,
-    check: Option<Check<V>>,
+    check: Option<Check<V::Facts>>,
+    on_verification: Option<Notify<V>>,
     clock: Clock,
 }
 
@@ -99,6 +118,7 @@ pub(crate) struct Checked {
     pin: Pin,
     verifier: Arc<Verifier>,
     verification_check: Option<VerificationCheck>,
+    on_verification: Option<OnVerification>,
 }
 
 impl Checked {
@@ -110,6 +130,11 @@ impl Checked {
     /// The caller's veto, if there is one.
     pub(crate) fn verification_check(&self) -> Option<&VerificationCheck> {
         self.verification_check.as_ref()
+    }
+
+    /// The caller's observer of each attempt, if there is one.
+    pub(crate) fn on_verification(&self) -> Option<&OnVerification> {
+        self.on_verification.as_ref()
     }
 
     /// The verification policy: the configured one, or the default
@@ -146,6 +171,7 @@ impl Config {
             pin: self.pin,
             verifier,
             verification_check: self.verification_check,
+            on_verification: self.on_verification,
         })
     }
 }
@@ -155,7 +181,7 @@ pub(crate) fn network_fetch() -> Fetch {
     Arc::new(|host, nonce| Box::pin(async move { fetch::document(&host, &nonce).await }))
 }
 
-impl Enclave<Verification> {
+impl Enclave<VerificationReport> {
     /// An enclave whose documents come from `fetch`. It does no I/O; the
     /// failures are those of [`Config::check`].
     #[cfg(test)]
@@ -170,10 +196,11 @@ impl Enclave<Verification> {
     /// `Verifier::verify_v3` on the document with the nonce and the pin
     /// (a usage error is a configuration error, any other rejection is an
     /// attestation error, and the verifier's error is the source either
-    /// way); and [`validate_transport_keys`].
+    /// way, with the report of a rejection); and
+    /// [`validate_transport_keys`] on the report's verified facts.
     pub(crate) fn from_checked(checked: Checked, clock: Clock, fetch: Fetch) -> Self {
         let verifier = checked.verifier;
-        let source: Source<Verification> = {
+        let source: Source<VerificationReport> = {
             let (host, pin) = (checked.host.clone(), checked.pin.clone());
             let verifier = Arc::clone(&verifier);
             Arc::new(move || {
@@ -183,11 +210,13 @@ impl Enclave<Verification> {
                     let nonce =
                         random_nonce().map_err(|error| Error::wrap(ErrorKind::Network, error))?;
                     let document = fetch(host, nonce).await?;
-                    let verification = verifier
+                    let report = verifier
                         .verify_v3(&document, &nonce, &pin)
                         .map_err(from_verifier)?;
-                    validate_transport_keys(&verification)?;
-                    Ok(verification)
+                    if let Some(facts) = report.verified_facts() {
+                        validate_transport_keys(facts)?;
+                    }
+                    Ok(report)
                 })
             })
         };
@@ -197,6 +226,7 @@ impl Enclave<Verification> {
             verifier: Some(verifier),
             source,
             check: checked.verification_check,
+            on_verification: checked.on_verification,
             clock,
         }
     }
@@ -215,7 +245,7 @@ impl<V: Evidence> Enclave<V> {
     pub(crate) fn from_source(
         host: &str,
         source: Source<V>,
-        check: Option<Check<V>>,
+        check: Option<Check<V::Facts>>,
         clock: Clock,
     ) -> Self {
         Self {
@@ -224,8 +254,16 @@ impl<V: Evidence> Enclave<V> {
             verifier: None,
             source,
             check,
+            on_verification: None,
             clock,
         }
+    }
+
+    /// This enclave, with `notify` as the observer of each attempt.
+    #[cfg(test)]
+    pub(crate) fn notifying(mut self, notify: Notify<V>) -> Self {
+        self.on_verification = Some(notify);
+        self
     }
 
     /// The enclave's host.
@@ -260,8 +298,12 @@ impl<V: Evidence> Enclave<V> {
     /// fails too, its error is returned with the first attempt's error
     /// attached ([`Error::earlier_attempt`]).
     ///
+    /// The first attempt is an attempt of its own: when it fails and is
+    /// retried, its error is passed to `retried` before the pause. The
+    /// outcome of the last attempt is the result, which the caller reports.
+    ///
     /// Dropping the future abandons the attempt; nothing is kept.
-    pub(crate) async fn verify(&self) -> Result<V, Error> {
+    pub(crate) async fn verify(&self, retried: impl FnOnce(&Error)) -> Result<V, Error> {
         let first = match self.attempt().await {
             Ok(evidence) => return Ok(evidence),
             Err(error) => error,
@@ -269,6 +311,7 @@ impl<V: Evidence> Enclave<V> {
         if !retryable(&first) {
             return Err(first);
         }
+        retried(&first);
         tokio::time::sleep(RETRY_DELAY).await;
         self.attempt().await.map_err(|error| error.after(first))
     }
@@ -281,13 +324,18 @@ impl<V: Evidence> Enclave<V> {
 
     async fn attempt(&self) -> Result<V, Error> {
         let evidence = (self.source)().await?;
+        let Some(facts) = evidence.facts() else {
+            return Err(Error::attestation(
+                "verification passed without verified facts",
+            ));
+        };
         self.check_freshness(&evidence)?;
         if let Some(check) = &self.check {
             // The check is the caller's code. If it panics, the panic ends
             // here as a rejection: it must not unwind through a
             // verification that other callers share, each of whom would
             // otherwise panic too.
-            let verdict = catch_unwind(AssertUnwindSafe(|| check(&evidence)))
+            let verdict = catch_unwind(AssertUnwindSafe(|| check(facts)))
                 .unwrap_or_else(|_| Err(Box::new(Panicked)));
             verdict.map_err(|source| {
                 Error::wrap(
@@ -301,6 +349,16 @@ impl<V: Evidence> Enclave<V> {
         }
         self.check_freshness(&evidence)?;
         Ok(evidence)
+    }
+
+    /// Tells the caller's observer, if there is one, the outcome of an
+    /// attempt. The caller holds no lock. The observer is the caller's
+    /// code: a panic ends here, so that it never unwinds through a
+    /// verification that other callers share, and it changes nothing.
+    pub(crate) fn notify(&self, outcome: Result<&V, &Error>) {
+        if let Some(notify) = &self.on_verification {
+            let _ = catch_unwind(AssertUnwindSafe(|| notify(&self.host, outcome)));
+        }
     }
 
     fn check_freshness(&self, evidence: &V) -> Result<(), Error> {
@@ -393,11 +451,8 @@ pub(crate) fn check_pin(pin: &Pin) -> Result<(), Error> {
 ///
 /// A document without an HPKE key passes here; the sealed-body transport
 /// refuses it when it is asked to bind to one.
-pub(crate) fn validate_transport_keys(verification: &Verification) -> Result<(), Error> {
-    check_transport_keys(
-        verification.crypto_material(),
-        verification.tls_public_key_fp().is_some(),
-    )
+pub(crate) fn validate_transport_keys(facts: &VerifiedFacts) -> Result<(), Error> {
+    check_transport_keys(facts.crypto_material(), facts.tls_public_key_fp().is_some())
 }
 
 /// The checks of [`validate_transport_keys`], on the endorsed items and on
@@ -519,7 +574,7 @@ mod tests {
         let started = tokio::time::Instant::now();
         assert_eq!(
             enclave(&script, &clock, None)
-                .verify()
+                .verify(|_| ())
                 .await
                 .expect("verified"),
             evidence
@@ -539,7 +594,7 @@ mod tests {
         let started = tokio::time::Instant::now();
         assert_eq!(
             enclave(&script, &clock, None)
-                .verify()
+                .verify(|_| ())
                 .await
                 .expect("verified"),
             evidence
@@ -557,7 +612,7 @@ mod tests {
             Step::Ready(Ok(record("never", &clock, HOUR))),
         ]);
         let error = enclave(&script, &clock, None)
-            .verify()
+            .verify(|_| ())
             .await
             .expect_err("fails twice");
         assert_eq!(error.to_string(), "attestation error: second");
@@ -577,7 +632,7 @@ mod tests {
         ]);
         let started = tokio::time::Instant::now();
         let error = enclave(&script, &clock, None)
-            .verify()
+            .verify(|_| ())
             .await
             .expect_err("fails");
         assert_eq!(error.kind(), ErrorKind::Configuration);
@@ -618,7 +673,7 @@ mod tests {
         };
         let started = tokio::time::Instant::now();
         let error = enclave(&script, &clock, Some(check))
-            .verify()
+            .verify(|_| ())
             .await
             .expect_err("vetoed");
         assert_eq!(error.kind(), ErrorKind::Attestation);
@@ -655,7 +710,7 @@ mod tests {
             })
         };
         let enclave = enclave(&script, &clock, Some(check));
-        let error = enclave.verify().await.expect_err("rejected");
+        let error = enclave.verify(|_| ()).await.expect_err("rejected");
         assert_eq!(error.kind(), ErrorKind::Attestation);
         assert_eq!(
             error.to_string(),
@@ -665,7 +720,7 @@ mod tests {
         assert_eq!(script.calls(), 1);
 
         // The next verification calls the check again, and it answers.
-        assert_eq!(enclave.verify().await.expect("verified").name, "b");
+        assert_eq!(enclave.verify(|_| ()).await.expect("verified").name, "b");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
@@ -684,7 +739,7 @@ mod tests {
         };
         assert_eq!(
             enclave(&script, &clock, Some(check))
-                .verify()
+                .verify(|_| ())
                 .await
                 .expect("verified"),
             evidence
@@ -710,7 +765,7 @@ mod tests {
         };
         assert_eq!(
             enclave(&script, &clock, Some(check))
-                .verify()
+                .verify(|_| ())
                 .await
                 .expect("verified"),
             fresh
@@ -729,7 +784,7 @@ mod tests {
             Step::Ready(Ok(unlimited)),
         ]);
         let error = enclave(&script, &clock, None)
-            .verify()
+            .verify(|_| ())
             .await
             .expect_err("no deadline");
         assert_eq!(error.kind(), ErrorKind::Attestation);
@@ -780,10 +835,11 @@ mod tests {
         ]);
         let enclave = enclave(&script, &clock, None);
         // Dropped in the pause before the retry.
-        let abandoned = tokio::time::timeout(Duration::from_millis(500), enclave.verify()).await;
+        let abandoned =
+            tokio::time::timeout(Duration::from_millis(500), enclave.verify(|_| ())).await;
         assert!(abandoned.is_err());
         assert_eq!(script.calls(), 1);
-        assert_eq!(enclave.verify().await.expect("verified"), evidence);
+        assert_eq!(enclave.verify(|_| ()).await.expect("verified"), evidence);
         assert_eq!(script.calls(), 2);
     }
 
@@ -793,6 +849,7 @@ mod tests {
             pin,
             verifier: None,
             verification_check: None,
+            on_verification: None,
         }
     }
 
@@ -872,7 +929,7 @@ mod tests {
         assert_eq!(enclave.host(), "enclave.example.com:8443");
 
         let error = enclave
-            .verify()
+            .verify(|_| ())
             .await
             .expect_err("the document is rejected");
         assert_eq!(error.kind(), ErrorKind::Attestation);
@@ -902,7 +959,7 @@ mod tests {
             fetch,
         )
         .expect("an enclave");
-        let error = enclave.verify().await.expect_err("the fetch fails");
+        let error = enclave.verify(|_| ()).await.expect_err("the fetch fails");
         assert_eq!(error.to_string(), "network error: HTTP 503");
         assert_eq!(fetched.lock().unwrap().len(), 2);
         let error = enclave.verify_once().await.expect_err("the fetch fails");

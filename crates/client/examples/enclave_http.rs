@@ -31,7 +31,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The enclave is verified before `connect` returns.
     let client = EnclaveHttpClient::connect(ENCLAVE, trust()).await?;
 
-    let verified = client.current();
+    // What the last verification established, step by step.
+    let report = client.last_verification()?;
+    for step in report.steps() {
+        println!("{:<11}  {}", step.layer, step.status);
+    }
+    let verified = report
+        .verified_facts()
+        .ok_or("a verification that passed holds verified facts")?;
     println!("enclave:     {}", client.enclave());
     println!("code digest: {}", verified.code_digest());
     println!("TLS key:     {:?}", verified.tls_public_key_fp());

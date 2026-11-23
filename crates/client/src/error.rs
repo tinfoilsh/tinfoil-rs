@@ -89,10 +89,32 @@ impl fmt::Display for ErrorKind {
 /// Every error has one [`ErrorKind`], which says what to do about it. The
 /// message is the kind, `" error: "`, then the cause, as in
 /// `attestation error: <cause>`. [`source`](StdError::source) returns the
-/// underlying error when there is one. For a rejected attestation document
-/// that is the verifier's [`Error`](crate::verifier::Error), which carries
-/// the layer that rejected it; it is a diagnostic, and neither its presence
-/// nor its type is promised.
+/// underlying error when there is one.
+///
+/// For an attestation document that the verifier rejected, the source is
+/// the verifier's [`Error::Verification`](crate::verifier::Error::Verification).
+/// Its [`VerificationError`](crate::verifier::VerificationError) names the
+/// layer that rejected the document and carries the
+/// [`report`](crate::verifier::VerificationError::report) of the
+/// verification: the step that failed, and the facts that the steps before
+/// it established.
+///
+/// ```
+/// use std::error::Error as _;
+///
+/// use tinfoil::verifier::{Error as VerifierError, VerificationReport};
+///
+/// /// The report of a verification that the verifier rejected.
+/// fn rejected_report(error: &tinfoil::Error) -> Option<&VerificationReport> {
+///     match error.source()?.downcast_ref::<VerifierError>()? {
+///         VerifierError::Verification(rejected) => Some(rejected.report()),
+///         _ => None,
+///     }
+/// }
+/// ```
+///
+/// Other sources are diagnostic, and neither their presence nor their type
+/// is promised.
 ///
 /// Errors from the OpenAI API are not of this type: they keep
 /// `async_openai`'s own.

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use tinfoil::reqwest::header::{HeaderMap, HeaderValue};
 use tinfoil::reqwest::{Method, Request, Response, Url};
-use tinfoil::verifier::{BoxError, Policy, Verification};
+use tinfoil::verifier::{BoxError, Policy, VerificationReport, VerifiedFacts};
 use tinfoil::{
     AttestationFetcher, AttestationRelay, EnclaveHttpClient, EnclaveHttpClientBuilder, Error,
     ErrorKind, FetchFuture, RequestBuilder, RouterHttpClient, RouterHttpClientBuilder,
@@ -28,9 +28,11 @@ fn handle<T: Clone + Send + Sync + std::fmt::Debug + 'static>() {}
 fn send<T: Send>(value: T) -> T {
     value
 }
-fn check(_: &Verification) -> Result<(), BoxError> {
+fn check(_: &VerifiedFacts) -> Result<(), BoxError> {
     Ok(())
 }
+
+fn observe(_: &str, _: Result<&VerificationReport, &Error>) {}
 
 #[test]
 fn the_version_and_the_enums_read_as_documented() {
@@ -77,11 +79,13 @@ fn the_accessors_have_their_signatures() {
     let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a Url = EnclaveHttpClient::base_url;
     let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a str = EnclaveHttpClient::enclave;
     let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a Trust = EnclaveHttpClient::trust;
-    let _: fn(&EnclaveHttpClient) -> Arc<Verification> = EnclaveHttpClient::current;
+    let _: fn(&EnclaveHttpClient) -> Result<VerificationReport, Error> =
+        EnclaveHttpClient::last_verification;
 
     let _: for<'a> fn(&'a RouterHttpClient) -> &'a Url = RouterHttpClient::base_url;
     let _: for<'a> fn(&'a RouterHttpClient) -> &'a str = RouterHttpClient::enclave;
-    let _: fn(&RouterHttpClient) -> Arc<Verification> = RouterHttpClient::current;
+    let _: fn(&RouterHttpClient) -> Result<VerificationReport, Error> =
+        RouterHttpClient::last_verification;
     let _: fn() -> RouterHttpClientBuilder = RouterHttpClient::builder;
 }
 
@@ -130,6 +134,7 @@ fn a_builder_does_no_io_and_prints_no_secret() {
         })
         .policy(Policy::default())
         .verification_check(check)
+        .on_verification(observe)
         .timeout(Duration::from_secs(30));
     let printed = format!("{builder:?}");
     assert!(!printed.contains("hunter2"));
@@ -156,11 +161,16 @@ async fn enclave_client(policy: Policy) -> Result<(), Box<dyn StdError>> {
         proxy_url: Some("https://proxy.example.com/".into()),
     })
     .policy(policy)
-    .verification_check(|verified: &Verification| {
+    .verification_check(|verified: &VerifiedFacts| {
         if verified.code_tag().is_empty() {
             return Err("untagged release".into());
         }
         Ok(())
+    })
+    .on_verification(|host: &str, outcome: Result<&VerificationReport, &Error>| {
+        if let Err(error) = outcome {
+            eprintln!("{host}: {error}");
+        }
     })
     .timeout(Duration::from_secs(30));
     let configured: EnclaveHttpClient = send(builder.connect()).await?;
@@ -172,10 +182,10 @@ async fn enclave_client(policy: Policy) -> Result<(), Box<dyn StdError>> {
     .await?;
     let _: &Trust = project.trust();
 
-    let current: Arc<Verification> = configured.current();
-    let valid: Arc<Verification> = send(configured.ensure_verified()).await?;
-    let renewed: Arc<Verification> = send(configured.reverify()).await?;
-    let _ = (current, valid, renewed);
+    let last: Result<VerificationReport, Error> = configured.last_verification();
+    let valid: VerificationReport = send(configured.ensure_verified()).await?;
+    let renewed: VerificationReport = send(configured.reverify()).await?;
+    let _ = (last, valid, renewed);
 
     let url: Url = client.base_url().join("v1/x")?;
     let mut headers = HeaderMap::new();
@@ -212,13 +222,14 @@ async fn router_client() -> Result<(), Error> {
             })
             .policy(Policy::default())
             .verification_check(check)
+            .on_verification(observe)
             .user_cache_secret("opaque-random-value")
             .timeout(Duration::from_secs(30))
             .connect(),
     )
     .await?;
-    let _: Arc<Verification> = send(configured.ensure_verified()).await?;
-    let _: Arc<Verification> = send(configured.reverify()).await?;
+    let _: VerificationReport = send(configured.ensure_verified()).await?;
+    let _: VerificationReport = send(configured.reverify()).await?;
     let _: Response = client.get(client.base_url().clone()).send().await?;
     let request = Request::new(Method::GET, client.base_url().clone());
     let _: Response = send(client.execute(request)).await?;
@@ -507,7 +518,8 @@ mod openai {
 
         let _: for<'a> fn(&'a AttestedHttpClient) -> &'a Url = AttestedHttpClient::base_url;
         let _: for<'a> fn(&'a AttestedHttpClient) -> &'a str = AttestedHttpClient::enclave;
-        let _: fn(&AttestedHttpClient) -> Arc<Verification> = AttestedHttpClient::current;
+        let _: fn(&AttestedHttpClient) -> Result<VerificationReport, Error> =
+            AttestedHttpClient::last_verification;
 
         let options = OpenAIOptions {
             api_path: Some("/v1/".into()),
@@ -578,8 +590,8 @@ mod openai {
         // The drop-in.
         let client: Client = send(Client::connect(OpenAIConfig::new().with_api_key(&key))).await?;
         let router: &AttestedHttpClient = client.http_client();
-        let _: Arc<Verification> = router.ensure_verified().await?;
-        let _: Arc<Verification> = router.reverify().await?;
+        let _: VerificationReport = router.ensure_verified().await?;
+        let _: VerificationReport = router.reverify().await?;
         match router {
             AttestedHttpClient::Router(router) => {
                 let _: &RouterHttpClient = router;

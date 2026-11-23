@@ -13,7 +13,7 @@ use crate::internal::enclave::{self, Enclave};
 use crate::internal::{cachesecret, router, system_clock};
 use crate::options::{RouteOptions, Secret, Transport};
 use crate::request::http_request_methods;
-use crate::verifier::{BoxError, ConfigTrust, Policy, Verification, Verifier};
+use crate::verifier::{BoxError, ConfigTrust, Policy, VerificationReport, VerifiedFacts, Verifier};
 
 /// An HTTP client whose requests reach only the attested router that it
 /// discovered.
@@ -63,17 +63,22 @@ impl RouterHttpClient {
         self.inner.enclave()
     }
 
-    /// The last successful verification of the router, without checking
-    /// it: it may have expired or been discarded since.
-    pub fn current(&self) -> Arc<Verification> {
-        self.inner.current()
+    /// The outcome of the most recent attempt to verify the router that the
+    /// client chose, without I/O: the attempt's report if it passed, and
+    /// otherwise the error that the client reported for it. It describes
+    /// the chosen router only; the routers that discovery skipped are told
+    /// to the `on_verification` observer. See
+    /// [`EnclaveHttpClient::last_verification`](crate::EnclaveHttpClient::last_verification).
+    pub fn last_verification(&self) -> Result<VerificationReport, Error> {
+        self.inner.last_verification()
     }
 
-    /// Returns a verification of the router that is valid now, verifying
-    /// first only if the current one has expired or was discarded. The
-    /// behaviour, the errors and the cancel safety are those of
+    /// Returns the report of a verification of the router that is valid
+    /// now, verifying first only if the current one has expired or was
+    /// discarded. The behaviour, the errors and the cancel safety are those
+    /// of
     /// [`EnclaveHttpClient::ensure_verified`](crate::EnclaveHttpClient::ensure_verified).
-    pub async fn ensure_verified(&self) -> Result<Arc<Verification>, Error> {
+    pub async fn ensure_verified(&self) -> Result<VerificationReport, Error> {
         self.inner.ensure_verified().await
     }
 
@@ -85,7 +90,7 @@ impl RouterHttpClient {
     /// verification, so that the next request verifies the router again; a
     /// failure with a network or a configuration error leaves it in place.
     /// A dropped `reverify` ends only its own wait.
-    pub async fn reverify(&self) -> Result<Arc<Verification>, Error> {
+    pub async fn reverify(&self) -> Result<VerificationReport, Error> {
         self.inner.reverify().await
     }
 }
@@ -170,9 +175,25 @@ impl RouterHttpClientBuilder {
     /// `panic = "abort"` aborts instead.)
     pub fn verification_check<F>(mut self, check: F) -> Self
     where
-        F: Fn(&Verification) -> Result<(), BoxError> + Send + Sync + 'static,
+        F: Fn(&VerifiedFacts) -> Result<(), BoxError> + Send + Sync + 'static,
     {
         self.options.common.verification_check = Some(Arc::new(check));
+        self
+    }
+
+    /// An observer of each attempt to verify a router, called once for
+    /// every attempt after its outcome is decided, with the host of the
+    /// router that the attempt verified: each router that discovery tries,
+    /// the fallback router included, and the chosen router whenever the
+    /// client verifies it again. Otherwise as
+    /// [`EnclaveHttpClientBuilder::on_verification`](crate::EnclaveHttpClientBuilder::on_verification).
+    /// A probe that discovery abandons when its 30 seconds run out has no
+    /// outcome and is not told.
+    pub fn on_verification<F>(mut self, observer: F) -> Self
+    where
+        F: Fn(&str, Result<&VerificationReport, &Error>) + Send + Sync + 'static,
+    {
+        self.options.common.on_verification = Some(Arc::new(observer));
         self
     }
 
@@ -285,12 +306,14 @@ impl RouterHttpClientBuilder {
         // against the router pin.
         let verifier = Arc::clone(fallback.verifier());
         let check = fallback.verification_check().cloned();
+        let observer = fallback.on_verification().cloned();
         let enclave_for = move |host: &str| {
             let checked = enclave::Config {
                 host: host.to_owned(),
                 pin: router::router_pin(),
                 verifier: Some(Arc::clone(&verifier)),
                 verification_check: check.clone(),
+                on_verification: observer.clone(),
             }
             .check()?;
             Ok(Enclave::from_checked(
@@ -328,6 +351,7 @@ impl RouterHttpClientBuilder {
             pin: router::router_pin(),
             verifier: Some(Arc::new(verifier)),
             verification_check: common.verification_check,
+            on_verification: common.on_verification,
         }
         .check()?;
         Ok((

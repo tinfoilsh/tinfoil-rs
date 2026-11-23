@@ -11,7 +11,9 @@ use tokio::sync::Notify;
 use super::{Failure, KeyFailure, Mode, RoundTrip, Transport};
 use crate::error::{Error, ErrorKind};
 use crate::internal::enclave::{Enclave, RETRY_DELAY};
-use crate::internal::testing::{Record, Script, Step, record, tokio_clock};
+use crate::internal::testing::{
+    Record, Script, Step, observer, record, rejected_by_verifier, rejected_report, tokio_clock,
+};
 use crate::internal::{BoxFuture, Clock};
 
 const HOUR: Duration = Duration::from_secs(3600);
@@ -958,4 +960,355 @@ async fn the_clock_of_the_fixture_follows_paused_time() {
     let before = (f.clock)();
     tokio::time::advance(HOUR).await;
     assert_eq!((f.clock)().duration_since(before).expect("later"), HOUR);
+}
+
+// Attempts: the last verification and the observer.
+
+const HOST: &str = "enclave.example.com";
+
+/// What the observer of a transport was told, in order.
+type Told = Arc<Mutex<Vec<crate::internal::testing::Told>>>;
+
+/// A transport whose enclave is observed, connected on `first`, followed by
+/// `steps` for the verifications after it. The connection's retry is
+/// given, so that a failed first step is retried.
+async fn observed(
+    first: impl FnOnce(&Clock) -> Vec<Step>,
+    steps: impl FnOnce(&Clock) -> Vec<Step>,
+) -> (Fixture, Told) {
+    let clock = tokio_clock();
+    let mut all = first(&clock);
+    all.extend(steps(&clock));
+    let script = Script::new(all);
+    let mode = Arc::new(FakeMode::default());
+    let (notify, told) = observer();
+    let enclave =
+        Enclave::from_source(HOST, script.source(), None, Arc::clone(&clock)).notifying(notify);
+    let transport = Transport::connect(enclave, mode.clone(), true)
+        .await
+        .expect("connected");
+    let fixture = Fixture {
+        clock,
+        script,
+        mode,
+        transport,
+    };
+    (fixture, told)
+}
+
+/// The name of the last verification's evidence, or its error's message.
+fn last(transport: &Transport<Record>) -> Result<&'static str, String> {
+    transport
+        .last_verification()
+        .map(|evidence| evidence.name)
+        .map_err(|error| error.to_string())
+}
+
+fn told(log: &Told) -> Vec<crate::internal::testing::Told> {
+    log.lock().unwrap().clone()
+}
+
+fn success(name: &'static str) -> crate::internal::testing::Told {
+    (HOST.to_owned(), Ok(name))
+}
+
+fn failure(message: &str) -> crate::internal::testing::Told {
+    (HOST.to_owned(), Err(message.to_owned()))
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_first_verification_is_the_last_and_is_told_once_with_the_host() {
+    let (f, log) = observed(|clock| vec![ok("a", clock, HOUR)], |_| vec![]).await;
+    assert_eq!(last(&f.transport), Ok("a"));
+    assert_eq!(told(&log), [success("a")]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rejection_by_the_verifier_reaches_the_caller_and_the_observer_with_its_report() {
+    let rejected = rejected_by_verifier();
+    let (f, log) = observed(
+        |clock| vec![ok("a", clock, HOUR)],
+        |_| {
+            vec![
+                Step::Ready(Err(rejected.clone())),
+                Step::Ready(Err(rejected.clone())),
+            ]
+        },
+    )
+    .await;
+    let error = f.transport.reverify().await.expect_err("rejected");
+    assert_eq!(error.kind(), ErrorKind::Attestation);
+    let report = rejected_report(&error).expect("the verifier's report");
+    assert!(report.verified_facts().is_none());
+    assert!(report.partial_facts().is_some());
+    assert_eq!(
+        report.failed_step().map(|step| step.layer),
+        Some(crate::verifier::Layer::Envelope)
+    );
+    // The last verification is the same error, report and all.
+    let last = f.transport.last_verification().expect_err("a failure");
+    assert_eq!(last.to_string(), error.to_string());
+    assert!(rejected_report(&last).is_some());
+    assert_eq!(
+        told(&log)[1..],
+        [failure(&rejected.to_string()), failure(&error.to_string())]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_fetch_is_the_last_verification_without_a_report() {
+    let (f, log) = observed(
+        |clock| vec![ok("a", clock, HOUR)],
+        |_| {
+            vec![
+                Step::Ready(Err(Error::network("fetch failed"))),
+                Step::Ready(Err(Error::network("fetch failed again"))),
+            ]
+        },
+    )
+    .await;
+    tokio::time::advance(HOUR).await;
+    let error = f.transport.ensure_verified().await.expect_err("down");
+    assert_eq!(error.kind(), ErrorKind::Network);
+    assert!(rejected_report(&error).is_none());
+    assert_eq!(last(&f.transport), Err(error.to_string()));
+    assert_eq!(
+        told(&log),
+        [
+            success("a"),
+            failure("network error: fetch failed"),
+            failure(&error.to_string())
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_reverification_replaces_the_earlier_success() {
+    let (f, log) = observed(
+        |clock| vec![ok("a", clock, HOUR)],
+        |_| vec![Step::Ready(Err(Error::configuration("refused")))],
+    )
+    .await;
+    assert!(f.transport.reverify().await.is_err());
+    assert_eq!(
+        last(&f.transport),
+        Err("configuration error: refused".to_owned())
+    );
+    // The state that admits requests is another matter: a configuration
+    // error keeps it.
+    assert_eq!(f.transport.current().name, "a");
+    assert_eq!(told(&log).len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_attempt_of_a_retried_verification_is_told_and_the_last_is_the_retry() {
+    let (f, log) = observed(
+        |clock| {
+            vec![
+                Step::Ready(Err(Error::network("down"))),
+                ok("a", clock, HOUR),
+            ]
+        },
+        |clock| {
+            vec![
+                Step::Ready(Err(Error::attestation("stale"))),
+                ok("b", clock, HOUR),
+            ]
+        },
+    )
+    .await;
+    // Connecting retried its first attempt.
+    assert_eq!(told(&log), [failure("network error: down"), success("a")]);
+    assert_eq!(last(&f.transport), Ok("a"));
+
+    f.transport.reverify().await.expect("verified on the retry");
+    assert_eq!(
+        told(&log)[2..],
+        [failure("attestation error: stale"), success("b")]
+    );
+    assert_eq!(last(&f.transport), Ok("b"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_first_attempt_of_a_retry_is_the_last_verification_during_the_pause() {
+    let (f, log) = observed(
+        |clock| vec![ok("a", clock, HOUR)],
+        |clock| {
+            vec![
+                Step::Ready(Err(Error::network("down"))),
+                ok("b", clock, HOUR),
+            ]
+        },
+    )
+    .await;
+    let transport = f.transport.clone();
+    let reverify = tokio::spawn(async move { transport.reverify().await.map(|e| e.name) });
+    settle().await;
+    // The pause before the retry: the failed attempt is decided and told.
+    assert_eq!(last(&f.transport), Err("network error: down".to_owned()));
+    assert_eq!(told(&log).len(), 2);
+    tokio::time::advance(RETRY_DELAY).await;
+    assert_eq!(reverify.await.unwrap().unwrap(), "b");
+    assert_eq!(last(&f.transport), Ok("b"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_key_rotation_reverifies_the_same_host_and_is_told() {
+    let (f, log) = observed(
+        |clock| vec![ok("a", clock, HOUR)],
+        |clock| vec![ok("b", clock, HOUR)],
+    )
+    .await;
+    f.mode.reply("a", Reply::PeerLacksKey);
+    // The rejected request is no attempt; the verification that the next
+    // request needs is.
+    let failure = f
+        .transport
+        .round_trip(request())
+        .await
+        .expect_err("rejected");
+    assert_eq!(failure.key, KeyFailure::Rejected);
+    assert_eq!(told(&log), [success("a")]);
+    assert_eq!(served_by(&f.transport).await, "b");
+    assert_eq!(told(&log), [success("a"), success("b")]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn requests_that_share_a_verification_share_one_attempt() {
+    let gate = Arc::new(Notify::new());
+    let (f, log) = {
+        let gate = Arc::clone(&gate);
+        observed(
+            |clock| vec![ok("a", clock, HOUR)],
+            move |clock| vec![Step::Gated(gate, Ok(record("b", clock, 3 * HOUR)))],
+        )
+        .await
+    };
+    tokio::time::advance(HOUR).await;
+    let waiters: Vec<_> = (0..3)
+        .map(|_| {
+            let transport = f.transport.clone();
+            tokio::spawn(async move { transport.ensure_verified().await.map(|e| e.name) })
+        })
+        .collect();
+    settle().await;
+    gate.notify_one();
+    for waiter in waiters {
+        assert_eq!(waiter.await.unwrap().unwrap(), "b");
+    }
+    assert_eq!(f.script.calls(), 2);
+    assert_eq!(told(&log), [success("a"), success("b")]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_observer_can_read_the_last_verification_without_a_deadlock() {
+    let clock = tokio_clock();
+    let script = Script::new([
+        ok("a", &clock, HOUR),
+        Step::Ready(Err(Error::configuration("refused"))),
+        ok("b", &clock, HOUR),
+    ]);
+    let handle: Arc<std::sync::OnceLock<Transport<Record>>> = Arc::default();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let notify: crate::options::Notify<Record> = {
+        let (handle, seen) = (Arc::clone(&handle), Arc::clone(&seen));
+        Arc::new(move |_, outcome| {
+            let Some(transport) = handle.get() else {
+                return;
+            };
+            // The observer is told after the attempt became the last.
+            let told = outcome.map(|r| r.name).map_err(ToString::to_string);
+            seen.lock().unwrap().push((told, last(transport)));
+        })
+    };
+    let enclave = Enclave::from_source(HOST, script.source(), None, clock).notifying(notify);
+    let transport = Transport::connect(enclave, Arc::new(FakeMode::default()), true)
+        .await
+        .expect("connected");
+    handle.set(transport.clone()).unwrap();
+    assert!(transport.reverify().await.is_err());
+    transport.reverify().await.expect("verified");
+    let refused = Err("configuration error: refused".to_owned());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(refused.clone(), refused), (Ok("b"), Ok("b"))]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_observer_that_panics_changes_nothing() {
+    let clock = tokio_clock();
+    let script = Script::new([ok("a", &clock, HOUR), ok("b", &clock, HOUR)]);
+    let notify: crate::options::Notify<Record> = Arc::new(|_, _| panic!("the observer's bug"));
+    let enclave = Enclave::from_source(HOST, script.source(), None, clock).notifying(notify);
+    let transport = Transport::connect(enclave, Arc::new(FakeMode::default()), true)
+        .await
+        .expect("connected");
+    assert_eq!(transport.reverify().await.expect("verified").name, "b");
+    assert_eq!(last(&transport), Ok("b"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_binding_that_fails_is_the_outcome_of_its_attempt() {
+    let (f, log) = observed(
+        |clock| vec![ok("a", clock, HOUR)],
+        |clock| {
+            let mut keyless = record("keyless", clock, HOUR);
+            keyless.tls = None;
+            vec![Step::Ready(Ok(keyless))]
+        },
+    )
+    .await;
+    let error = f.transport.reverify().await.expect_err("no key");
+    assert_eq!(
+        last(&f.transport),
+        Err("attestation error: the evidence endorses no key".to_owned())
+    );
+    assert_eq!(told(&log)[1], failure(&error.to_string()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_abandoned_attempt_is_neither_kept_nor_told() {
+    let gate = Arc::new(Notify::new());
+    let (f, log) = {
+        let gate = Arc::clone(&gate);
+        observed(
+            |clock| vec![ok("a", clock, HOUR)],
+            move |clock| vec![Step::Gated(gate, Ok(record("b", clock, HOUR)))],
+        )
+        .await
+    };
+    let abandoned = tokio::time::timeout(Duration::from_secs(1), f.transport.reverify()).await;
+    assert!(abandoned.is_err());
+    assert_eq!(last(&f.transport), Ok("a"));
+    assert_eq!(told(&log), [success("a")]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_returned_verification_is_a_copy_for_the_caller() {
+    let (f, _) = observed(|clock| vec![ok("a", clock, HOUR)], |_| vec![]).await;
+    let mut copy = Record::clone(&f.transport.last_verification().unwrap());
+    copy.name = "changed";
+    copy.tls = None;
+    assert_eq!(last(&f.transport), Ok("a"));
+    assert_eq!(served_by(&f.transport).await, "a");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_connection_is_told_and_leaves_no_transport() {
+    let clock = tokio_clock();
+    let script = Script::new([
+        Step::Ready(Err(Error::network("down"))),
+        Step::Ready(Err(rejected_by_verifier())),
+    ]);
+    let (notify, log) = observer();
+    let enclave = Enclave::from_source(HOST, script.source(), None, clock).notifying(notify);
+    let error = Transport::connect(enclave, Arc::new(FakeMode::default()), true)
+        .await
+        .expect_err("no transport");
+    assert!(rejected_report(&error).is_some());
+    assert_eq!(
+        told(&log),
+        [failure("network error: down"), failure(&error.to_string())]
+    );
 }

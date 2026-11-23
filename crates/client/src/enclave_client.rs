@@ -14,7 +14,7 @@ use crate::internal::{enclave, system_clock};
 use crate::options::{RouteOptions, Transport};
 use crate::request::http_request_methods;
 use crate::trust::Trust;
-use crate::verifier::{BoxError, Policy, Verification, Verifier};
+use crate::verifier::{BoxError, Policy, VerificationReport, VerifiedFacts, Verifier};
 
 /// An HTTP client whose requests reach only one attested enclave.
 ///
@@ -104,17 +104,39 @@ impl EnclaveHttpClient {
         &self.trust
     }
 
-    /// The last successful verification, without checking it: it may have
-    /// expired or been discarded since. Use
+    /// The outcome of the client's most recent attempt to verify the
+    /// enclave, without I/O: the attempt's report if it passed, and
+    /// otherwise the error that the client reported for it.
+    ///
+    /// Every attempt counts, once its outcome is decided: the verification
+    /// in [`connect`](EnclaveHttpClientBuilder::connect), each retry, and
+    /// every verification again, whether after an expiry, after a key
+    /// rotation or through [`reverify`](Self::reverify). So a failure
+    /// replaces an earlier success. There is always an attempt to return,
+    /// since a client exists only once its first verification passed.
+    ///
+    /// When the verifier rejected the enclave's document, the error is an
+    /// attestation error whose [`source`](std::error::Error::source) is the
+    /// verifier's [`Error::Verification`](crate::verifier::Error::Verification),
+    /// and its [`report`](crate::verifier::VerificationError::report) shows
+    /// the step that failed and what the steps before it established. An
+    /// attempt that failed before the verifier ran, such as a failed fetch,
+    /// or whose verified facts the `verification_check` or the transport
+    /// refused, has no report.
+    ///
+    /// It checks no freshness: a report that it returns may have expired
+    /// or been discarded since. Use
     /// [`ensure_verified`](Self::ensure_verified) for one that is valid
-    /// now. A failed re-verification does not change it.
-    pub fn current(&self) -> Arc<Verification> {
-        self.inner.current()
+    /// now. The report is a copy for the caller to keep.
+    pub fn last_verification(&self) -> Result<VerificationReport, Error> {
+        self.inner.last_verification()
     }
 
-    /// Returns a verification that is valid now, verifying first only if
-    /// the current one has expired or was discarded. `Ok` means that
-    /// requests can be sent: the TLS pin or the HPKE key is in place.
+    /// Returns the report of a verification that is valid now, verifying
+    /// first only if the current one has expired or was discarded. `Ok`
+    /// means that requests can be sent: the TLS pin or the HPKE key of the
+    /// report's verified facts is in place. The report is a copy for the
+    /// caller to keep.
     ///
     /// A verification is one fetch of the enclave's attestation document
     /// (at most 30 seconds and 32 MiB) and its offline verification, then
@@ -128,9 +150,9 @@ impl EnclaveHttpClient {
     ///
     /// - [`ErrorKind::Network`]: the document could not be fetched.
     /// - [`ErrorKind::Attestation`]: the document was rejected (the source
-    ///   is the verifier's error), it endorses no key that the transport
-    ///   mode can use, its freshness has expired, or `verification_check`
-    ///   rejected it.
+    ///   is the verifier's error, with the report of the rejection), it
+    ///   endorses no key that the transport mode can use, its freshness has
+    ///   expired, or `verification_check` rejected it.
     /// - A deadline from the `timeout` option is a network error whose
     ///   [`is_timeout`](Error::is_timeout) is `true`. It ends this call's
     ///   wait; a verification that other callers also wait for goes on
@@ -145,12 +167,13 @@ impl EnclaveHttpClient {
     ///
     /// [`ErrorKind::Network`]: crate::ErrorKind::Network
     /// [`ErrorKind::Attestation`]: crate::ErrorKind::Attestation
-    pub async fn ensure_verified(&self) -> Result<Arc<Verification>, Error> {
+    pub async fn ensure_verified(&self) -> Result<VerificationReport, Error> {
         self.inner.ensure_verified().await
     }
 
     /// Verifies the enclave again even if the current verification is
-    /// still valid, and returns the new verification.
+    /// still valid, and returns the new report, a copy for the caller to
+    /// keep.
     ///
     /// On success the client's traffic moves to the keys of the new
     /// verification; requests in flight finish on the connections that
@@ -180,7 +203,7 @@ impl EnclaveHttpClient {
     /// [`ErrorKind::Attestation`]: crate::ErrorKind::Attestation
     /// [`ErrorKind::Network`]: crate::ErrorKind::Network
     /// [`ErrorKind::Configuration`]: crate::ErrorKind::Configuration
-    pub async fn reverify(&self) -> Result<Arc<Verification>, Error> {
+    pub async fn reverify(&self) -> Result<VerificationReport, Error> {
         self.inner.reverify().await
     }
 }
@@ -238,10 +261,10 @@ impl EnclaveHttpClientBuilder {
         self
     }
 
-    /// A veto over each verification that passed the trust argument and the
-    /// policy, called
-    /// before the client uses the enclave's keys: when the client connects
-    /// and whenever it verifies again.
+    /// A veto over the verified facts of each verification that passed the
+    /// trust argument and the policy, called before the client uses the
+    /// enclave's keys: when the client connects and whenever it verifies
+    /// again.
     ///
     /// Return an error to reject the enclave. The verification then fails
     /// with an attestation error that has the returned error as its
@@ -257,9 +280,40 @@ impl EnclaveHttpClientBuilder {
     /// `panic = "abort"` aborts instead.)
     pub fn verification_check<F>(mut self, check: F) -> Self
     where
-        F: Fn(&Verification) -> Result<(), BoxError> + Send + Sync + 'static,
+        F: Fn(&VerifiedFacts) -> Result<(), BoxError> + Send + Sync + 'static,
     {
         self.options.common.verification_check = Some(Arc::new(check));
+        self
+    }
+
+    /// An observer of each attempt to verify the enclave, called once for
+    /// every attempt after its outcome is decided: the verification in
+    /// [`connect`](Self::connect), each retry, and every verification
+    /// again, whether after an expiry, after a key rotation or through
+    /// [`reverify`](EnclaveHttpClient::reverify). A verification that
+    /// concurrent requests share is one attempt.
+    ///
+    /// It is given the enclave's host and the attempt's outcome: the same
+    /// report or error that
+    /// [`last_verification`](EnclaveHttpClient::last_verification) returns
+    /// for the attempt. A first attempt that is retried is told before the
+    /// pause that precedes the retry. An attempt that is abandoned, because
+    /// every caller that waited for it was dropped or ran out of time, has
+    /// no outcome and is not told.
+    ///
+    /// The client holds none of its locks while it calls the observer, so
+    /// the observer may call the client, `last_verification` for example.
+    /// Requests that wait for the verification wait for the observer too,
+    /// so it should be fast, and it may be called from several threads at
+    /// once. It cannot change the outcome; reject an enclave with
+    /// [`verification_check`](Self::verification_check). A panic in the
+    /// observer is caught and ignored. (A program built with
+    /// `panic = "abort"` aborts instead.)
+    pub fn on_verification<F>(mut self, observer: F) -> Self
+    where
+        F: Fn(&str, Result<&VerificationReport, &Error>) + Send + Sync + 'static,
+    {
+        self.options.common.on_verification = Some(Arc::new(observer));
         self
     }
 
@@ -367,6 +421,7 @@ impl EnclaveHttpClientBuilder {
             pin,
             verifier: Some(Arc::new(verifier)),
             verification_check: common.verification_check,
+            on_verification: common.on_verification,
         }
         .check()?;
         if let Some(proxy_url) = &base_url {
