@@ -110,6 +110,7 @@ impl Outcome {
             accepted: true,
             outputs: Some(outputs),
             rejection: None,
+            report: None,
         };
         Self {
             output: Some(output),
@@ -132,6 +133,7 @@ impl Outcome {
                     rejection: Some(Rejection {
                         code: code.to_owned(),
                     }),
+                    report: None,
                 };
                 (Some(output), EXIT_REJECTED)
             }
@@ -245,9 +247,16 @@ async fn verify(request: &Request) -> Outcome {
         let verdict = channel_verdict(error.kind(), rejecting_layer(&error));
         return Outcome::of(verdict, format!("channel binding to {host}: {error}"));
     }
-    // The verification that the connection was pinned to.
-    let verification = client.current();
-    match facts::verified(&verification) {
+    // The verification that the connection was pinned to: the last
+    // attempt, which passed, or the request would have failed.
+    let report = match client.last_verification() {
+        Ok(report) => report,
+        Err(error) => {
+            let verdict = verification_verdict(error.kind(), rejecting_layer(&error));
+            return Outcome::of(verdict, format!("verifying {host}: {error}"));
+        }
+    };
+    match report.verified_facts().and_then(facts::verified) {
         Some(outputs) => Outcome::accepted(crate::AcceptOutputs {
             channel_binding: CHANNEL_BINDING.to_owned(),
             ..outputs

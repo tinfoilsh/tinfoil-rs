@@ -91,6 +91,7 @@ pub(crate) fn accepted(stage: &str, outputs: Option<AcceptOutputs>) -> (Output, 
         accepted: true,
         outputs,
         rejection: None,
+        report: None,
     };
     (output, EXIT_ACCEPTED)
 }
@@ -105,6 +106,7 @@ pub(crate) fn rejected(stage: &str, code: &str) -> (Output, i32) {
         rejection: Some(Rejection {
             code: code.to_owned(),
         }),
+        report: None,
     };
     (output, EXIT_REJECTED)
 }

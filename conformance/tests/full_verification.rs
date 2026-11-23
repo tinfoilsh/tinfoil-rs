@@ -241,7 +241,14 @@ fn replay_share(directory: &str, share: usize, shares: usize) {
             "{name}: the changed document is not the recorded one"
         );
         let (output, code) = tinfoil_conformance::run(STAGE, input.to_string().as_bytes());
-        let output = serde_json::to_value(&output).unwrap();
+        if let Err(reason) = tinfoil_conformance::check_report(&output) {
+            failures.push(format!("{name}: report: {reason}"));
+        }
+        // The records predate the report, which the check above covers.
+        let mut output = serde_json::to_value(&output).unwrap();
+        if let Some(members) = output.as_object_mut() {
+            members.remove("report");
+        }
         let want_output = &outputs[usize::try_from(case["output"].as_u64().unwrap()).unwrap()];
         if i64::from(code) != case["exit"].as_i64().unwrap() || output != *want_output {
             failures.push(format!(

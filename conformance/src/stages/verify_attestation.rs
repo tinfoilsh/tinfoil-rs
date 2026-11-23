@@ -27,6 +27,7 @@ fn rejection(error: &Error) -> (Output, i32) {
                 rejection: Some(Rejection {
                     code: CODE_MALFORMED_INPUT.to_owned(),
                 }),
+                report: None,
             };
             return (output, EXIT_MALFORMED);
         }
@@ -34,20 +35,29 @@ fn rejection(error: &Error) -> (Output, i32) {
         _ => None,
     };
     match code {
-        Some(code) => rejected(stage, code),
+        Some(code) => {
+            let (mut output, exit) = rejected(stage, code);
+            if let Error::Verification(rejected) = error {
+                output.report = Some(facts::report(rejected.report()));
+            }
+            (output, exit)
+        }
         None => {
             let output = Output {
                 stage: stage.to_owned(),
                 accepted: false,
                 outputs: None,
                 rejection: None,
+                report: None,
             };
             (output, EXIT_INTERNAL)
         }
     }
 }
 
-/// Runs the stage with the verifier that was built for the input.
+/// Runs the stage with the verifier that was built for the input. The
+/// output carries the verifier's report, of an accepted document and of a
+/// rejected one.
 ///
 /// Fields that do not decode and the time of an unset clock are malformed
 /// input. The document is verified at the input's appraisal time, or now
@@ -73,12 +83,18 @@ pub(crate) fn run(input: &Input, verifier: &Verifier) -> (Output, i32) {
     let Some(appraisal) = appraisal else {
         return malformed(stage);
     };
-    let verified = match verifier.verify_v3_at(&doc, &nonce, &input.pin(), appraisal) {
-        Ok(verified) => verified,
+    let report = match verifier.verify_v3_at(&doc, &nonce, &input.pin(), appraisal) {
+        Ok(report) => report,
         Err(error) => return rejection(&error),
     };
-    match facts::verified(&verified) {
-        Some(outputs) => accepted(stage, Some(outputs)),
+    // The adapter's own rejection carries no report: the verifier accepted
+    // the document.
+    match report.verified_facts().and_then(facts::verified) {
+        Some(outputs) => {
+            let (mut output, exit) = accepted(stage, Some(outputs));
+            output.report = Some(facts::report(&report));
+            (output, exit)
+        }
         None => rejected(stage, CODE_ENVELOPE_REJECTED),
     }
 }
