@@ -941,6 +941,105 @@ fn artifact_freshness_requires_its_reserved_profile() {
 }
 
 #[test]
+fn container_provenance_is_keyed_by_image_digest() {
+    let other = "cd".repeat(32);
+    let proof = |id: &str, digest: &str, bundle: &str| {
+        let data = format!(r#"{{"digest":"{digest}","sigstore_bundle":{bundle}}}"#);
+        reference(id, CONTAINER_PROVENANCE_V1_FORMAT, &data)
+    };
+    let set = decode(vec![
+        proof("one", DIGEST, r#"{"a":1}"#),
+        proof("two", &other, r#"{"b":2}"#),
+        proof("again", DIGEST, r#"{"c":3}"#),
+    ])
+    .unwrap();
+    let want = |digest: &str, bundle: &str| ContainerProvenance {
+        digest: digest.to_owned(),
+        bundle: object(bundle),
+    };
+    assert_eq!(set.containers.len(), 2);
+    assert_eq!(set.containers[DIGEST], want(DIGEST, r#"{"a":1}"#));
+    assert_eq!(set.containers[&other], want(&other, r#"{"b":2}"#));
+    // Whether a present bundle verifies is not decided here.
+    assert!(decode(vec![proof("one", DIGEST, r#""x""#)]).is_ok());
+
+    let cases = [
+        (
+            "uppercase digest",
+            proof("one", &DIGEST.to_uppercase(), "{}"),
+            "container digest is not lowercase hex",
+        ),
+        (
+            "prefixed digest",
+            proof("one", &format!("sha256:{DIGEST}"), "{}"),
+            "container digest is not lowercase hex",
+        ),
+        (
+            "short digest",
+            proof("one", &DIGEST[2..], "{}"),
+            "container digest must be 32 bytes, got 31",
+        ),
+        (
+            "missing digest",
+            reference(
+                "one",
+                CONTAINER_PROVENANCE_V1_FORMAT,
+                r#"{"sigstore_bundle":{}}"#,
+            ),
+            "container digest must be 32 bytes, got 0",
+        ),
+        (
+            "missing bundle",
+            reference(
+                "one",
+                CONTAINER_PROVENANCE_V1_FORMAT,
+                &format!(r#"{{"digest":"{DIGEST}"}}"#),
+            ),
+            "is missing sigstore_bundle",
+        ),
+        (
+            "null bundle",
+            proof("one", DIGEST, "null"),
+            "is missing sigstore_bundle",
+        ),
+        (
+            "unknown member",
+            reference(
+                "one",
+                CONTAINER_PROVENANCE_V1_FORMAT,
+                &format!(r#"{{"digest":"{DIGEST}","sigstore_bundle":{{}},"repo":"o/r"}}"#),
+            ),
+            "unknown",
+        ),
+        (
+            "digest that is not a string",
+            reference(
+                "one",
+                CONTAINER_PROVENANCE_V1_FORMAT,
+                r#"{"digest":7,"sigstore_bundle":{}}"#,
+            ),
+            "parsing https://tinfoil.sh/collateral/container-provenance/v1 collateral entry \"one\"",
+        ),
+    ];
+    for (name, entry, want) in cases {
+        let error = rejection(vec![entry]);
+        assert!(error.contains(want), "{name}: {error}");
+    }
+    // A later entry for a digest is not kept, and is decoded all the same.
+    let entries = vec![proof("one", DIGEST, "{}"), proof("again", DIGEST, "null")];
+    assert!(rejection(entries).contains(r#"collateral entry "again" is missing sigstore_bundle"#));
+    // Under the other role the format has no decoder.
+    let misrole = entry(
+        "one",
+        ROLE_ENDORSEMENT,
+        CONTAINER_PROVENANCE_V1_FORMAT,
+        &[],
+        r#"{"unknown":1}"#,
+    );
+    assert_eq!(decode(vec![misrole]).unwrap(), Set::default());
+}
+
+#[test]
 fn an_entry_decodes_from_a_document_value() {
     let value = object(
         r#"{"id":"vcek","role":"endorsement","format":"f","subjects":["cpu",null],"data":{"a":1}}"#,

@@ -1210,6 +1210,63 @@ fn config_and_runtime_accessors() {
     assert_eq!(document.sigstore_platform().unwrap().repo, "o/p");
 }
 
+#[test]
+fn container_provenance_is_selected_by_image_digest() {
+    let (first, second) = ("ab".repeat(32), "cd".repeat(32));
+    let proof = |id: &str, digest: &str, media_type: &str| {
+        format!(
+            r#"{{"id":"{id}","role":"reference-values","format":"{}","data":{{"digest":"{digest}","sigstore_bundle":{{"mediaType":"{media_type}"}}}}}}"#,
+            collateral::CONTAINER_PROVENANCE_V1_FORMAT
+        )
+    };
+    let entries = format!(
+        "[{},{},{}]",
+        proof("one", &first, "first"),
+        proof("two", &second, "second"),
+        proof("again", &first, "later")
+    );
+    let document = document_with_collateral(SEV_SNP_REPORT_V1_FORMAT, &entries);
+    let media_type = |digest: &str| {
+        let provenance = document.container_provenance(digest).unwrap();
+        assert_eq!(provenance.digest, digest);
+        let bundle = provenance.bundle.as_object().unwrap();
+        bundle
+            .get("mediaType")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(media_type(&first), "first");
+    assert_eq!(media_type(&second), "second");
+    for digest in [
+        "ef".repeat(32),
+        first.to_uppercase(),
+        format!("sha256:{first}"),
+        String::new(),
+    ] {
+        let error = document.container_provenance(&digest).unwrap_err();
+        assert!(error.is_not_found(), "{error}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "collateral entry not found: document carries no https://tinfoil.sh/collateral/container-provenance/v1 reference-values entry for sha256:{digest}"
+            )
+        );
+    }
+
+    // A malformed entry fails the document whether or not it is read.
+    let malformed = format!(
+        "[{},{}]",
+        proof("one", &first, "first"),
+        proof("two", &second.to_uppercase(), "second")
+    );
+    let text = TestDocument::new(&test_nonce())
+        .with_collateral(Some(FORMAT_V3), &malformed)
+        .render();
+    assert_eq!(rejection(&text), "container digest is not lowercase hex");
+}
+
 // ---- recorded documents
 
 /// Assembles a recorded case into the document bytes that it stands for.

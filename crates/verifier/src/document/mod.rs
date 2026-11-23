@@ -31,7 +31,8 @@ use crate::canonical::{self, CanonicalError};
 use crate::json::decode::{self, DecodeError};
 use crate::json::{self, Value};
 use collateral::{
-    CollateralError, ConfigEndorsement, CpuEndorsements, Freshness, Runtime, SigstoreRef,
+    CollateralError, ConfigEndorsement, ContainerProvenance, CpuEndorsements, Freshness, Runtime,
+    SigstoreRef,
 };
 
 /// Format of the v3 attestation document.
@@ -432,6 +433,20 @@ impl Document {
     /// unambiguous.
     pub fn config_platform(&self) -> Result<&SigstoreRef, CollateralError> {
         self.collateral.config_platform()
+    }
+
+    /// The decoded, unauthenticated build attestation of the container
+    /// image with the given SHA-256 digest, lowercase hex.
+    pub fn container_provenance(
+        &self,
+        digest: &str,
+    ) -> Result<&ContainerProvenance, CollateralError> {
+        self.collateral.containers.get(digest).ok_or_else(|| {
+            not_found(format!(
+                "document carries no {} reference-values entry for sha256:{digest}",
+                collateral::CONTAINER_PROVENANCE_V1_FORMAT
+            ))
+        })
     }
 
     /// The report data that the document's CPU quote must bind, recomputed
