@@ -170,8 +170,12 @@ impl EnclaveHttpClient {
     ///   stays in place, and stays valid until it expires or is discarded.
     ///
     /// The errors are those of [`ensure_verified`](Self::ensure_verified),
-    /// and so is the cancel safety: a dropped `reverify` leaves the
-    /// previous verification in place.
+    /// and so is the cancel safety: dropping `reverify`, or its deadline
+    /// from the `timeout` option, ends only this call's wait. A
+    /// verification that other callers still wait for goes on, and if it
+    /// fails with an attestation error, it discards the previous
+    /// verification as above. A verification that every caller dropped
+    /// leaves the previous verification in place.
     ///
     /// [`ErrorKind::Attestation`]: crate::ErrorKind::Attestation
     /// [`ErrorKind::Network`]: crate::ErrorKind::Network

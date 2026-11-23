@@ -83,8 +83,8 @@ impl RouterHttpClient {
     /// [`EnclaveHttpClient::reverify`](crate::EnclaveHttpClient::reverify):
     /// a failure with an attestation error discards the previous
     /// verification, so that the next request verifies the router again; a
-    /// dropped `reverify`, or one that fails with a network or a
-    /// configuration error, leaves the previous verification in place.
+    /// failure with a network or a configuration error leaves it in place.
+    /// A dropped `reverify` ends only its own wait.
     pub async fn reverify(&self) -> Result<Arc<Verification>, Error> {
         self.inner.reverify().await
     }
