@@ -203,8 +203,10 @@ impl fmt::Display for StepStatus {
 /// What a rejected verification established before the step that failed.
 ///
 /// Every fact in them is authenticated, except the key fingerprints, which
-/// [`MeasuredFacts`] describes. None of them authorizes anything: a channel
-/// is never bound to a value in partial facts.
+/// [`MeasuredFacts`] describes, and the platform layout of
+/// [`ExpectedFacts::code_measurement`], which is authenticated only once the
+/// quote step passed. None of them authorizes anything: a channel is never
+/// bound to a value in partial facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PartialFacts {

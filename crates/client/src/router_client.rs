@@ -66,8 +66,10 @@ impl RouterHttpClient {
     /// The outcome of the most recent attempt to verify the router that the
     /// client chose, without I/O: the attempt's report if it passed, and
     /// otherwise the error that the client reported for it. It describes
-    /// the chosen router only; the routers that discovery skipped are told
-    /// to the `on_verification` observer. See
+    /// the chosen router only; the attempts that discovery made on other
+    /// routers are told only to the `on_verification` observer, which is
+    /// not told of a host that discovery refused, never reached or
+    /// abandoned at its deadline. See
     /// [`EnclaveHttpClient::last_verification`](crate::EnclaveHttpClient::last_verification).
     pub fn last_verification(&self) -> Result<VerificationReport, Error> {
         self.inner.last_verification()

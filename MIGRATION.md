@@ -211,7 +211,7 @@ async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
 | `SecureClient::new_with_proxy(host, repo, api_key, proxy_url)` + `verify()` | `EnclaveHttpClient::builder(host, Trust::repo(repo)).transport(Transport::Ehbp { proxy_url: Some(proxy_url.to_owned()) }).connect()` |
 | `SecureClient::new_default_client(api_key)` | `RouterHttpClient::connect()` |
 | `SecureClient::with_measurement(host, api_key, measurement)` | a `Policy` with `pinned_registers`; see below |
-| `is_verified()` | removed: a client is always verified. `last_verification()` returns the last attempt |
+| `is_verified()` | removed: `connect` verifies before it returns a client, and a request verifies first when the client holds no valid verification. `last_verification()` returns the most recent attempt, which may be a failure |
 | `verify(&mut self)` | `ensure_verified()` / `reverify()` on `&self` |
 | `ground_truth()`, `ground_truth_json()` | `last_verification()?.verified_facts()`, and its `to_json()` |
 | `verification_document()`, `verification_document_json()` | `last_verification()`, and the report's `to_json()`; see [Verification results](#verification-results) |
@@ -306,7 +306,7 @@ see `Trust::EmbeddedConfig` and `Trust::AuthorizedBy`.
 | `Measurement` with string registers | `Measurement::SevSnp { launch }` / `Measurement::Tdx { mrtd, rtmr0, .. }` with `Register` values; `Expected` for pins |
 | `PredicateType` | removed; the platform is the variant of `Measurement` |
 | `SoftwareIdentity` | `report.metadata().verifier` |
-| `VerificationDocument`, `VerificationSteps`, `VerificationStepState`, `VerificationStepStatus` | `VerificationReport`, with one `Step` for each layer (`envelope`, `provenance`, `quote`, `policy`) and a `StepStatus` of `Passed`, `Failed`, `Skipped` or `NotRun`. On failure, the error's source is a `tinfoil::verifier::Error` whose `VerificationError` has the `layer()` and the `report()`, with `PartialFacts`: what the steps before the failed one established |
+| `VerificationDocument`, `VerificationSteps`, `VerificationStepState`, `VerificationStepStatus` | `VerificationReport`, with one `Step` for each layer (`envelope`, `provenance`, `quote`, `policy`) and a `StepStatus` of `Passed`, `Failed`, `Skipped` or `NotRun`. On failure, the error's source is a `tinfoil::verifier::Error` whose `VerificationError` has the `layer()` and the `report()`, with `PartialFacts`: the facts established up to the rejection, such as the expected measurement that a failed policy step resolved |
 | `DocumentEnclaveMeasurement` | `MeasuredFacts::cpu` of a failed report, or `VerifiedFacts::enclave_measurement()` |
 | `VERIFICATION_DOCUMENT_SCHEMA_VERSION` | removed |
 

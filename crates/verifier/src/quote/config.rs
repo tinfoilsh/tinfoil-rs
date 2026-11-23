@@ -23,8 +23,8 @@ pub struct ConfigReferenceValues<'a> {
 impl<'a> ConfigReferenceValues<'a> {
     /// The registers that the runtime fixes on `platform`
     /// ([`PLATFORM_SEV_SNP`] or [`PLATFORM_TDX`]): its SEV-SNP launch
-    /// measurement, or its MRTD and four RTMRs. An error for a register
-    /// that is not a register, or for another platform.
+    /// measurement, or its MRTD and four RTMRs. An error when a runtime
+    /// value does not parse as a register, or for another platform.
     pub fn code(&self, platform: &str) -> Result<Expected, AssemblyError> {
         if platform == PLATFORM_SEV_SNP {
             Ok(Expected::SevSnp {

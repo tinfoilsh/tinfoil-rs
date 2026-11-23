@@ -950,7 +950,7 @@ fn verify_v3_reads_the_clock_once_and_reports_it() {
         .verify_v3_at(&document, &Fixture::nonce(case), &pin(&fixture, case), at)
         .unwrap();
     assert_eq!(verified.metadata().verified_at, at);
-    // A rejection reports the same instant.
+    // A rejection reports the same verifier identity.
     assert_eq!(
         rejected.report().metadata().verifier,
         verified.metadata().verifier
