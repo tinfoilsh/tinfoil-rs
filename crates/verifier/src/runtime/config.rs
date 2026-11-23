@@ -30,7 +30,7 @@ use crate::document::collateral::RUNTIME_REPO;
 pub const MAX_CONFIG_SIZE: usize = 1 << 20;
 
 /// The deepest nesting of sequences and mappings that is read.
-const MAX_DEPTH: usize = 10_000;
+pub(super) const MAX_DEPTH: usize = 10_000;
 
 /// The key that holds the runtime pin.
 const VERSION_KEY: &str = "cvm-version";
@@ -93,15 +93,15 @@ pub fn runtime_from_config(data: &[u8]) -> Result<RuntimeReference, RuntimeConfi
 
 /// A scalar node.
 #[derive(Clone)]
-struct Scalar {
-    value: String,
-    plain: bool,
+pub(super) struct Scalar {
+    pub(super) value: String,
+    pub(super) plain: bool,
     /// The tag in full, or empty when there is none.
-    tag: String,
+    pub(super) tag: String,
 }
 
 /// How a scalar's tag bears on reading it as a string.
-enum TagKind {
+pub(super) enum TagKind {
     /// No tag, or the non-specific `!`: the scalar means what it looks like.
     None,
     /// `!!str`, or a tag that names no scalar type: the text as written.
@@ -114,13 +114,8 @@ enum TagKind {
 }
 
 impl Scalar {
-    fn tag_kind(&self) -> TagKind {
-        // A core tag is known by its short name, however it was spelled.
-        let short = self
-            .tag
-            .strip_prefix(CORE_TAG_PREFIX)
-            .or_else(|| self.tag.strip_prefix("!!"));
-        match (self.tag.as_str(), short) {
+    pub(super) fn tag_kind(&self) -> TagKind {
+        match (self.tag.as_str(), core_tag(&self.tag)) {
             ("" | "!", _) => TagKind::None,
             (_, Some("merge")) => TagKind::Merge,
             (_, Some("binary" | "bool" | "int" | "float" | "null" | "timestamp")) => TagKind::Typed,
@@ -129,7 +124,7 @@ impl Scalar {
     }
 
     /// Whether the scalar is a merge key: `<<`, unquoted or tagged as one.
-    fn is_merge(&self) -> bool {
+    pub(super) fn is_merge(&self) -> bool {
         self.value == "<<"
             && match self.tag_kind() {
                 TagKind::None => self.plain,
@@ -151,8 +146,15 @@ impl Scalar {
     }
 }
 
+/// The short name of a tag that YAML itself defines, however the tag was
+/// spelled.
+pub(super) fn core_tag(tag: &str) -> Option<&str> {
+    tag.strip_prefix(CORE_TAG_PREFIX)
+        .or_else(|| tag.strip_prefix("!!"))
+}
+
 /// Whether an untagged plain scalar is a null.
-fn is_null(value: &str) -> bool {
+pub(super) fn is_null(value: &str) -> bool {
     matches!(value, "" | "~" | "null" | "Null" | "NULL")
 }
 
@@ -229,25 +231,30 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn full_tag(tag: &Tag) -> String {
+pub(super) fn full_tag(tag: &Tag) -> String {
     format!("{}{}", tag.handle, tag.suffix)
+}
+
+/// The text of a config that is small enough to read and has a single
+/// reading, or why it is not read.
+pub(super) fn config_text(data: &[u8]) -> Result<&str, String> {
+    if data.len() > MAX_CONFIG_SIZE {
+        return Err(format!("the config is larger than {MAX_CONFIG_SIZE} bytes"));
+    }
+    let text = std::str::from_utf8(data).map_err(|_| "the config is not UTF-8".to_owned())?;
+    if text.contains(['\u{85}', '\u{2028}', '\u{2029}']) {
+        return Err(
+            "the config contains a line break other than a line feed or a carriage return"
+                .to_owned(),
+        );
+    }
+    Ok(text)
 }
 
 /// Reads the config as far as its runtime pin: the string value of the
 /// top-level `cvm-version` key, or the empty string when there is none.
 fn read_version(data: &[u8]) -> Result<String, RuntimeConfigError> {
-    if data.len() > MAX_CONFIG_SIZE {
-        return Err(RuntimeConfigError::parsing(format_args!(
-            "the config is larger than {MAX_CONFIG_SIZE} bytes"
-        )));
-    }
-    let text = std::str::from_utf8(data)
-        .map_err(|_| RuntimeConfigError::parsing("the config is not UTF-8"))?;
-    if text.contains(['\u{85}', '\u{2028}', '\u{2029}']) {
-        return Err(RuntimeConfigError::parsing(
-            "the config contains a line break other than a line feed or a carriage return",
-        ));
-    }
+    let text = config_text(data).map_err(RuntimeConfigError::parsing)?;
 
     let mut reader = Reader {
         parser: Parser::new_from_str(text),
