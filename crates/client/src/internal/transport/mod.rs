@@ -14,14 +14,13 @@
 //! 4. [`header`]: names the enclave to a proxy;
 //! 5. the [`Transport`], whose mode is [`tls`] or [`ehbp`].
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures_util::FutureExt;
 use futures_util::future::{Shared, WeakShared};
 use reqwest::{Request, Response};
 
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 use crate::internal::BoxFuture;
 use crate::internal::enclave::{Enclave, Evidence, fresh_at, freshness_expired};
 use crate::verifier::Verification;
@@ -110,9 +109,32 @@ pub(crate) trait Mode<V>: Send + Sync + 'static {
 /// other than those of the verification that it checked.
 pub(crate) struct State<V> {
     pub(crate) evidence: Arc<V>,
-    pub(crate) bound: Arc<dyn RoundTrip>,
-    /// Whether a key rejection invalidated this state.
-    rejected: AtomicBool,
+    /// The transport bound to the keys of `evidence`, until something
+    /// invalidates the state: a key rejection, or a re-verification that
+    /// fails with an attestation error. Invalidation drops it, so that a
+    /// binding's idle connections close at once, and no new request can
+    /// reach them. A request in flight holds a reference of its own.
+    bound: Mutex<Option<Arc<dyn RoundTrip>>>,
+}
+
+impl<V> State<V> {
+    /// The bound transport, or `None` once the state has been invalidated.
+    /// The lock is never held across an await, and every write leaves it
+    /// consistent, so a lock that a panicking holder poisoned is still
+    /// usable.
+    fn bound(&self) -> MutexGuard<'_, Option<Arc<dyn RoundTrip>>> {
+        match self.bound.lock() {
+            Ok(bound) => bound,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Invalidates the state for good and drops its binding.
+    fn invalidate(&self) {
+        let retired = self.bound().take();
+        // The binding is dropped outside the lock.
+        drop(retired);
+    }
 }
 
 /// The verification in progress, shared by every caller that waits for it.
@@ -135,14 +157,21 @@ type WeakRefresh = WeakShared<BoxFuture<Result<(), Error>>>;
 /// - **Publication.** A new state is published only after the mode has
 ///   bound a transport to it and the evidence is still fresh at that
 ///   moment; evidence that expired meanwhile is an attestation error and
-///   publishes nothing. A failed verification keeps the previous state,
-///   and is not remembered: the next caller verifies again.
-/// - **Retirement.** Publishing replaces the bound transport. Requests in
-///   flight finish on the old one, which is dropped when the last of them
-///   is done.
+///   publishes nothing. A failed verification is not remembered: the next
+///   caller verifies again.
+/// - **Failure.** A verification that fails with an attestation error
+///   invalidates the state that it was replacing, so that no request that
+///   starts afterwards is sent under it, even while it is fresh: the next
+///   request verifies first. A network or a configuration error, or a
+///   verification that every caller dropped, keeps the previous state,
+///   which stays usable until it expires or is invalidated.
+/// - **Retirement.** Publishing or invalidating drops the bound transport
+///   of the previous state. Requests in flight finish on it, and it is
+///   gone once the last of them is done.
 /// - **Rejection.** A key rejection invalidates the state that the request
 ///   was sent under, not the current one, so a late rejection cannot retire
-///   a newer verification.
+///   a newer verification. A failed verification likewise invalidates only
+///   the state that it was replacing.
 ///
 /// The transport is a handle: a clone shares the same state.
 pub(crate) struct Transport<V = Verification> {
@@ -191,11 +220,14 @@ impl<V: Evidence> Inner<V> {
         }
     }
 
-    /// Whether `state` authorizes a request now: no key rejection has
-    /// invalidated it, and its evidence is before its deadline.
-    fn valid(&self, state: &State<V>) -> bool {
-        !state.rejected.load(Ordering::SeqCst)
-            && fresh_at(state.evidence.as_ref(), (self.enclave.clock())())
+    /// The transport bound to `state` if the state authorizes a request
+    /// now: nothing has invalidated it, and its evidence is before its
+    /// deadline.
+    fn valid(&self, state: &State<V>) -> Option<Arc<dyn RoundTrip>> {
+        if !fresh_at(state.evidence.as_ref(), (self.enclave.clock())()) {
+            return None;
+        }
+        state.bound().clone()
     }
 
     /// Verifies the enclave, binds the mode to the result and makes sure
@@ -209,11 +241,19 @@ impl<V: Evidence> Inner<V> {
         new_state(self.mode.as_ref(), self.enclave.clock(), evidence)
     }
 
-    /// One shared verification, numbered `id`: verifies, binds, and
+    /// One shared verification, numbered `id`, of an enclave whose last
+    /// successful verification is `replacing`: verifies, binds, and
     /// publishes the new state if it is still fresh. Whatever the outcome,
     /// it removes itself from the slot before it completes, so that no
     /// later caller is handed a finished verification.
-    async fn refresh(self: Arc<Self>, id: u64) -> Result<(), Error> {
+    ///
+    /// An attestation error invalidates `replacing`: a request that starts
+    /// afterwards is not sent under it, but waits for a verification of
+    /// its own. Any other error, a network or a configuration error,
+    /// leaves `replacing` as valid as it was. A dropped verification
+    /// touches nothing. Only `replacing` is invalidated, never a state
+    /// that was published after it.
+    async fn refresh(self: Arc<Self>, id: u64, replacing: Arc<State<V>>) -> Result<(), Error> {
         let result = self.fresh_state(true).await;
         let mut slot = self.slot();
         if slot
@@ -223,13 +263,29 @@ impl<V: Evidence> Inner<V> {
         {
             slot.refresh = None;
         }
-        let state = result?;
         // Binding, or waiting for the slot, can outlast the deadline.
-        if !self.valid(&state) {
-            return Err(freshness_expired());
+        let result = result.and_then(|state| match self.valid(&state) {
+            Some(_) => Ok(state),
+            None => Err(freshness_expired()),
+        });
+        match result {
+            Ok(state) => {
+                slot.state = state;
+                Ok(())
+            }
+            Err(error) => {
+                // Under the slot's lock, so that no caller can take the
+                // state as valid after the verification has failed.
+                let retired = if error.kind() == ErrorKind::Attestation {
+                    replacing.bound().take()
+                } else {
+                    None
+                };
+                drop(slot);
+                drop(retired);
+                Err(error)
+            }
         }
-        slot.state = state;
-        Ok(())
     }
 }
 
@@ -246,8 +302,7 @@ fn new_state<V: Evidence>(
     }
     Ok(Arc::new(State {
         evidence: Arc::new(evidence),
-        bound,
-        rejected: AtomicBool::new(false),
+        bound: Mutex::new(Some(bound)),
     }))
 }
 
@@ -288,39 +343,46 @@ impl<V: Evidence> Transport<V> {
     }
 
     /// The last successful verification, unchecked: it may have expired or
-    /// been rejected.
+    /// been invalidated.
     pub(crate) fn current(&self) -> Arc<V> {
         Arc::clone(&self.inner.slot().state.evidence)
     }
 
     /// A verification that is valid now, verifying first only if the
-    /// current one has expired or was rejected. `Ok` means that requests
+    /// current one has expired or was invalidated. `Ok` means that requests
     /// can be sent under it.
     ///
     /// Dropping the future leaves the current state as it is; see the type
     /// for what happens to a verification in progress.
     pub(crate) async fn ensure_verified(&self) -> Result<Arc<V>, Error> {
-        let state = self.verified(false).await?;
+        let (state, _) = self.verified(false).await?;
         Ok(Arc::clone(&state.evidence))
     }
 
     /// Verifies again even if the current verification is still valid, and
-    /// returns a verification that is valid now. A failure keeps the
-    /// current state, which stays usable until it expires or is rejected.
+    /// returns a verification that is valid now.
+    ///
+    /// A failure with an attestation error invalidates the current state,
+    /// and drops its binding: the next request verifies again, and is not
+    /// sent if that fails too. Any other failure keeps the current state,
+    /// which stays usable until it expires or is invalidated.
     pub(crate) async fn reverify(&self) -> Result<Arc<V>, Error> {
-        let state = self.verified(true).await?;
+        let (state, _) = self.verified(true).await?;
         Ok(Arc::clone(&state.evidence))
     }
 
-    /// A valid state. With `force`, or when the current state is not
-    /// valid, the caller first waits for a verification: the one in
-    /// progress, or a new one.
-    async fn verified(&self, mut force: bool) -> Result<Arc<State<V>>, Error> {
+    /// A valid state and the transport bound to it. With `force`, or when
+    /// the current state is not valid, the caller first waits for a
+    /// verification: the one in progress, or a new one.
+    async fn verified(
+        &self,
+        mut force: bool,
+    ) -> Result<(Arc<State<V>>, Arc<dyn RoundTrip>), Error> {
         loop {
             let refresh: Refresh = {
                 let mut slot = self.inner.slot();
-                if !force && self.inner.valid(&slot.state) {
-                    return Ok(Arc::clone(&slot.state));
+                if !force && let Some(bound) = self.inner.valid(&slot.state) {
+                    return Ok((Arc::clone(&slot.state), bound));
                 }
                 let running = slot.refresh.as_ref().and_then(|(_, weak)| weak.upgrade());
                 match running {
@@ -328,8 +390,9 @@ impl<V: Evidence> Transport<V> {
                     None => {
                         let id = slot.next_refresh;
                         slot.next_refresh = id.wrapping_add(1);
+                        let replacing = Arc::clone(&slot.state);
                         let future: BoxFuture<Result<(), Error>> =
-                            Box::pin(Arc::clone(&self.inner).refresh(id));
+                            Box::pin(Arc::clone(&self.inner).refresh(id, replacing));
                         let refresh = future.shared();
                         slot.refresh = refresh.downgrade().map(|weak| (id, weak));
                         refresh
@@ -337,8 +400,9 @@ impl<V: Evidence> Transport<V> {
                 }
             };
             refresh.await?;
-            // A request can reject the new state before this caller wakes,
-            // so the slot is read again instead of trusting the result.
+            // A request can invalidate the new state before this caller
+            // wakes, so the slot is read again instead of trusting the
+            // result.
             force = false;
         }
     }
@@ -357,15 +421,15 @@ impl<V: Evidence> RoundTrip for Transport<V> {
         let transport = self.clone();
         Box::pin(async move {
             transport.inner.mode.validate_request(&request)?;
-            let state = transport.verified(false).await?;
-            match state.bound.round_trip(request).await {
+            let (state, bound) = transport.verified(false).await?;
+            match bound.round_trip(request).await {
                 Ok(response) => Ok(response),
                 Err(failure) => {
                     let key = match failure.key {
                         KeyFailure::PeerLacksKey => {
                             // The state that the request was sent under,
                             // which may no longer be the current one.
-                            state.rejected.store(true, Ordering::SeqCst);
+                            state.invalidate();
                             KeyFailure::Rejected
                         }
                         // Only this transport vouches for an invalidation.

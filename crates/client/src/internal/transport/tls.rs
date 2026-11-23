@@ -54,8 +54,10 @@ use crate::internal::transport::{Failure, Mode, RoundTrip};
 ///   Every other failure is a network error.
 /// - **Retirement.** A binding owns its `reqwest::Client` and with it its
 ///   connection pool. The transport drops the binding when a newer
-///   verification replaces it; requests in flight on it finish, and its
-///   idle connections close with it. No connection is shared between two
+///   verification replaces it, or when its verification is invalidated by
+///   a key rejection or by a re-verification that fails with an
+///   attestation error; requests in flight on it finish, and its idle
+///   connections close with it. No connection is shared between two
 ///   bindings.
 pub(crate) struct TlsMode {
     roots: Arc<RootCertStore>,

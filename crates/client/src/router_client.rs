@@ -64,13 +64,13 @@ impl RouterHttpClient {
     }
 
     /// The last successful verification of the router, without checking
-    /// it: it may have expired or been rejected since.
+    /// it: it may have expired or been discarded since.
     pub fn current(&self) -> Arc<Verification> {
         self.inner.current()
     }
 
     /// Returns a verification of the router that is valid now, verifying
-    /// first only if the current one has expired or was rejected. The
+    /// first only if the current one has expired or was discarded. The
     /// behaviour, the errors and the cancel safety are those of
     /// [`EnclaveHttpClient::ensure_verified`](crate::EnclaveHttpClient::ensure_verified).
     pub async fn ensure_verified(&self) -> Result<Arc<Verification>, Error> {
@@ -78,9 +78,13 @@ impl RouterHttpClient {
     }
 
     /// Verifies the router again even if the current verification is still
-    /// valid. The behaviour, the errors and the cancel safety are those of
+    /// valid. It verifies the same router host and does not run discovery
+    /// again. The behaviour, the errors and the cancel safety are those of
     /// [`EnclaveHttpClient::reverify`](crate::EnclaveHttpClient::reverify):
-    /// a dropped or failed `reverify` leaves the previous binding in place.
+    /// a failure with an attestation error discards the previous
+    /// verification, so that the next request verifies the router again; a
+    /// dropped `reverify`, or one that fails with a network or a
+    /// configuration error, leaves the previous verification in place.
     pub async fn reverify(&self) -> Result<Arc<Verification>, Error> {
         self.inner.reverify().await
     }

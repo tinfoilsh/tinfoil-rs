@@ -1034,7 +1034,12 @@ struct Fixture {
 /// A transport in the TLS mode whose verifications yield `evidence` in
 /// order.
 async fn transport(evidence: Vec<Record>) -> Fixture {
-    let script = Script::new(evidence.into_iter().map(|e| Step::Ready(Ok(e))));
+    transport_with(evidence.into_iter().map(|e| Step::Ready(Ok(e))).collect()).await
+}
+
+/// A transport in the TLS mode whose verifications take `steps` in order.
+async fn transport_with(steps: Vec<Step>) -> Fixture {
+    let script = Script::new(steps);
     let enclave = Enclave::from_source("127.0.0.1", script.source(), None, tokio_clock());
     let transport = Transport::connect(enclave, Arc::new(mode()), true)
         .await
@@ -1121,6 +1126,70 @@ async fn a_new_verification_moves_requests_to_a_new_connection() {
         "the replaced binding's connection closes",
     )
     .await;
+}
+
+/// Evidence that endorses no TLS key: the mode cannot bind to it, which is
+/// an attestation error.
+fn keyless(name: &'static str) -> Record {
+    Record {
+        tls: None,
+        ..evidence(name, &LEAF_A)
+    }
+}
+
+#[tokio::test]
+async fn a_reverify_that_fails_attestation_closes_the_old_connection_and_the_next_request_opens_a_new_one()
+ {
+    let server = serve(&LEAF_A, &KEY_A, ok()).await;
+    let f = transport_with(vec![
+        Step::Ready(Ok(evidence("first", &LEAF_A))),
+        Step::Ready(Ok(keyless("unbindable"))),
+        Step::Ready(Ok(evidence("second", &LEAF_A))),
+    ])
+    .await;
+    let response = f.transport.send(get(&server, "/1")).await.unwrap();
+    response.body().await.unwrap();
+    assert_eq!(server.accepted(), 1);
+
+    let error = f.transport.reverify().await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Attestation);
+    // The verification still had an hour left, but its idle connection is
+    // closed, and no request can reach it.
+    eventually(
+        || server.closed() == 1,
+        "the discarded binding's connection closes",
+    )
+    .await;
+
+    // The next request verifies first and goes out over a new connection.
+    let response = f.transport.send(get(&server, "/2")).await.unwrap();
+    assert_eq!(response.body().await.unwrap(), "/2");
+    assert_eq!(f.script.calls(), 3);
+    assert_eq!(f.transport.current().name, "second");
+    assert_eq!(server.accepted(), 2);
+    assert_eq!(server.requests(), ["GET /1", "GET /2"]);
+}
+
+#[tokio::test]
+async fn a_reverify_that_fails_with_a_network_error_keeps_the_old_connection_in_use() {
+    let server = serve(&LEAF_A, &KEY_A, ok()).await;
+    let f = transport_with(vec![
+        Step::Ready(Ok(evidence("first", &LEAF_A))),
+        Step::Ready(Err(Error::network("down"))),
+        Step::Ready(Err(Error::network("still down"))),
+    ])
+    .await;
+    let response = f.transport.send(get(&server, "/1")).await.unwrap();
+    response.body().await.unwrap();
+
+    let error = f.transport.reverify().await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Network);
+
+    let response = f.transport.send(get(&server, "/2")).await.unwrap();
+    assert_eq!(response.body().await.unwrap(), "/2");
+    assert_eq!(f.script.calls(), 3);
+    assert_eq!(server.accepted(), 1);
+    assert_eq!(server.closed(), 0);
 }
 
 #[tokio::test]

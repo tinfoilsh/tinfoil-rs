@@ -63,7 +63,7 @@ impl AttestedHttpClient {
     }
 
     /// A verification that is valid now, verifying first only if the
-    /// current one has expired or was rejected. The behaviour, the errors
+    /// current one has expired or was discarded. The behaviour, the errors
     /// and the cancel safety are those of
     /// [`EnclaveHttpClient::ensure_verified`].
     pub async fn ensure_verified(&self) -> Result<Arc<Verification>, Error> {

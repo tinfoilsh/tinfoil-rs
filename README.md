@@ -129,7 +129,7 @@ The same name can belong to different owners as a repository and as a project, s
 
 `RouterHttpClient::connect()` takes no host: it tries the routers of Tinfoil's published list in a random order and keeps the first that passes verification, or else `inference.tinfoil.sh`.
 
-On every client, `current()` returns the last successful verification without checking it, `ensure_verified()` returns one that is valid now (verifying first if needed), and `reverify()` verifies again unconditionally. On the OpenAI client, `http_client()` returns the HTTP client underneath as an `AttestedHttpClient`, which has these methods and the request methods; match on it for the concrete client.
+On every client, `current()` returns the last successful verification without checking it, `ensure_verified()` returns one that is valid now (verifying first if needed), and `reverify()` verifies again unconditionally. When `reverify()` fails with an attestation error, the client discards the previous verification even if it is still fresh, and closes its idle connections: the next request verifies again, and is not sent if that verification fails too. A network or a configuration error leaves the previous verification in place until it expires. On the OpenAI client, `http_client()` returns the HTTP client underneath as an `AttestedHttpClient`, which has these methods and the request methods; match on it for the concrete client.
 
 Redirects are not followed on attested requests: a `3xx` response is returned to the caller, except in the EHBP mode, where one that answers a sealed request fails the request.
 

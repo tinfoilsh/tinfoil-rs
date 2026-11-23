@@ -105,7 +105,7 @@ impl EnclaveHttpClient {
     }
 
     /// The last successful verification, without checking it: it may have
-    /// expired or been rejected since. Use
+    /// expired or been discarded since. Use
     /// [`ensure_verified`](Self::ensure_verified) for one that is valid
     /// now. A failed re-verification does not change it.
     pub fn current(&self) -> Arc<Verification> {
@@ -113,7 +113,7 @@ impl EnclaveHttpClient {
     }
 
     /// Returns a verification that is valid now, verifying first only if
-    /// the current one has expired or was rejected. `Ok` means that
+    /// the current one has expired or was discarded. `Ok` means that
     /// requests can be sent: the TLS pin or the HPKE key is in place.
     ///
     /// A verification is one fetch of the enclave's attestation document
@@ -154,12 +154,28 @@ impl EnclaveHttpClient {
     ///
     /// On success the client's traffic moves to the keys of the new
     /// verification; requests in flight finish on the connections that
-    /// they started on. On failure the previous verification stays in
-    /// place, and stays valid until it expires or is rejected.
+    /// they started on.
     ///
-    /// The errors and the cancel safety are those of
-    /// [`ensure_verified`](Self::ensure_verified): a dropped `reverify`
-    /// leaves the previous binding in place.
+    /// On failure the error is returned, and what happens to the previous
+    /// verification depends on its kind:
+    ///
+    /// - [`ErrorKind::Attestation`]: the previous verification is
+    ///   discarded, even if it is still fresh, and its idle connections are
+    ///   closed. No request that starts afterwards is sent under it: the
+    ///   next request, or [`ensure_verified`](Self::ensure_verified),
+    ///   verifies the enclave again, and fails without sending anything if
+    ///   that verification fails too. Requests in flight finish.
+    /// - [`ErrorKind::Network`], including a deadline from the `timeout`
+    ///   option, or [`ErrorKind::Configuration`]: the previous verification
+    ///   stays in place, and stays valid until it expires or is discarded.
+    ///
+    /// The errors are those of [`ensure_verified`](Self::ensure_verified),
+    /// and so is the cancel safety: a dropped `reverify` leaves the
+    /// previous verification in place.
+    ///
+    /// [`ErrorKind::Attestation`]: crate::ErrorKind::Attestation
+    /// [`ErrorKind::Network`]: crate::ErrorKind::Network
+    /// [`ErrorKind::Configuration`]: crate::ErrorKind::Configuration
     pub async fn reverify(&self) -> Result<Arc<Verification>, Error> {
         self.inner.reverify().await
     }
