@@ -369,8 +369,9 @@ async fn evidence_that_expires_while_the_mode_binds_is_not_published() {
         "{error}"
     );
     assert_eq!(transport.current().name, "a");
-    // The binding that was never published is retired.
-    assert_eq!(mode.retired(), ["b"]);
+    // The binding that was never published is retired, and so is the one
+    // that it was to replace: the failure is an attestation error.
+    assert_eq!(mode.retired(), ["b", "a"]);
 }
 
 // Verifying again on request.
@@ -385,7 +386,7 @@ async fn reverify_verifies_even_when_the_current_verification_is_valid() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_failed_reverify_keeps_the_previous_binding_in_use() {
+async fn a_reverify_that_fails_with_a_network_error_keeps_the_previous_binding_in_use() {
     let f = connected(|_| {
         vec![
             Step::Ready(Err(Error::network("down"))),
@@ -410,11 +411,72 @@ async fn a_failed_reverify_keeps_the_previous_binding_in_use() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_failed_bind_keeps_the_previous_binding_in_use() {
+async fn a_reverify_that_fails_with_a_configuration_error_keeps_the_previous_binding_in_use() {
+    let f = connected(|_| vec![Step::Ready(Err(Error::configuration("refused")))]).await;
+    let error = f.transport.reverify().await.expect_err("fails");
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert_eq!(served_by(&f.transport).await, "a");
+    // A configuration error is not tried again.
+    assert_eq!(f.script.calls(), 2);
+    assert!(f.mode.retired().is_empty());
+}
+
+/// Two attestation failures: a verification and its one retry.
+fn rejected_twice() -> [Step; 2] {
+    [
+        Step::Ready(Err(Error::attestation("rejected"))),
+        Step::Ready(Err(Error::attestation("rejected again"))),
+    ]
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reverify_that_fails_attestation_discards_a_fresh_verification() {
+    let f = connected(|clock| {
+        let mut all = Vec::from(rejected_twice());
+        all.push(ok("b", clock, HOUR));
+        all
+    })
+    .await;
+    let error = f.transport.reverify().await.expect_err("rejected");
+    assert_eq!(error.to_string(), "attestation error: rejected again");
+    assert_eq!(f.script.calls(), 3);
+    // The last successful verification is still reported, but its binding
+    // is gone, although it had an hour left.
+    assert_eq!(f.transport.current().name, "a");
+    assert_eq!(f.mode.retired(), ["a"]);
+
+    // The next request verifies first, and goes out under the new keys.
+    assert_eq!(served_by(&f.transport).await, "b");
+    assert_eq!(f.script.calls(), 4);
+    assert_eq!(f.mode.sent(), ["b"]);
+    assert_eq!(f.transport.current().name, "b");
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_a_reverify_that_fails_attestation_a_request_whose_verification_fails_sends_nothing()
+{
+    let f = connected(|_| {
+        let mut all = Vec::from(rejected_twice());
+        all.extend(rejected_twice());
+        all
+    })
+    .await;
+    f.transport.reverify().await.expect_err("rejected");
+
+    let failure = f.transport.round_trip(request()).await.expect_err("fails");
+    assert_eq!(failure.error.kind(), ErrorKind::Attestation);
+    assert_eq!(failure.key, KeyFailure::None);
+    assert!(f.mode.sent().is_empty());
+    assert_eq!(f.script.calls(), 5);
+    assert!(f.transport.ensure_verified().await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_bind_discards_the_previous_binding() {
     let f = connected(|clock| {
         let mut keyless = record("keyless", clock, HOUR);
         keyless.tls = None;
-        vec![Step::Ready(Ok(keyless))]
+        vec![Step::Ready(Ok(keyless)), ok("b", clock, HOUR)]
     })
     .await;
     let error = f.transport.reverify().await.expect_err("cannot bind");
@@ -423,7 +485,31 @@ async fn a_failed_bind_keeps_the_previous_binding_in_use() {
         "attestation error: the evidence endorses no key"
     );
     assert_eq!(f.transport.current().name, "a");
-    assert_eq!(served_by(&f.transport).await, "a");
+    assert_eq!(f.mode.retired(), ["a"]);
+    assert_eq!(served_by(&f.transport).await, "b");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_verification_discards_only_the_state_that_it_was_replacing() {
+    // Verifications are shared, so a newer state cannot be published while
+    // one runs; the refresh is therefore called directly, with a state
+    // that a newer one has already replaced.
+    let f = connected(|clock| {
+        let mut all = vec![ok("b", clock, HOUR)];
+        all.extend(rejected_twice());
+        all
+    })
+    .await;
+    let stale = Arc::clone(&f.transport.inner.slot().state);
+    assert_eq!(f.transport.reverify().await.expect("verified").name, "b");
+
+    let error = Arc::clone(&f.transport.inner)
+        .refresh(u64::MAX, stale)
+        .await
+        .expect_err("rejected");
+    assert_eq!(error.kind(), ErrorKind::Attestation);
+    assert_eq!(served_by(&f.transport).await, "b");
+    assert_eq!(f.script.calls(), 4);
 }
 
 // One verification at a time.
@@ -760,9 +846,10 @@ async fn a_key_rejection_invalidates_the_verification_and_the_next_request_verif
     assert_eq!(failure.key, KeyFailure::Rejected);
     assert_eq!(failure.error.kind(), ErrorKind::Attestation);
     // The last successful verification is still reported, and nothing has
-    // been verified yet.
+    // been verified yet, but the rejected binding is gone.
     assert_eq!(f.transport.current().name, "a");
     assert_eq!(f.script.calls(), 1);
+    assert_eq!(f.mode.retired(), ["a"]);
 
     assert_eq!(served_by(&f.transport).await, "b");
     assert_eq!(f.script.calls(), 2);

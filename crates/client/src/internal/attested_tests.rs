@@ -977,6 +977,112 @@ async fn a_failed_reverification_fails_the_request_and_sends_nothing() {
     .await
 }
 
+/// Two attestation failures: a verification and its one retry.
+fn rejected_twice() -> [Step; 2] {
+    [
+        Step::Ready(Err(Error::attestation("rejected"))),
+        Step::Ready(Err(Error::attestation("rejected again"))),
+    ]
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_a_reverify_that_fails_attestation_the_next_request_verifies_again() {
+    unstuck(async {
+        let mut steps = vec![ready("first")];
+        steps.extend(rejected_twice());
+        steps.push(later("second"));
+        let f = fake(steps, settings(), |_| Answer::Text("ok")).await;
+
+        let error = f.client.reverify().await.expect_err("rejected");
+        assert_eq!(error.kind(), ErrorKind::Attestation);
+        // "first" is fresh for another hour, but it is not used again.
+        get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect("verified by the request");
+        assert_eq!(f.script.calls(), 4);
+        assert_eq!(f.bindings(), ["second"]);
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_a_reverify_that_fails_attestation_a_request_that_cannot_verify_sends_nothing() {
+    unstuck(async {
+        let mut steps = vec![ready("first")];
+        steps.extend(rejected_twice());
+        steps.extend(rejected_twice());
+        let f = fake(steps, settings(), |_| Answer::Text("ok")).await;
+
+        f.client.reverify().await.expect_err("rejected");
+        let error = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect_err("not verified");
+        assert_eq!(error.kind(), ErrorKind::Attestation);
+        assert_eq!(f.script.calls(), 5);
+        assert!(f.sent().is_empty());
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_a_reverify_that_fails_with_a_network_error_requests_go_on_under_the_cached_verification()
+ {
+    unstuck(async {
+        let f = fake(
+            vec![
+                ready("first"),
+                Step::Ready(Err(Error::network("unreachable"))),
+                Step::Ready(Err(Error::network("still unreachable"))),
+            ],
+            settings(),
+            |_| Answer::Text("ok"),
+        )
+        .await;
+
+        let error = f.client.reverify().await.expect_err("unreachable");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect("sent under the cached verification");
+        assert_eq!(f.script.calls(), 3);
+        assert_eq!(f.bindings(), ["first"]);
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_a_key_rejection_whose_verification_fails_attestation_the_next_request_verifies_again()
+ {
+    unstuck(async {
+        let mut steps = vec![ready("first")];
+        steps.extend(rejected_twice());
+        steps.push(later("second"));
+        let f = fake(steps, settings(), |sent| match sent.binding {
+            "first" => Answer::LacksKey,
+            _ => Answer::Text("ok"),
+        })
+        .await;
+
+        let error = get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect_err("the replay could not be verified");
+        assert_eq!(error.kind(), ErrorKind::Attestation);
+        assert_eq!(f.bindings(), ["first"]);
+
+        get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect("verified by the request");
+        assert_eq!(f.script.calls(), 4);
+        assert_eq!(f.bindings(), ["first", "second"]);
+    })
+    .await
+}
+
 // Concurrency.
 
 #[tokio::test(start_paused = true)]

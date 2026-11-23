@@ -257,8 +257,10 @@ macro_rules! http_request_methods {
             ///    A `Host` header, or a header that the sealed-body protocol
             ///    owns, is refused. These are configuration errors, and they
             ///    never start a verification.
-            /// 2. If the current verification has expired or was rejected,
-            ///    the enclave is verified again first, as
+            /// 2. If the current verification has expired or was discarded
+            ///    (after a key rejection, or after a re-verification that
+            ///    failed with an attestation error), the enclave is
+            ///    verified again first, as
             ///    [`ensure_verified`](Self::ensure_verified) does. A failure
             ///    is the request's error, and nothing is sent.
             /// 3. The request goes out under the keys of that verification.
