@@ -5,7 +5,8 @@
 //! [`sigstore`](crate::sigstore):
 //!
 //! - build provenance: a bundle signed by a pinned GitHub Actions workflow
-//!   identity ([`provenance`], [`runtime`]);
+//!   identity ([`provenance`], [`runtime`]), or by the workflow that a
+//!   config requires of a container image ([`container`]);
 //! - freshness witnesses of the repository-release flow: a bundle signed by
 //!   the witness workflow, dated by the transparency log ([`freshness`]);
 //! - approvals: config endorsements and artifact freshness statements
@@ -18,6 +19,7 @@
 pub mod approval;
 #[cfg(test)]
 mod approval_tests;
+pub mod container;
 pub mod freshness;
 #[cfg(test)]
 mod probe_tests;
@@ -36,6 +38,7 @@ pub use approval::{
     ApprovalVerifier, Artifact, ArtifactKind, ConfigPolicy, ConfigVerified, ConfigVerifier,
     FreshnessPolicy, FreshnessVerified, FreshnessVerifier, PUBLIC_REGISTRY_ID,
 };
+pub use container::Container;
 pub use provenance::{Code, PlatformEndorsements, ProvenanceClient};
 pub use reference::{AuthenticatedArtifact, Reference, WorkflowIdentity, parse_reference};
 pub use runtime::RuntimeArtifact;
@@ -64,6 +67,7 @@ endorsement_error_from!(
     crate::policy::PolicyError,
     crate::runtime::ManifestError,
     crate::runtime::RuntimeConfigError,
+    crate::runtime::ContainerProvenanceError,
     crate::document::collateral::CollateralError,
     crate::canonical::CanonicalError,
 );

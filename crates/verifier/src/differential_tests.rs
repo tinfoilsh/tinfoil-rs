@@ -173,17 +173,33 @@ impl Fixture {
             let input = object(member(object(&fixture), "input"));
             return Some(STANDARD.decode(text(input, "document_b64")).unwrap());
         }
-        let mut document = self.string(index(member(stored, "head"))).to_owned();
+        Some(self.document_with(name, &self.entries(name)))
+    }
+
+    /// The JSON text of each collateral entry of a stored document.
+    pub(crate) fn entries(&self, name: &str) -> Vec<&str> {
+        let stored = object(member(
+            object(member(self.root_object(), "documents")),
+            name,
+        ));
         // A document without collateral has no list of entries.
         let entries = member(stored, "entries").as_array().unwrap_or_default();
-        for (position, entry) in entries.iter().enumerate() {
-            if position > 0 {
-                document.push(',');
-            }
-            document.push_str(self.string(index(entry)));
-        }
-        document.push_str(self.string(index(member(stored, "tail"))));
-        Some(document.into_bytes())
+        entries
+            .iter()
+            .map(|entry| self.string(index(entry)))
+            .collect()
+    }
+
+    /// The bytes of a stored document with `entries` in place of its own
+    /// collateral entries.
+    pub(crate) fn document_with(&self, name: &str, entries: &[&str]) -> Vec<u8> {
+        let stored = object(member(
+            object(member(self.root_object(), "documents")),
+            name,
+        ));
+        let head = self.string(index(member(stored, "head")));
+        let tail = self.string(index(member(stored, "tail")));
+        format!("{head}{}{tail}", entries.join(",")).into_bytes()
     }
 
     fn keys(&self, options: &Object, name: &str) -> Option<Vec<PublicKey>> {

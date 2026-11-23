@@ -36,13 +36,14 @@ use std::time::{Duration, SystemTime};
 use tinfoil_verifier::{
     ATTESTATION_V3_FORMAT, ArtifactTrust, ArtifactVerification, BoxError, CRYPTO_MATERIAL_ID_HPKE,
     CRYPTO_MATERIAL_ID_TLS, CRYPTO_MATERIAL_V1_FORMAT, ConfigAuthorizer, ConfigEndorsement,
-    ConfigTrust, ConfigVerification, CryptoMaterialItem, DEVICE_EVIDENCE_V1_FORMAT, EmbeddedConfig,
-    Error, Expected, KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_SPKI_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT,
-    Layer, Measurement, NONCE_SIZE, NVIDIA_GPU_EVIDENCE_V1_FORMAT, PUBLIC_REGISTRY_ID, Pin, Policy,
-    PublicKey, REGISTER_SIZE, REPORT_DATA_V1_ALGORITHM, Reference, ReferenceSource, Register,
-    RuntimeReference, SEV_SNP_REPORT_V1_FORMAT, SoftwareIdentity, TDX_QUOTE_V1_FORMAT, UsageError,
-    Verification, VerificationError, VerificationMetadata, Verifier, cert_pubkey_fp,
-    crypto_material_data, parse_reference, random_nonce,
+    ConfigTrust, ConfigVerification, ContainerVerification, CryptoMaterialItem,
+    DEVICE_EVIDENCE_V1_FORMAT, EmbeddedConfig, Error, Expected, KEY_SPKI_FP_SHA256_V1_FORMAT,
+    KEY_SPKI_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT, Layer, Measurement, NONCE_SIZE,
+    NVIDIA_GPU_EVIDENCE_V1_FORMAT, PUBLIC_REGISTRY_ID, Pin, Policy, PublicKey, REGISTER_SIZE,
+    REPORT_DATA_V1_ALGORITHM, Reference, ReferenceSource, Register, RuntimeReference,
+    SEV_SNP_REPORT_V1_FORMAT, SoftwareIdentity, TDX_QUOTE_V1_FORMAT, UsageError, Verification,
+    VerificationError, VerificationMetadata, Verifier, cert_pubkey_fp, crypto_material_data,
+    parse_reference, random_nonce,
 };
 
 #[test]
@@ -152,6 +153,12 @@ fn every_public_name_is_importable_and_has_its_signature() {
         let _: (Option<SystemTime>, Option<SystemTime>) =
             (config.approval_time, config.signature_time);
         let _: &Option<String> = &config.registry_id;
+        let _: &Vec<ContainerVerification> = &config.containers;
+    }
+    fn container_fields(container: &ContainerVerification) {
+        let _: (&String, &String) = (&container.container, &container.digest);
+        let _: (&String, &String) = (&container.repository, &container.workflow);
+        let _: (&String, &String) = (&container.git_ref, &container.commit);
     }
     fn artifact_fields(artifact: &ArtifactVerification) {
         let _: ReferenceSource = artifact.source;
@@ -165,7 +172,12 @@ fn every_public_name_is_importable_and_has_its_signature() {
         let _: (&String, &String) = (&identity.name, &identity.version);
         let _: SystemTime = metadata.verified_at;
     }
-    let _ = (config_fields, artifact_fields, metadata_fields);
+    let _ = (
+        config_fields,
+        container_fields,
+        artifact_fields,
+        metadata_fields,
+    );
     let sources = [
         ReferenceSource::Endorsement,
         ReferenceSource::Embedded,

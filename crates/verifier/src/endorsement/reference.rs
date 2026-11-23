@@ -2,6 +2,7 @@
 
 use super::EndorsementError;
 use crate::document::collateral::RUNTIME_REPO;
+use crate::runtime::REF_WILDCARD;
 
 /// The OIDC issuer of GitHub Actions workflow tokens.
 pub const OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
@@ -15,6 +16,10 @@ pub const FRESHNESS_WITNESS_REPO: &str = "tinfoilsh/freshness-witness";
 pub const TINFOIL_ORGANIZATION_ID: &str = "168487856";
 /// The immutable identifier of the runtime repository on GitHub.
 pub const RUNTIME_REPOSITORY_ID: &str = "902195777";
+/// The characters that the wildcard of a ref pattern does not stand for:
+/// what separates the segments of a ref, and what separates a workflow from
+/// its ref in a signing identity.
+const REF_WILDCARD_EXCLUDED: [char; 2] = ['/', '@'];
 
 /// A parsed `owner/name[@tag][@sha256:digest]` release reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,7 +161,7 @@ pub enum WorkflowFile {
     /// characters other than `/` and `@`.
     Any,
     /// Exactly this file name.
-    Named(&'static str),
+    Named(String),
 }
 
 /// Which Git ref the signing workflow must have run at.
@@ -169,6 +174,8 @@ pub enum WorkflowRef {
     PlatformTag,
     /// Exactly this ref.
     Exact(String),
+    /// A ref pattern ([`matches_ref_pattern`]).
+    Pattern(String),
 }
 
 /// The signing certificate identity of a GitHub Actions workflow: the form
@@ -205,7 +212,7 @@ impl WorkflowIdentity {
     pub fn platform_endorsements() -> Self {
         Self {
             repo: PLATFORM_ENDORSEMENTS_REPO.to_string(),
-            file: WorkflowFile::Named("platform-release.yml"),
+            file: WorkflowFile::Named("platform-release.yml".to_string()),
             git_ref: WorkflowRef::PlatformTag,
         }
     }
@@ -215,7 +222,7 @@ impl WorkflowIdentity {
     pub fn freshness_witness() -> Self {
         Self {
             repo: FRESHNESS_WITNESS_REPO.to_string(),
-            file: WorkflowFile::Named("freshness.yml"),
+            file: WorkflowFile::Named("freshness.yml".to_string()),
             git_ref: WorkflowRef::Exact("refs/heads/main".to_string()),
         }
     }
@@ -225,8 +232,19 @@ impl WorkflowIdentity {
     pub fn runtime_release(release_tag: &str) -> Self {
         Self {
             repo: RUNTIME_REPO.to_string(),
-            file: WorkflowFile::Named("release.yml"),
+            file: WorkflowFile::Named("release.yml".to_string()),
             git_ref: WorkflowRef::Exact(format!("refs/tags/{release_tag}")),
+        }
+    }
+
+    /// The identity of the build of a container image: the workflow file
+    /// `workflow` of `repo`, run from a ref that matches `ref_pattern`
+    /// ([`matches_ref_pattern`]).
+    pub fn container_build(repo: &str, workflow: &str, ref_pattern: &str) -> Self {
+        Self {
+            repo: repo.to_string(),
+            file: WorkflowFile::Named(workflow.to_string()),
+            git_ref: WorkflowRef::Pattern(ref_pattern.to_string()),
         }
     }
 
@@ -246,7 +264,7 @@ impl WorkflowIdentity {
         };
         let file_matches = match &self.file {
             WorkflowFile::Any => !file.is_empty() && !file.contains('/'),
-            WorkflowFile::Named(name) => file == *name,
+            WorkflowFile::Named(name) => file == name,
         };
         let ref_matches =
             match &self.git_ref {
@@ -260,9 +278,41 @@ impl WorkflowIdentity {
                             && !version.contains('@')
                     }),
                 WorkflowRef::Exact(exact) => git_ref == exact,
+                WorkflowRef::Pattern(pattern) => matches_ref_pattern(pattern, git_ref),
             };
         file_matches && ref_matches
     }
+}
+
+/// Whether `git_ref` is the ref pattern `pattern` as a whole: each
+/// [`REF_WILDCARD`] of the pattern stands for any run of characters other
+/// than `/` and `@`, which may be empty, and every other character stands
+/// for itself.
+pub fn matches_ref_pattern(pattern: &str, git_ref: &str) -> bool {
+    let is_wildcard_run = |run: &str| !run.contains(REF_WILDCARD_EXCLUDED);
+    let mut literals = pattern.split(REF_WILDCARD);
+    let Some(rest) = literals
+        .next()
+        .and_then(|first| git_ref.strip_prefix(first))
+    else {
+        return false;
+    };
+    // A pattern without a wildcard is the ref itself.
+    let Some(last) = literals.next_back() else {
+        return rest.is_empty();
+    };
+    let Some(mut rest) = rest.strip_suffix(last) else {
+        return false;
+    };
+    // Only the first occurrence of each literal is tried: where a later
+    // one fits, the first one fits too.
+    for literal in literals {
+        match rest.split_once(literal) {
+            Some((run, after)) if is_wildcard_run(run) => rest = after,
+            _ => return false,
+        }
+    }
+    is_wildcard_run(rest)
 }
 
 #[cfg(test)]
@@ -387,6 +437,169 @@ mod tests {
         assert!(!identity.matches(&format!("{prefix}release.yml@refs/tags/v1.2.30")));
         assert!(!identity.matches(&format!("{prefix}release.yml@refs/tags/v1x2.3")));
         assert!(!identity.matches(&format!("{prefix}platform-release.yml@refs/tags/v1.2.3")));
+    }
+
+    #[test]
+    fn a_container_identity_is_one_workflow_at_a_ref_that_matches_a_pattern() {
+        let prefix = "https://github.com/tinfoilsh/inference/.github/workflows/containers.yml@";
+        let identity = |pattern: &str| {
+            WorkflowIdentity::container_build("tinfoilsh/inference", "containers.yml", pattern)
+        };
+        for (pattern, git_ref, want) in [
+            ("refs/tags/vllm-v*", "refs/tags/vllm-v0.34.0", true),
+            ("refs/tags/vllm-v*", "refs/tags/vllm-v", true),
+            ("refs/tags/vllm-v*", "refs/tags/omni-v0.34.0", false),
+            ("refs/tags/vllm-v*", "refs/tags/vllm-v0/34", false),
+            ("refs/tags/vllm-v*", "refs/heads/vllm-v0.34.0", false),
+            (
+                "refs/tags/vllm-v*",
+                "refs/tags/vllm-v0.34.0@refs/heads/main",
+                false,
+            ),
+            ("refs/tags/v1.2.3", "refs/tags/v1.2.3", true),
+            ("refs/tags/v1.2.3", "refs/tags/v1x2x3", false),
+            ("refs/heads/main", "refs/heads/main", true),
+            ("refs/heads/main", "refs/heads/maintenance", false),
+            ("refs/heads/release/*", "refs/heads/release/2026", true),
+            (
+                "refs/heads/release/*",
+                "refs/heads/release/2026/hotfix",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                identity(pattern).matches(&format!("{prefix}{git_ref}")),
+                want,
+                "{pattern} against {git_ref}"
+            );
+        }
+
+        // The name is matched as a whole, and nothing in the repository or
+        // the workflow is a pattern.
+        let tagged = identity("refs/tags/v*");
+        let name = format!("{prefix}refs/tags/v1");
+        assert!(tagged.matches(&name));
+        assert!(!identity("refs/tags/v1").matches(&format!("{name}\n")));
+        assert!(!identity("refs/tags/v1").matches(&format!("{name}.1")));
+        assert!(!tagged.matches(&format!(" {name}")));
+        assert!(!tagged.matches(&format!("x{name}")));
+        assert!(!tagged.matches(&name.replace("containers.yml", "containersxyml")));
+        assert!(!tagged.matches(&name.replace("containers.yml", "dir/containers.yml")));
+        assert!(!tagged.matches(&name.replace("tinfoilsh/inference", "tinfoilsh/inference-fork")));
+        assert!(!tagged.matches(&name.replace("tinfoilsh/inference", "tinfoilshxinference")));
+        assert!(!tagged.matches(&name.replace("https://", "http://")));
+        let pattern = WorkflowIdentity::container_build("tinfoilsh/*", "*.yml", "refs/tags/v1");
+        assert!(!pattern.matches(&name));
+    }
+
+    #[test]
+    fn a_ref_pattern_wildcard_is_a_run_within_one_segment() {
+        for (pattern, git_ref, want) in [
+            ("refs/tags/*", "refs/tags/", true),
+            ("refs/tags/*", "refs/tags/v1", true),
+            ("refs/tags/*", "refs/tags/v1/x", false),
+            ("refs/tags/*", "refs/tags/v1@x", false),
+            // A line break is neither `/` nor `@`, so only a wildcard
+            // stands for one.
+            ("refs/tags/v*", "refs/tags/v1\n", true),
+            ("refs/tags/v*x", "refs/tags/v1x\n", false),
+            ("refs/tags/v1", "refs/tags/v1\n", false),
+            ("refs/tags/v1", "refs/tags/v10", false),
+            ("refs/tags/v1", "xrefs/tags/v1", false),
+            ("refs/tags/v*-rc*", "refs/tags/v1-rc2", true),
+            ("refs/tags/v*-rc*", "refs/tags/v-rc", true),
+            ("refs/tags/v*-rc*", "refs/tags/v1-rc2-rc3", true),
+            ("refs/tags/v*-rc*", "refs/tags/v1", false),
+            ("refs/tags/v*-rc*", "refs/tags/v1/-rc2", false),
+            ("refs/tags/v*-rc*", "refs/tags/v1-rc2/x", false),
+            ("refs/tags/v*-rc", "refs/tags/v1-rc-rc", true),
+            ("refs/tags/v*-rc", "refs/tags/v1-rc-rcx", false),
+            ("refs/tags/*-*-*", "refs/tags/a-b-c", true),
+            ("refs/tags/*-*-*", "refs/tags/a-b", false),
+            ("refs/tags/**", "refs/tags/v1", true),
+            ("refs/tags/**", "refs/tags/v1/x", false),
+            ("refs/heads/*/*", "refs/heads/a/b", true),
+            ("refs/heads/*/*", "refs/heads/a", false),
+            ("refs/heads/*/*", "refs/heads/a/b/c", false),
+            ("refs/heads/*/main", "refs/heads/a/main", true),
+            ("refs/heads/*/main", "refs/heads/a/b/main", false),
+            ("refs/heads/ab*ba", "refs/heads/aba", false),
+            ("refs/heads/ab*ba", "refs/heads/abba", true),
+            ("refs/heads/a.c", "refs/heads/abc", false),
+            ("refs/heads/a+", "refs/heads/aa", false),
+            ("*", "", true),
+            ("", "", true),
+            ("", "x", false),
+        ] {
+            assert_eq!(
+                matches_ref_pattern(pattern, git_ref),
+                want,
+                "{pattern:?} against {git_ref:?}"
+            );
+        }
+    }
+
+    /// A pattern of the greatest length holds some 120 wildcards. Each
+    /// literal is looked for once, so a ref that falls just short of the
+    /// pattern is turned down without trying the ways to share it out
+    /// among the wildcards.
+    #[test]
+    fn a_ref_pattern_of_many_wildcards_is_matched_without_backtracking() {
+        const PREFIX: &str = "refs/tags/";
+        const WILDCARDS: usize = 122;
+        // The longest that a single match may take: far more than one
+        // needs, and far less than trying every split would.
+        const LONGEST_MATCH: std::time::Duration = std::time::Duration::from_secs(1);
+        let pattern = format!("{PREFIX}{}", "*a".repeat(WILDCARDS));
+        assert_eq!(pattern.len(), 254);
+        let of = |run: &str| format!("{PREFIX}{run}");
+        let matched = |pattern: &str, git_ref: &str| {
+            let started = std::time::Instant::now();
+            let matched = matches_ref_pattern(pattern, git_ref);
+            assert!(started.elapsed() < LONGEST_MATCH, "{git_ref}");
+            matched
+        };
+        assert!(matched(&pattern, &of(&"a".repeat(WILDCARDS))));
+        assert!(matched(&pattern, &of(&"xa".repeat(WILDCARDS))));
+        assert!(matched(&pattern, &of(&"a".repeat(4 * WILDCARDS))));
+        for near_miss in [
+            of(&"a".repeat(WILDCARDS - 1)),
+            of(&"xa".repeat(WILDCARDS - 1)),
+            of(&format!("{}b", "a".repeat(4 * WILDCARDS))),
+            of(&format!("{}/a", "a".repeat(4 * WILDCARDS))),
+            of(&format!("{}@a", "a".repeat(4 * WILDCARDS))),
+            of(&format!(
+                "{}b{}",
+                "ab".repeat(WILDCARDS - 1),
+                "b".repeat(WILDCARDS)
+            )),
+            of(&"b".repeat(4 * WILDCARDS)),
+        ] {
+            assert!(!matched(&pattern, &near_miss), "{near_miss}");
+        }
+        // A literal at the end, which every way to share out a long run
+        // would have to reach before failing.
+        let ending = format!("{PREFIX}{}*b", "*a".repeat(WILDCARDS - 1));
+        assert_eq!(ending.len(), 254);
+        assert!(matched(
+            &ending,
+            &of(&format!("{}b", "a".repeat(4 * WILDCARDS)))
+        ));
+        assert!(!matched(&ending, &of(&"a".repeat(4 * WILDCARDS))));
+        assert!(!matched(
+            &ending,
+            &of(&format!("{}c", "a".repeat(4 * WILDCARDS)))
+        ));
+
+        let identity =
+            WorkflowIdentity::container_build("tinfoilsh/inference", "containers.yml", &pattern);
+        let name = |git_ref: &str| {
+            format!(
+                "https://github.com/tinfoilsh/inference/.github/workflows/containers.yml@{git_ref}"
+            )
+        };
+        assert!(identity.matches(&name(&of(&"a".repeat(WILDCARDS)))));
+        assert!(!identity.matches(&name(&of(&"a".repeat(WILDCARDS - 1)))));
     }
 }
 

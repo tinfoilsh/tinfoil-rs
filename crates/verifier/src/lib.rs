@@ -137,8 +137,8 @@ pub use options::{
     ArtifactTrust, ConfigAuthorizer, ConfigEndorsement, ConfigTrust, Policy, PublicKey,
 };
 pub use verification::{
-    ArtifactVerification, ConfigVerification, ReferenceSource, SoftwareIdentity, Verification,
-    VerificationMetadata, crypto_material_data,
+    ArtifactVerification, ConfigVerification, ContainerVerification, ReferenceSource,
+    SoftwareIdentity, Verification, VerificationMetadata, crypto_material_data,
 };
 pub use verifier::{Pin, Verifier, parse_reference};
 

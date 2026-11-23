@@ -30,11 +30,12 @@ use crate::quote::{
     self, ConfigReferenceValues, LegacyReferenceValues, ReferenceValues, VendorRoots,
 };
 use crate::runtime::{
-    MAX_CONFIG_SIZE, Measurements, RuntimeReference, parse_manifest, runtime_from_config,
+    MAX_CONFIG_SIZE, Measurements, RuntimeReference, container_provenance_from_config,
+    parse_manifest, runtime_from_config,
 };
 use crate::verification::{
-    ArtifactVerification, ConfigVerification, ReferenceSource, SoftwareIdentity, Verification,
-    VerificationMetadata,
+    ArtifactVerification, ConfigVerification, ContainerVerification, ReferenceSource,
+    SoftwareIdentity, Verification, VerificationMetadata,
 };
 
 /// The name that a verification records for this SDK.
@@ -120,7 +121,7 @@ impl Default for Verifier {
 
 /// Why the reference values of a document were not accepted.
 #[derive(Debug)]
-enum Refused {
+pub(crate) enum Refused {
     /// The caller's mistake.
     Usage(UsageError),
     /// The caller's config authorizer refused the config.
@@ -885,7 +886,7 @@ impl Verifier {
     /// Resolves the config of a document: the runtime that it pins, its
     /// record, and the time of its approval when an endorsement vouches
     /// for it.
-    fn resolve_config(
+    pub(crate) fn resolve_config(
         &self,
         trust: &Trust,
         document: &Document,
@@ -902,6 +903,7 @@ impl Verifier {
                 approval_time: None,
                 registry_id: None,
                 signature_time: None,
+                containers: Vec::new(),
             };
             return Ok((embedded.runtime.clone(), record, None));
         }
@@ -912,6 +914,7 @@ impl Verifier {
                 .ok_or_else(|| Refused::rejected("config size is outside allowed bounds"))?;
             (authorize.0)(&material).map_err(Refused::Authorizer)?;
             let bytes = material.config();
+            let containers = self.resolve_containers(trust, document, Some(bytes))?;
             let expected = runtime_from_config(bytes)?;
             let record = ConfigVerification {
                 source: ReferenceSource::Policy,
@@ -922,6 +925,7 @@ impl Verifier {
                 approval_time: None,
                 registry_id: None,
                 signature_time: None,
+                containers,
             };
             return Ok((expected, record, None));
         }
@@ -953,6 +957,7 @@ impl Verifier {
             Some(runtime) => runtime,
             None => runtime_from_config(bytes.unwrap_or_default())?,
         };
+        let containers = self.resolve_containers(trust, document, bytes)?;
         let record = ConfigVerification {
             source: ReferenceSource::Endorsement,
             name: Some(approved.name),
@@ -962,8 +967,47 @@ impl Verifier {
             approval_time: Some(system_time(approved.approval_time)?),
             registry_id: approved.registry_id,
             signature_time: approved.signature_time.map(system_time).transpose()?,
+            containers,
         };
         Ok((expected, record, Some(approved.approval_time)))
+    }
+
+    /// Authenticates the build of every container image that the config
+    /// requires provenance of. `config` holds the bytes that are bound to
+    /// the approved digest; a document that leaves them out carries no
+    /// requirement that the verifier can read.
+    fn resolve_containers(
+        &self,
+        trust: &Trust,
+        document: &Document,
+        config: Option<&[u8]>,
+    ) -> Result<Vec<ContainerVerification>, EndorsementError> {
+        let Some(config) = config else {
+            return Ok(Vec::new());
+        };
+        let mut containers = Vec::new();
+        for requirement in container_provenance_from_config(config)? {
+            let name = &requirement.container;
+            let material = document
+                .container_provenance(&requirement.digest)
+                .map_err(|cause| {
+                    EndorsementError::from(cause)
+                        .within(format_args!("container {name:?} requires provenance"))
+                })?;
+            let authenticated = trust
+                .endorsements
+                .authenticate_container(&material.bundle, &requirement)
+                .map_err(|cause| cause.within(format_args!("container {name:?}")))?;
+            containers.push(ContainerVerification {
+                container: requirement.container,
+                digest: authenticated.digest,
+                repository: authenticated.repository,
+                workflow: authenticated.workflow,
+                git_ref: authenticated.git_ref,
+                commit: authenticated.commit,
+            });
+        }
+        Ok(containers)
     }
 
     /// Resolves the runtime that a config pins: its launch measurements

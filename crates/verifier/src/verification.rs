@@ -71,6 +71,30 @@ pub struct ConfigVerification {
     /// The authenticated time of the signature of a certificate-signed
     /// endorsement.
     pub signature_time: Option<SystemTime>,
+    /// The container images whose build the config requires and the
+    /// document proves, in config order. Empty when the config requires
+    /// none, the document does not carry its bytes, or the config is
+    /// embedded.
+    pub containers: Vec<ContainerVerification>,
+}
+
+/// A container image that was built by the GitHub Actions workflow that
+/// its config requires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContainerVerification {
+    /// The container's name in the config.
+    pub container: String,
+    /// The SHA-256 of the image, lowercase hex.
+    pub digest: String,
+    /// The repository whose workflow built the image, `owner/name`.
+    pub repository: String,
+    /// The file name of the workflow.
+    pub workflow: String,
+    /// The ref that the workflow ran at, such as `refs/tags/v1.2.3`.
+    pub git_ref: String,
+    /// The commit that the workflow ran at.
+    pub commit: String,
 }
 
 /// Reference values that a verification accepted, and their authority: the
@@ -245,7 +269,8 @@ impl Verification {
     /// - `crypto_material`: an array of `id`, `format`, `data`;
     /// - `config`: `source`, `name`, `digest`, `reference`,
     ///   `signing_key_hint`, `approval_time`, `registry_id`,
-    ///   `signature_time`;
+    ///   `signature_time`, and `containers`, an array of `container`,
+    ///   `digest`, `repository`, `workflow`, `ref`, `commit`;
     /// - `runtime`, `platform`: `source`, `repo`, `tag`, `digest`, `name`,
     ///   `commit`, `approval_time`;
     /// - `freshness_expires_at`;
@@ -482,7 +507,22 @@ fn config_record(config: &ConfigVerification) -> Json {
     push_time(&mut members, "approval_time", config.approval_time);
     push_text(&mut members, "registry_id", config.registry_id.as_deref());
     push_time(&mut members, "signature_time", config.signature_time);
+    if !config.containers.is_empty() {
+        let containers = config.containers.iter().map(container_record).collect();
+        members.push(("containers", Json::Array(containers)));
+    }
     Json::Object(members)
+}
+
+fn container_record(container: &ContainerVerification) -> Json {
+    Json::Object(vec![
+        ("container", Json::text(&container.container)),
+        ("digest", Json::text(&container.digest)),
+        ("repository", Json::text(&container.repository)),
+        ("workflow", Json::text(&container.workflow)),
+        ("ref", Json::text(&container.git_ref)),
+        ("commit", Json::text(&container.commit)),
+    ])
 }
 
 fn artifact_record(artifact: &ArtifactVerification) -> Json {

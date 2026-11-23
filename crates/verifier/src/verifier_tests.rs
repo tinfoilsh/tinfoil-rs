@@ -18,8 +18,8 @@ use crate::json;
 use crate::measurement::{Expected, Measurement, REGISTER_SIZE, Register};
 use crate::quote::{AssemblyError, QuoteError};
 use crate::verification::{
-    ArtifactVerification, ConfigVerification, ReferenceSource, SoftwareIdentity, Verification,
-    VerificationMetadata,
+    ArtifactVerification, ConfigVerification, ContainerVerification, ReferenceSource,
+    SoftwareIdentity, Verification, VerificationMetadata,
 };
 use crate::verifier::freshness_expiration;
 use crate::{
@@ -1170,6 +1170,185 @@ fn a_config_authorizer_sees_the_material_of_the_document() {
     }
 }
 
+/// The published build attestation of the image with
+/// [`CONTAINER_DIGEST`], which the embedded Sigstore root authenticates.
+const CONTAINER_BUNDLE: &str =
+    include_str!("../tests/data/endorsement/container_provenance_bundle.json");
+const CONTAINER_DIGEST: &str = "85306e3ab312a2d80466e901081e855cc53f21c4802c638f861e6ef31ba4f5d1";
+
+#[test]
+fn a_config_that_requires_container_provenance_needs_the_proof_in_the_document() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    use crate::document::collateral::{
+        CONFIG_ID, CONFIG_V1_FORMAT, CONTAINER_PROVENANCE_V1_FORMAT,
+    };
+    use crate::endorsement::ConfigPolicy;
+    use crate::verifier::Refused;
+
+    const PROVENANCE: &str = "    provenance:
+      github:
+        repository: tinfoilsh/measure-image-action
+        repository_id: 924941172
+        workflow: build.yml
+        ref: refs/tags/build-v*
+";
+    let container = |name: &str| {
+        format!(
+            "  - name: {name}\n    image: ghcr.io/tinfoilsh/measure-image-action@sha256:{CONTAINER_DIGEST}\n"
+        )
+    };
+    let proof = |id: &str, digest: &str| {
+        format!(
+            r#"{{"id":"{id}","role":"reference-values","format":"{CONTAINER_PROVENANCE_V1_FORMAT}","data":{{"digest":"{digest}","sigstore_bundle":{CONTAINER_BUNDLE}}}}}"#
+        )
+    };
+
+    // The recorded document carries a config that the caller's authorizer
+    // accepts, for a verifier that embeds the runtime and the platform.
+    // Its collateral is not bound to the hardware, so the config and the
+    // proofs are put in here.
+    let fixture = Fixture::load();
+    let case = fixture.case("config-sev/authorizer-accept");
+    let stored = text(case, "doc");
+    let (config_trust, policy) = authorizer(accept);
+    let mut verifier = Verifier::with_test_roots(
+        config_trust,
+        policy,
+        None,
+        fixture.root(text(case, "amd")),
+        None,
+    )
+    .unwrap();
+    verifier.embedded = fixture.verifier(case).unwrap().embedded;
+    let is_config = |entry: &str| entry.contains(&format!("{CONFIG_ID:?}"));
+    let recorded_config = {
+        let entries = fixture.entries(stored);
+        let entry = entries.into_iter().find(|entry| is_config(entry)).unwrap();
+        let entry = json::parse(entry.as_bytes()).unwrap();
+        let data = entry.as_object().unwrap().get("data").unwrap();
+        let config = data.as_object().unwrap().get("config_base64").unwrap();
+        STANDARD.decode(config.as_str().unwrap()).unwrap()
+    };
+    let document = |containers: &str, proofs: &[String]| {
+        let config = [
+            &recorded_config[..],
+            b"containers:\n",
+            containers.as_bytes(),
+        ]
+        .concat();
+        let config = format!(
+            r#"{{"id":"{CONFIG_ID}","role":"reference-values","format":"{CONFIG_V1_FORMAT}","data":{{"config_base64":"{}"}}}}"#,
+            STANDARD.encode(config)
+        );
+        let mut entries: Vec<&str> = fixture.entries(stored);
+        entries.retain(|entry| !is_config(entry));
+        entries.push(&config);
+        entries.extend(proofs.iter().map(String::as_str));
+        fixture.document_with(stored, &entries)
+    };
+    // The config of a document as the provenance layer resolves it.
+    let resolve = |containers: &str, proofs: &[String]| {
+        let document =
+            crate::document::parse(&document(containers, proofs), &Fixture::nonce(case)).unwrap();
+        let policy = ConfigPolicy {
+            identity: None,
+            revision: None,
+            digest: None,
+            now: instant(case),
+            max_age: None,
+            future_skew: None,
+            registry_ids: None,
+        };
+        match verifier.resolve_config(verifier.trust.as_ref().unwrap(), &document, &policy) {
+            Ok((_, config, _)) => Ok(config),
+            Err(Refused::Rejected(error)) => Err(error.to_string()),
+            Err(other) => panic!("want a config or a rejection, got {other:?}"),
+        }
+    };
+    // The whole verification of a document, which a changed config cannot
+    // pass: the hardware binds the recorded one.
+    let rejection = |containers: &str, proofs: &[String]| {
+        let result = verifier.verify_at(
+            &document(containers, proofs),
+            &Fixture::nonce(case),
+            &Pin::none(),
+            instant(case),
+        );
+        match result {
+            Err(Error::Verification(rejected)) => rejected,
+            other => panic!("want a rejection, got {other:?}"),
+        }
+    };
+
+    let proven = format!(
+        "{}{PROVENANCE}{}{PROVENANCE}{}",
+        container("first"),
+        container("second"),
+        container("unconstrained")
+    );
+    let proofs = [proof("container", CONTAINER_DIGEST)];
+    let config = resolve(&proven, &proofs).unwrap();
+    let verified = |name: &str| ContainerVerification {
+        container: name.to_owned(),
+        digest: CONTAINER_DIGEST.to_owned(),
+        repository: "tinfoilsh/measure-image-action".to_owned(),
+        workflow: "build.yml".to_owned(),
+        git_ref: "refs/tags/build-v0.14.2".to_owned(),
+        commit: "01a05df207140a8e8e1d2cd26028ab7c51dad9d1".to_owned(),
+    };
+    assert_eq!(config.source, ReferenceSource::Policy);
+    assert_eq!(config.containers, [verified("first"), verified("second")]);
+    // With the proof the provenance layer accepts, and the binding of the
+    // config to the hardware is what turns the changed config down.
+    let unbound = "verification error: policy: report field HOST_DATA is not the expected value";
+    assert_eq!(rejection(&proven, &proofs).to_string(), unbound);
+
+    let unconstrained = resolve(&container("app"), &[]).unwrap();
+    assert_eq!(unconstrained.containers, []);
+    assert_eq!(rejection(&container("app"), &[]).to_string(), unbound);
+
+    let required = format!("{}{PROVENANCE}", container("app"));
+    let missing = format!(
+        "container \"app\" requires provenance: collateral entry not found: document carries no {CONTAINER_PROVENANCE_V1_FORMAT} reference-values entry for sha256:{CONTAINER_DIGEST}"
+    );
+    let other_workflow = required.replace("build.yml", "release.yml");
+    let unreadable = format!("{required}      gitlab: {{}}\n");
+    let cases: [(&str, &str, Vec<String>, &str); 4] = [
+        ("proof missing", &required, Vec::new(), &missing),
+        (
+            "proof for another image",
+            &required,
+            vec![proof("container", &"ab".repeat(32))],
+            &missing,
+        ),
+        (
+            "proof from another workflow",
+            &other_workflow,
+            proofs.to_vec(),
+            "container \"app\": verifying container provenance: verifying: signing certificate identity",
+        ),
+        (
+            "requirement that the verifier cannot read",
+            &unreadable,
+            proofs.to_vec(),
+            "containers[0].provenance has unknown field \"gitlab\"",
+        ),
+    ];
+    for (name, containers, proofs, want) in cases {
+        let error = resolve(containers, &proofs).unwrap_err();
+        assert!(error.starts_with(want), "{name}: {error}");
+        let rejected = rejection(containers, &proofs);
+        assert_eq!(rejected.layer(), Layer::Provenance, "{name}");
+        assert_eq!(
+            rejected.to_string(),
+            format!("verification error: provenance: {error}"),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn the_accepted_registries_are_never_left_open_by_default() {
     // Without a list, a config endorsement of any registry would pass. Only
@@ -1443,6 +1622,14 @@ fn a_config_verification_serialises_what_was_established() {
         approval_time: at("2026-08-06T11:00:00Z").to_system_time(),
         registry_id: Some(PUBLIC_REGISTRY_ID.to_owned()),
         signature_time: at("2026-08-06T11:00:30Z").to_system_time(),
+        containers: vec![ContainerVerification {
+            container: "app".to_owned(),
+            digest: "12".repeat(32),
+            repository: "org/app".to_owned(),
+            workflow: "release.yml".to_owned(),
+            git_ref: "refs/tags/v1.2.3".to_owned(),
+            commit: "34".repeat(20),
+        }],
     });
     verified.runtime = Some(ArtifactVerification {
         source: ReferenceSource::Endorsement,
@@ -1475,7 +1662,12 @@ fn a_config_verification_serialises_what_was_established() {
         r#"","reference":"sha256:"#,
         &"dd".repeat(32),
         r#"","signing_key_hint":"hint=","approval_time":"2026-08-06T11:00:00Z","#,
-        r#""registry_id":"https://registry.tinfoil.sh/scopes/public","signature_time":"2026-08-06T11:00:30Z"},"#,
+        r#""registry_id":"https://registry.tinfoil.sh/scopes/public","signature_time":"2026-08-06T11:00:30Z","#,
+        r#""containers":[{"container":"app","digest":""#,
+        &"12".repeat(32),
+        r#"","repository":"org/app","workflow":"release.yml","ref":"refs/tags/v1.2.3","commit":""#,
+        &"34".repeat(20),
+        r#""}]},"#,
         r#""runtime":{"source":"endorsement","repo":"tinfoilsh/cvmimage","tag":"v0.15.0","digest":""#,
         &"ee".repeat(32),
         r#"","name":"tinfoil-inference-v0.15.0-manifest.json","commit":""#,
@@ -1500,6 +1692,7 @@ fn a_config_verification_serialises_what_was_established() {
         approval_time: None,
         registry_id: None,
         signature_time: None,
+        containers: Vec::new(),
     });
     verified.code_measurement = Expected::SevSnp { launch: None };
     let text = verified.to_json();

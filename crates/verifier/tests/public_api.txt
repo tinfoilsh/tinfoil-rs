@@ -31,6 +31,7 @@ field ArtifactVerification.repo
 field ArtifactVerification.source
 field ArtifactVerification.tag
 field ConfigVerification.approval_time
+field ConfigVerification.containers
 field ConfigVerification.digest
 field ConfigVerification.name
 field ConfigVerification.reference
@@ -38,6 +39,12 @@ field ConfigVerification.registry_id
 field ConfigVerification.signature_time
 field ConfigVerification.signing_key_hint
 field ConfigVerification.source
+field ContainerVerification.commit
+field ContainerVerification.container
+field ContainerVerification.digest
+field ContainerVerification.git_ref
+field ContainerVerification.repository
+field ContainerVerification.workflow
 field Pin.project
 field Pin.repo
 field Policy.artifacts
@@ -103,6 +110,7 @@ struct ArtifactVerification
 struct ConfigAuthorizer
 struct ConfigEndorsement
 struct ConfigVerification
+struct ContainerVerification
 struct Pin
 struct Policy
 struct PublicKey

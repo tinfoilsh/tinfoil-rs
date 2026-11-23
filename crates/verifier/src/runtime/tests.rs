@@ -783,10 +783,10 @@ fn a_config_must_be_utf8() {
 
 /// A small deterministic generator, so that the inputs are the same on
 /// every run.
-struct Random(u64);
+pub(super) struct Random(pub(super) u64);
 
 impl Random {
-    fn next(&mut self, bound: usize) -> usize {
+    pub(super) fn next(&mut self, bound: usize) -> usize {
         self.0 = self
             .0
             .wrapping_mul(6_364_136_223_846_793_005)
