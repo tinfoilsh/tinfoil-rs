@@ -44,7 +44,7 @@ impl fmt::Display for ReferenceSource {
 ///
 /// What is known depends on the source: an embedded config has no
 /// endorsement reference, key hint or times, and a config that the caller's
-/// authorizer accepted has a digest only.
+/// authorizer accepted has a digest and its proven containers only.
 ///
 /// A record is a plain value. It is evidence of a verification only while
 /// it is read from the [`Verification`] that holds it: a copy can be
