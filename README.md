@@ -101,7 +101,12 @@ async fn list_models(api_key: &str) -> Result<String, Box<dyn std::error::Error>
     )
     .await?;
 
-    let verified = client.current();
+    // What the verification established, step by step.
+    let report = client.last_verification()?;
+    for step in report.steps() {
+        println!("{}: {}", step.layer, step.status);
+    }
+    let verified = report.verified_facts().ok_or("not verified")?;
     println!("code digest: {}", verified.code_digest());
     println!("TLS key:     {:?}", verified.tls_public_key_fp());
 
@@ -129,7 +134,7 @@ The same name can belong to different owners as a repository and as a project, s
 
 `RouterHttpClient::connect()` takes no host: it tries the routers of Tinfoil's published list in a random order and keeps the first that passes verification, or else `inference.tinfoil.sh`.
 
-On every client, `current()` returns the last successful verification without checking it, `ensure_verified()` returns one that is valid now (verifying first if needed), and `reverify()` verifies again unconditionally. When `reverify()` fails with an attestation error, the client discards the previous verification even if it is still fresh, and closes its idle connections: the next request verifies again, and is not sent if that verification fails too. A network or a configuration error leaves the previous verification in place until it expires. On the OpenAI client, `http_client()` returns the HTTP client underneath as an `AttestedHttpClient`, which has these methods and the request methods; match on it for the concrete client.
+On every client, `ensure_verified()` returns the report of a verification that is valid now (verifying first if needed), `reverify()` verifies again unconditionally, and `last_verification()` returns the outcome of the most recent attempt without I/O: its report, or the error that the client reported for it, so that a failed re-verification replaces an earlier success. The `on_verification` option is called with the host and the outcome of every attempt, a retry and each router that discovery tries included, outside the client's locks. When `reverify()` fails with an attestation error, the client discards the previous verification even if it is still fresh, and closes its idle connections: the next request verifies again, and is not sent if that verification fails too. A network or a configuration error leaves the previous verification in place until it expires. On the OpenAI client, `http_client()` returns the HTTP client underneath as an `AttestedHttpClient`, which has these methods and the request methods; match on it for the concrete client.
 
 Redirects are not followed on attested requests: a `3xx` response is returned to the caller, except in the EHBP mode, where one that answers a sealed request fails the request.
 
@@ -216,11 +221,30 @@ A verification passes only if all of the following hold. They are checked offlin
 - **The evidence is fresh.** The signed freshness proofs are no older than the freshness window (seven days by default), and the verification expires when they stop vouching for the document.
 - **The keys belong to the enclave.** The TLS key fingerprint and the HPKE key that the client binds its traffic to are part of what the hardware signed.
 
-The result is a `tinfoil::verifier::Verification`: the code digest and tag, the measurements, the endorsed keys, and when the verification expires. `to_json()` serializes it. A rejected document is an error that names the layer that rejected it: `envelope`, `provenance`, `quote` or `policy`.
+The result is a `tinfoil::verifier::VerificationReport`: one step for each layer (`envelope`, `provenance`, `quote` and `policy`), each `passed`, `failed`, `skipped` or `not_run`, and the `VerifiedFacts` of a verification that passed: the code digest and tag, the measurements, the endorsed keys, and when the verification expires. `to_json()` serializes it. A rejected document is an attestation error whose source is the verifier's `Error::Verification`; its `VerificationError` names the layer that rejected the document and carries the report, with the step that failed and the partial facts that the steps before it established, such as the expected and the measured registers of a measurement that does not match. Partial facts authorize nothing: only verified facts hold the keys that a channel is bound to.
+
+```rust
+use std::error::Error as _;
+
+use tinfoil::verifier::{Error as VerifierError, StepStatus};
+
+fn explain(error: &tinfoil::Error) {
+    let Some(VerifierError::Verification(rejected)) =
+        error.source().and_then(|source| source.downcast_ref::<VerifierError>())
+    else {
+        return;
+    };
+    for step in rejected.report().steps() {
+        if step.status == StepStatus::Failed {
+            println!("{} failed: {}", step.layer, step.message);
+        }
+    }
+}
+```
 
 ## Custom verification policy
 
-A `Policy` holds the checks that apply on top of the trust: pinned measurement registers, the freshness window, and how the runtime and platform artifacts are trusted. It is plain data, which the client builds its verifier from. Add a `verification_check` to veto a verification that the policy accepted.
+A `Policy` holds the checks that apply on top of the trust: pinned measurement registers, the freshness window, and how the runtime and platform artifacts are trusted. It is plain data, which the client builds its verifier from. Add a `verification_check` to veto the verified facts of a verification that the policy accepted.
 
 ```rust,no_run
 use std::time::Duration;
@@ -351,7 +375,7 @@ The OpenAI client sets async-openai's API base itself, after your `OpenAIConfig`
 
 Every call of an enabled family goes through the attested client. async-openai's realtime API is not offered, because it opens WebSocket connections of its own that the attested client cannot protect. One helper of async-openai makes a request of its own: `ImagesResponse::save` (`openai-images`) downloads with a plain HTTP client, and that download is not attested.
 
-`tinfoil-verifier` has one feature, `serde`, which implements `serde::Serialize` for `Verification` and the measurement types.
+`tinfoil-verifier` has one feature, `serde`, which implements `serde::Serialize` for `VerificationReport`, `VerifiedFacts` and the measurement types.
 
 ## Platform support
 
