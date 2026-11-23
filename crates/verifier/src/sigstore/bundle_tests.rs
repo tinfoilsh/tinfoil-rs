@@ -303,6 +303,17 @@ fn a_recorded_production_bundle_proves_its_log_time_and_identity() {
             .starts_with("refs/tags/")
     );
     assert_eq!(identity.extensions.source_repository_digest.len(), 40);
+    // The workflow that signed is one of the repository that it ran for.
+    let source = &identity.extensions.source_repository_uri;
+    assert!(
+        source.starts_with("https://github.com/tinfoilsh/"),
+        "{source}"
+    );
+    assert!(
+        identity
+            .subject_alternative_name
+            .starts_with(&format!("{source}/.github/workflows/"))
+    );
     assert!(!verified.statement.predicate_type.is_empty());
     assert_eq!(verified.statement.subjects.len(), 1);
 }
