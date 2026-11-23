@@ -73,8 +73,8 @@ pub struct ConfigVerification {
     pub signature_time: Option<SystemTime>,
     /// The container images whose build the config requires and the
     /// document proves, in config order. Empty when the config requires
-    /// none, the document does not carry its bytes, or the config is
-    /// embedded.
+    /// none or the verifier has no bytes to read: the document does not
+    /// carry them and the caller did not embed them.
     pub containers: Vec<ContainerVerification>,
 }
 

@@ -13,7 +13,7 @@ use crate::document::collateral::{
     FRESHNESS_ID_PLATFORM, FRESHNESS_ID_RUNTIME, SIGSTORE_FRESHNESS_V1_FORMAT,
 };
 use crate::document::{self, Document};
-use crate::embedded::Embedded;
+use crate::embedded::{ConfigReference, Embedded};
 use crate::endorsement::approval::{
     Artifact as ApprovedArtifact, ArtifactKind, ConfigPolicy, ConfigVerifier, FreshnessPolicy,
     FreshnessVerifier, PLATFORM_ARTIFACT_NAME, PUBLIC_REGISTRY_ID, parse_name,
@@ -269,6 +269,21 @@ fn endorsed_artifact(
         },
         approved_at,
     })
+}
+
+/// The bytes of an embedded config: the caller's, or for a config embedded
+/// by reference those that the document carries, when it carries the bytes
+/// of that digest.
+fn embedded_config_bytes<'a>(
+    embedded: &'a ConfigReference,
+    document: &'a Document,
+) -> Option<&'a [u8]> {
+    if let Some(bytes) = &embedded.bytes {
+        return Some(bytes);
+    }
+    let carried = document.config_endorsement().ok()?.config()?;
+    let digest = canonical::encode_lower_hex(&Sha256::digest(carried));
+    (digest == embedded.digest).then_some(carried)
 }
 
 /// When the freshness proofs stop vouching for a document: `max_age` after
@@ -894,6 +909,8 @@ impl Verifier {
     ) -> Result<(RuntimeReference, ConfigVerification, Option<Instant>), Refused> {
         if let Some(embedded) = &self.embedded.config {
             // The pins were matched against it when they were derived.
+            let bytes = embedded_config_bytes(embedded, document);
+            let containers = self.resolve_containers(trust, document, bytes)?;
             let record = ConfigVerification {
                 source: ReferenceSource::Embedded,
                 name: embedded.name.clone(),
@@ -903,7 +920,7 @@ impl Verifier {
                 approval_time: None,
                 registry_id: None,
                 signature_time: None,
-                containers: Vec::new(),
+                containers,
             };
             return Ok((embedded.runtime.clone(), record, None));
         }
@@ -974,8 +991,9 @@ impl Verifier {
 
     /// Authenticates the build of every container image that the config
     /// requires provenance of. `config` holds the bytes that are bound to
-    /// the approved digest; a document that leaves them out carries no
-    /// requirement that the verifier can read.
+    /// the approved digest; without them there is no requirement that the
+    /// verifier can read. A caller that embeds a config in full supplies
+    /// them, and otherwise the document carries them.
     fn resolve_containers(
         &self,
         trust: &Trust,

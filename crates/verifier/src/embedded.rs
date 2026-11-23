@@ -5,7 +5,10 @@ use sha2::{Digest, Sha256};
 use crate::canonical;
 use crate::endorsement::approval::parse_name;
 use crate::policy::{self, ARTIFACT_FORMAT_V2, Artifact};
-use crate::runtime::{self, MAX_CONFIG_SIZE, decode_manifest, parse_manifest, runtime_from_config};
+use crate::runtime::{
+    self, MAX_CONFIG_SIZE, container_provenance_from_config, decode_manifest, parse_manifest,
+    runtime_from_config,
+};
 
 /// The size of a SHA-256 digest in bytes.
 const SHA256_SIZE: usize = 32;
@@ -28,7 +31,8 @@ pub struct RuntimeReference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmbeddedConfig {
     /// The exact config bytes. Their digest and the runtime that they pin
-    /// are derived from them.
+    /// are derived from them. The document must still prove every
+    /// container build that the config requires.
     Bytes {
         /// The config, 1 byte to 1 MiB.
         bytes: Vec<u8>,
@@ -37,7 +41,9 @@ pub enum EmbeddedConfig {
         /// pin.
         name: Option<String>,
     },
-    /// A config known by its digest, with the runtime that it pins.
+    /// A config known by its digest, with the runtime that it pins. The
+    /// container builds that the config requires are checked only when the
+    /// document carries the config bytes.
     Reference {
         /// The SHA-256 of the config, 64 lowercase hex digits.
         digest: String,
@@ -59,6 +65,9 @@ pub(crate) struct ConfigReference {
     pub(crate) digest: String,
     /// The runtime that the config pins.
     pub(crate) runtime: runtime::RuntimeReference,
+    /// The bytes of a config that the caller embedded in full. A config
+    /// embedded by reference has none.
+    pub(crate) bytes: Option<Vec<u8>>,
 }
 
 /// A caller-supplied platform policy artifact.
@@ -86,10 +95,11 @@ impl Embedded {
     ///
     /// In order: a supplied manifest decodes; a supplied platform artifact
     /// decodes and has the v2 format; config bytes have 1 to
-    /// [`MAX_CONFIG_SIZE`] bytes and pin a runtime; a config name is a
-    /// versioned config name; the config digest is a SHA-256; the runtime
-    /// pin is valid; a supplied manifest is the one that the config pins.
-    /// The error is a message for the caller.
+    /// [`MAX_CONFIG_SIZE`] bytes, pin a runtime and state container build
+    /// requirements that can be read; a config name is a versioned config
+    /// name; the config digest is a SHA-256; the runtime pin is valid; a
+    /// supplied manifest is the one that the config pins. The error is a
+    /// message for the caller.
     pub(crate) fn check(
         config: Option<EmbeddedConfig>,
         runtime: Option<Vec<u8>>,
@@ -125,16 +135,19 @@ impl Embedded {
                     tag: runtime.tag,
                     digest: runtime.digest,
                 },
+                bytes: None,
             }),
             Some(EmbeddedConfig::Bytes { bytes, name }) => {
                 if bytes.is_empty() || bytes.len() > MAX_CONFIG_SIZE {
                     return Err("embedded config size is outside allowed bounds".to_owned());
                 }
                 let runtime = runtime_from_config(&bytes).map_err(|cause| cause.to_string())?;
+                container_provenance_from_config(&bytes).map_err(|cause| cause.to_string())?;
                 Some(ConfigReference {
                     name,
                     digest: canonical::encode_lower_hex(&Sha256::digest(&bytes)),
                     runtime,
+                    bytes: Some(bytes),
                 })
             }
         };

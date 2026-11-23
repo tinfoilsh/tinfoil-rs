@@ -1176,42 +1176,136 @@ const CONTAINER_BUNDLE: &str =
     include_str!("../tests/data/endorsement/container_provenance_bundle.json");
 const CONTAINER_DIGEST: &str = "85306e3ab312a2d80466e901081e855cc53f21c4802c638f861e6ef31ba4f5d1";
 
-#[test]
-fn a_config_that_requires_container_provenance_needs_the_proof_in_the_document() {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-
-    use crate::document::collateral::{
-        CONFIG_ID, CONFIG_V1_FORMAT, CONTAINER_PROVENANCE_V1_FORMAT,
-    };
-    use crate::endorsement::ConfigPolicy;
-    use crate::verifier::Refused;
-
-    const PROVENANCE: &str = "    provenance:
+/// The requirement that the recorded bundle meets.
+const CONTAINER_REQUIREMENT: &str = "    provenance:
       github:
         repository: tinfoilsh/measure-image-action
         repository_id: 924941172
         workflow: build.yml
         ref: refs/tags/build-v*
 ";
-    let container = |name: &str| {
-        format!(
-            "  - name: {name}\n    image: ghcr.io/tinfoilsh/measure-image-action@sha256:{CONTAINER_DIGEST}\n"
-        )
-    };
-    let proof = |id: &str, digest: &str| {
-        format!(
-            r#"{{"id":"{id}","role":"reference-values","format":"{CONTAINER_PROVENANCE_V1_FORMAT}","data":{{"digest":"{digest}","sigstore_bundle":{CONTAINER_BUNDLE}}}}}"#
-        )
-    };
 
-    // The recorded document carries a config that the caller's authorizer
-    // accepts, for a verifier that embeds the runtime and the platform.
-    // Its collateral is not bound to the hardware, so the config and the
-    // proofs are put in here.
+/// The recorded case of a config that the caller's authorizer accepts, for
+/// a verifier that embeds the runtime and the platform. The collateral of
+/// its document is not bound to the hardware, so the tests of container
+/// provenance put their own config and proofs in its place.
+const CONTAINER_CASE: &str = "config-sev/authorizer-accept";
+
+/// The entry of a config for a container that runs the recorded image.
+fn recorded_container(name: &str) -> String {
+    format!(
+        "  - name: {name}\n    image: ghcr.io/tinfoilsh/measure-image-action@sha256:{CONTAINER_DIGEST}\n"
+    )
+}
+
+/// A collateral entry, as JSON text, that offers the recorded bundle as
+/// the build attestation of the image with the given digest.
+fn container_proof(digest: &str) -> String {
+    use crate::document::collateral::CONTAINER_PROVENANCE_V1_FORMAT;
+    format!(
+        r#"{{"id":"container","role":"reference-values","format":"{CONTAINER_PROVENANCE_V1_FORMAT}","data":{{"digest":"{digest}","sigstore_bundle":{CONTAINER_BUNDLE}}}}}"#
+    )
+}
+
+/// A collateral entry, as JSON text, that carries config bytes.
+fn config_entry(config: &[u8]) -> String {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    use crate::document::collateral::{CONFIG_ID, CONFIG_V1_FORMAT};
+    format!(
+        r#"{{"id":"{CONFIG_ID}","role":"reference-values","format":"{CONFIG_V1_FORMAT}","data":{{"config_base64":"{}"}}}}"#,
+        STANDARD.encode(config)
+    )
+}
+
+/// Whether a collateral entry, as JSON text, is the config entry.
+fn is_config_entry(entry: &str) -> bool {
+    entry.contains(&format!("{:?}", crate::document::collateral::CONFIG_ID))
+}
+
+/// The document of [`CONTAINER_CASE`] with `entries` in place of its
+/// config entry.
+fn container_document(fixture: &Fixture, entries: &[String]) -> Vec<u8> {
+    let stored = text(fixture.case(CONTAINER_CASE), "doc");
+    let mut kept: Vec<&str> = fixture.entries(stored);
+    kept.retain(|entry| !is_config_entry(entry));
+    kept.extend(entries.iter().map(String::as_str));
+    fixture.document_with(stored, &kept)
+}
+
+/// The record of the recorded image as the container `name`.
+fn proven_container(name: &str) -> ContainerVerification {
+    ContainerVerification {
+        container: name.to_owned(),
+        digest: CONTAINER_DIGEST.to_owned(),
+        repository: "tinfoilsh/measure-image-action".to_owned(),
+        workflow: "build.yml".to_owned(),
+        git_ref: "refs/tags/build-v0.14.2".to_owned(),
+        commit: "01a05df207140a8e8e1d2cd26028ab7c51dad9d1".to_owned(),
+    }
+}
+
+/// The rejection of a container that requires the recorded image's proof
+/// when the document carries none for it.
+fn missing_container_proof(name: &str) -> String {
+    use crate::document::collateral::CONTAINER_PROVENANCE_V1_FORMAT;
+    format!(
+        "container {name:?} requires provenance: collateral entry not found: document carries no {CONTAINER_PROVENANCE_V1_FORMAT} reference-values entry for sha256:{CONTAINER_DIGEST}"
+    )
+}
+
+/// The config of a document of [`CONTAINER_CASE`] as the provenance layer
+/// of `verifier` resolves it, or the message of its rejection.
+fn resolved_config(
+    verifier: &Verifier,
+    fixture: &Fixture,
+    document: &[u8],
+) -> Result<ConfigVerification, String> {
+    use crate::endorsement::ConfigPolicy;
+    use crate::verifier::Refused;
+
+    let case = fixture.case(CONTAINER_CASE);
+    let document = crate::document::parse(document, &Fixture::nonce(case)).unwrap();
+    let policy = ConfigPolicy {
+        identity: None,
+        revision: None,
+        digest: None,
+        now: instant(case),
+        max_age: None,
+        future_skew: None,
+        registry_ids: None,
+    };
+    match verifier.resolve_config(verifier.trust.as_ref().unwrap(), &document, &policy) {
+        Ok((_, config, _)) => Ok(config),
+        Err(Refused::Rejected(error)) => Err(error.to_string()),
+        Err(other) => panic!("want a config or a rejection, got {other:?}"),
+    }
+}
+
+/// The rejection of a document of [`CONTAINER_CASE`] by the whole
+/// verification of `verifier`. A changed config cannot pass it: the
+/// hardware binds the recorded one.
+fn container_rejection(
+    verifier: &Verifier,
+    fixture: &Fixture,
+    document: &[u8],
+) -> crate::VerificationError {
+    let case = fixture.case(CONTAINER_CASE);
+    let result = verifier.verify_at(document, &Fixture::nonce(case), &Pin::none(), instant(case));
+    match result {
+        Err(Error::Verification(rejected)) => rejected,
+        other => panic!("want a rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_config_that_requires_container_provenance_needs_the_proof_in_the_document() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
     let fixture = Fixture::load();
-    let case = fixture.case("config-sev/authorizer-accept");
-    let stored = text(case, "doc");
+    let case = fixture.case(CONTAINER_CASE);
     let (config_trust, policy) = authorizer(accept);
     let mut verifier = Verifier::with_test_roots(
         config_trust,
@@ -1222,10 +1316,12 @@ fn a_config_that_requires_container_provenance_needs_the_proof_in_the_document()
     )
     .unwrap();
     verifier.embedded = fixture.verifier(case).unwrap().embedded;
-    let is_config = |entry: &str| entry.contains(&format!("{CONFIG_ID:?}"));
     let recorded_config = {
-        let entries = fixture.entries(stored);
-        let entry = entries.into_iter().find(|entry| is_config(entry)).unwrap();
+        let entries = fixture.entries(text(case, "doc"));
+        let entry = entries
+            .into_iter()
+            .find(|entry| is_config_entry(entry))
+            .unwrap();
         let entry = json::parse(entry.as_bytes()).unwrap();
         let data = entry.as_object().unwrap().get("data").unwrap();
         let config = data.as_object().unwrap().get("config_base64").unwrap();
@@ -1238,81 +1334,44 @@ fn a_config_that_requires_container_provenance_needs_the_proof_in_the_document()
             containers.as_bytes(),
         ]
         .concat();
-        let config = format!(
-            r#"{{"id":"{CONFIG_ID}","role":"reference-values","format":"{CONFIG_V1_FORMAT}","data":{{"config_base64":"{}"}}}}"#,
-            STANDARD.encode(config)
-        );
-        let mut entries: Vec<&str> = fixture.entries(stored);
-        entries.retain(|entry| !is_config(entry));
-        entries.push(&config);
-        entries.extend(proofs.iter().map(String::as_str));
-        fixture.document_with(stored, &entries)
+        let mut entries = vec![config_entry(&config)];
+        entries.extend_from_slice(proofs);
+        container_document(&fixture, &entries)
     };
-    // The config of a document as the provenance layer resolves it.
     let resolve = |containers: &str, proofs: &[String]| {
-        let document =
-            crate::document::parse(&document(containers, proofs), &Fixture::nonce(case)).unwrap();
-        let policy = ConfigPolicy {
-            identity: None,
-            revision: None,
-            digest: None,
-            now: instant(case),
-            max_age: None,
-            future_skew: None,
-            registry_ids: None,
-        };
-        match verifier.resolve_config(verifier.trust.as_ref().unwrap(), &document, &policy) {
-            Ok((_, config, _)) => Ok(config),
-            Err(Refused::Rejected(error)) => Err(error.to_string()),
-            Err(other) => panic!("want a config or a rejection, got {other:?}"),
-        }
+        resolved_config(&verifier, &fixture, &document(containers, proofs))
     };
-    // The whole verification of a document, which a changed config cannot
-    // pass: the hardware binds the recorded one.
     let rejection = |containers: &str, proofs: &[String]| {
-        let result = verifier.verify_at(
-            &document(containers, proofs),
-            &Fixture::nonce(case),
-            &Pin::none(),
-            instant(case),
-        );
-        match result {
-            Err(Error::Verification(rejected)) => rejected,
-            other => panic!("want a rejection, got {other:?}"),
-        }
+        container_rejection(&verifier, &fixture, &document(containers, proofs))
     };
 
     let proven = format!(
-        "{}{PROVENANCE}{}{PROVENANCE}{}",
-        container("first"),
-        container("second"),
-        container("unconstrained")
+        "{}{CONTAINER_REQUIREMENT}{}{CONTAINER_REQUIREMENT}{}",
+        recorded_container("first"),
+        recorded_container("second"),
+        recorded_container("unconstrained")
     );
-    let proofs = [proof("container", CONTAINER_DIGEST)];
+    let proofs = [container_proof(CONTAINER_DIGEST)];
     let config = resolve(&proven, &proofs).unwrap();
-    let verified = |name: &str| ContainerVerification {
-        container: name.to_owned(),
-        digest: CONTAINER_DIGEST.to_owned(),
-        repository: "tinfoilsh/measure-image-action".to_owned(),
-        workflow: "build.yml".to_owned(),
-        git_ref: "refs/tags/build-v0.14.2".to_owned(),
-        commit: "01a05df207140a8e8e1d2cd26028ab7c51dad9d1".to_owned(),
-    };
     assert_eq!(config.source, ReferenceSource::Policy);
-    assert_eq!(config.containers, [verified("first"), verified("second")]);
+    assert_eq!(
+        config.containers,
+        [proven_container("first"), proven_container("second")]
+    );
     // With the proof the provenance layer accepts, and the binding of the
     // config to the hardware is what turns the changed config down.
     let unbound = "verification error: policy: report field HOST_DATA is not the expected value";
     assert_eq!(rejection(&proven, &proofs).to_string(), unbound);
 
-    let unconstrained = resolve(&container("app"), &[]).unwrap();
+    let unconstrained = resolve(&recorded_container("app"), &[]).unwrap();
     assert_eq!(unconstrained.containers, []);
-    assert_eq!(rejection(&container("app"), &[]).to_string(), unbound);
-
-    let required = format!("{}{PROVENANCE}", container("app"));
-    let missing = format!(
-        "container \"app\" requires provenance: collateral entry not found: document carries no {CONTAINER_PROVENANCE_V1_FORMAT} reference-values entry for sha256:{CONTAINER_DIGEST}"
+    assert_eq!(
+        rejection(&recorded_container("app"), &[]).to_string(),
+        unbound
     );
+
+    let required = format!("{}{CONTAINER_REQUIREMENT}", recorded_container("app"));
+    let missing = missing_container_proof("app");
     let other_workflow = required.replace("build.yml", "release.yml");
     let unreadable = format!("{required}      gitlab: {{}}\n");
     let cases: [(&str, &str, Vec<String>, &str); 4] = [
@@ -1320,7 +1379,7 @@ fn a_config_that_requires_container_provenance_needs_the_proof_in_the_document()
         (
             "proof for another image",
             &required,
-            vec![proof("container", &"ab".repeat(32))],
+            vec![container_proof(&"ab".repeat(32))],
             &missing,
         ),
         (
@@ -1347,6 +1406,116 @@ fn a_config_that_requires_container_provenance_needs_the_proof_in_the_document()
             "{name}"
         );
     }
+}
+
+/// An embedded config is held to the builds that it requires. The
+/// requirements of one that is embedded in full come from the caller's
+/// bytes, so a document cannot leave them out; one that is embedded by
+/// reference is checked when the document carries the bytes of that digest.
+#[test]
+fn an_embedded_config_is_held_to_the_container_builds_that_it_requires() {
+    let fixture = Fixture::load();
+    let inputs = Inputs::new();
+    let requiring = [
+        &inputs.config[..],
+        b"containers:\n",
+        recorded_container("app").as_bytes(),
+        CONTAINER_REQUIREMENT.as_bytes(),
+    ]
+    .concat();
+    let in_full = |bytes: &[u8]| {
+        ConfigTrust::Embedded(EmbeddedConfig::Bytes {
+            bytes: bytes.to_vec(),
+            name: None,
+        })
+    };
+    let by_reference = |bytes: &[u8]| {
+        ConfigTrust::Embedded(EmbeddedConfig::Reference {
+            digest: encode_lower_hex(&Sha256::digest(bytes)),
+            runtime: inputs.runtime_reference(),
+            name: None,
+        })
+    };
+    // The embedded Sigstore root authenticates the recorded bundle, and
+    // the AMD root of the recorded case its report.
+    let verifier = |config: ConfigTrust| {
+        let amd = fixture.root(text(fixture.case(CONTAINER_CASE), "amd"));
+        Verifier::with_test_roots(config, inputs.artifacts(), None, amd, None)
+    };
+    let resolve = |config: ConfigTrust, entries: &[String]| {
+        let document = container_document(&fixture, entries);
+        resolved_config(&verifier(config).unwrap(), &fixture, &document)
+    };
+    // The whole verification, for the layer of a rejection.
+    let rejection = |config: ConfigTrust, entries: &[String]| {
+        let document = container_document(&fixture, entries);
+        container_rejection(&verifier(config).unwrap(), &fixture, &document)
+    };
+    let proof = container_proof(CONTAINER_DIGEST);
+    let proven = [proven_container("app")];
+    let missing = missing_container_proof("app");
+    let provenance_layer = format!("verification error: provenance: {missing}");
+
+    // In full, proven: the document needs no config entry.
+    let config = resolve(in_full(&requiring), std::slice::from_ref(&proof)).unwrap();
+    assert_eq!(config.source, ReferenceSource::Embedded);
+    assert_eq!(config.digest, encode_lower_hex(&Sha256::digest(&requiring)));
+    assert_eq!(config.containers, proven);
+
+    // In full, proof missing: the requirement stands whatever config the
+    // document carries, or none.
+    for entries in [
+        Vec::new(),
+        vec![config_entry(&inputs.config)],
+        vec![container_proof(&"ab".repeat(32))],
+    ] {
+        assert_eq!(resolve(in_full(&requiring), &entries), Err(missing.clone()));
+        let rejected = rejection(in_full(&requiring), &entries);
+        assert_eq!(rejected.layer(), Layer::Provenance);
+        assert_eq!(rejected.to_string(), provenance_layer);
+    }
+
+    // In full, no requirement.
+    let config = resolve(in_full(&inputs.config), &[]).unwrap();
+    assert_eq!(config.source, ReferenceSource::Embedded);
+    assert_eq!(config.containers, []);
+
+    // In full, a requirement that the verifier cannot read: the verifier
+    // is not built.
+    let unreadable = [&requiring[..], b"      gitlab: {}\n"].concat();
+    assert_eq!(
+        usage(verifier(in_full(&unreadable))),
+        "usage error: containers[0].provenance has unknown field \"gitlab\""
+    );
+
+    // By reference, the document carries the bytes, proven.
+    let carried = config_entry(&requiring);
+    let config = resolve(by_reference(&requiring), &[carried.clone(), proof.clone()]).unwrap();
+    assert_eq!(config.source, ReferenceSource::Embedded);
+    assert_eq!(config.containers, proven);
+
+    // By reference, the document carries the bytes, proof missing.
+    let entries = [carried];
+    assert_eq!(
+        resolve(by_reference(&requiring), &entries),
+        Err(missing.clone())
+    );
+    let rejected = rejection(by_reference(&requiring), &entries);
+    assert_eq!(rejected.layer(), Layer::Provenance);
+    assert_eq!(rejected.to_string(), provenance_layer);
+
+    // By reference, the document carries no bytes: there is no requirement
+    // to read, with or without a proof.
+    for entries in [Vec::new(), vec![proof.clone()]] {
+        let config = resolve(by_reference(&requiring), &entries).unwrap();
+        assert_eq!(config.containers, []);
+    }
+
+    // By reference, the document carries another config.
+    let other = [&requiring[..], b"\n"].concat();
+    let config = resolve(by_reference(&requiring), &[config_entry(&other)]).unwrap();
+    assert_eq!(config.source, ReferenceSource::Embedded);
+    assert_eq!(config.containers, []);
 }
 
 #[test]

@@ -71,8 +71,9 @@ pub enum Trust {
     AuthorizedBy(ConfigAuthorizer),
     /// `attestation-collaterals/v3` collateral for exactly the config bytes
     /// that the caller supplies, which must come from trusted client
-    /// configuration. It has no pin, because a pin would only compare the
-    /// caller's input with the caller's input.
+    /// configuration. The document must still prove every container build
+    /// that the config requires. It has no pin, because a pin would only
+    /// compare the caller's input with the caller's input.
     EmbeddedConfig {
         /// The `/org/project/revision` identity that the caller associates
         /// with the config.
