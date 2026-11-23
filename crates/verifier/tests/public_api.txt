@@ -98,6 +98,7 @@ fn Verification::to_json
 fn VerificationError::layer
 fn Verifier::check_pin_verifiability
 fn Verifier::dangerous_test_only_new [conformance build only]
+fn Verifier::dangerous_test_only_resolve_containers [conformance build only]
 fn Verifier::freshness_max_age
 fn Verifier::new
 fn Verifier::pinned_registers

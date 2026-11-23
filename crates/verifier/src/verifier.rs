@@ -1010,6 +1010,30 @@ impl Verifier {
         Ok(containers)
     }
 
+    /// Authenticates the container builds that `config` requires against
+    /// the build attestations of `document`, as
+    /// [`verify_v3`](Self::verify_v3) does once it has approved a config.
+    /// It approves nothing itself, so the requirements are whatever the
+    /// caller's bytes declare. It exists only in a conformance build.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Verification`] at the provenance layer for a requirement
+    /// that cannot be read or is not proven, and [`Error::Usage`] when the
+    /// embedded trust material is unusable.
+    #[cfg(tinfoil_conformance)]
+    pub fn dangerous_test_only_resolve_containers(
+        &self,
+        document: &Document,
+        config: Option<&[u8]>,
+    ) -> Result<Vec<ContainerVerification>, Error> {
+        let trust = self.trust.as_ref().map_err(|cause| {
+            UsageError::new(format!("embedded trust material is unusable: {cause}"))
+        })?;
+        self.resolve_containers(trust, document, config)
+            .map_err(|cause| VerificationError::new(Layer::Provenance, cause).into())
+    }
+
     /// Resolves the runtime that a config pins: its launch measurements
     /// and its record.
     fn resolve_runtime(

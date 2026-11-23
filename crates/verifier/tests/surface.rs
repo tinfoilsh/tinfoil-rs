@@ -471,9 +471,13 @@ fn an_ordinary_build_lists_no_replaceable_trust_anchor() {
         .filter(|line| line.contains("dangerous") || line.contains("root"))
         .collect();
     // The one constructor that takes replacement anchors is in the source,
-    // and only for the adapter.
+    // and so is the container step that takes a config as given; both only
+    // for the adapter.
     assert_eq!(
         dangerous,
-        ["fn Verifier::dangerous_test_only_new [conformance build only]"]
+        [
+            "fn Verifier::dangerous_test_only_new [conformance build only]",
+            "fn Verifier::dangerous_test_only_resolve_containers [conformance build only]",
+        ]
     );
 }
