@@ -302,13 +302,23 @@ see `Trust::EmbeddedConfig` and `Trust::AuthorizedBy`.
 | `GroundTruth` | `tinfoil::verifier::VerifiedFacts`, the `verified_facts()` of the `VerificationReport` that `last_verification()`, `ensure_verified()` or `reverify()` returns |
 | its TLS fingerprint and HPKE key fields | `tls_public_key_fp()`, `hpke_public_key()` |
 | its digest and measurement fields | `code_digest()`, `code_tag()`, `code_measurement()`, `enclave_measurement()` |
-| `ground_truth_json()` | `to_json()` (a new shape), or `serde::Serialize` with the verifier's `serde` feature |
+| `ground_truth_json()` | `to_json()` (a new shape: the JSON form that every Tinfoil SDK writes), or `serde::Serialize` with the verifier's `serde` feature |
 | `Measurement` with string registers | `Measurement::SevSnp { launch }` / `Measurement::Tdx { mrtd, rtmr0, .. }` with `Register` values; `Expected` for pins |
 | `PredicateType` | removed; the platform is the variant of `Measurement` |
 | `SoftwareIdentity` | `report.metadata().verifier` |
 | `VerificationDocument`, `VerificationSteps`, `VerificationStepState`, `VerificationStepStatus` | `VerificationReport`, with one `Step` for each layer (`envelope`, `provenance`, `quote`, `policy`) and a `StepStatus` of `Passed`, `Failed`, `Skipped` or `NotRun`. On failure, the error's source is a `tinfoil::verifier::Error` whose `VerificationError` has the `layer()` and the `report()`, with `PartialFacts`: the facts established up to the rejection, such as the expected measurement that a failed policy step resolved |
 | `DocumentEnclaveMeasurement` | `MeasuredFacts::cpu` of a failed report, or `VerifiedFacts::enclave_measurement()` |
 | `VERIFICATION_DOCUMENT_SCHEMA_VERSION` | removed |
+
+The JSON of `to_json()` and of `serde::Serialize` changed during the 0.3
+release candidates, to the form that every Tinfoil SDK writes. Compared with
+0.3.0-rc.3, the report has a `schema_version` of `1`; the measured CPU
+registers of a rejection are `partial_facts.measured.cpu_measurement`, not
+`cpu.measurement`; a code measurement that fixes no register, an empty
+`code_tag` and an unrepresentable time are left out rather than written as
+`{"platform": ..}`, `""` or `null`; and `metadata.verifier` is left out when
+its name or version is empty. No API reads the JSON back: it authorizes
+nothing.
 
 `VerifiedFacts` also has `freshness_expires_at()`, which is when the client
 will verify again, and `config()`, `runtime()` and `platform()`, which describe

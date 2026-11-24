@@ -116,6 +116,36 @@ fn shared_vectors() {
     );
 }
 
+/// Whether `got` has every member of `want`, at any depth, with the same
+/// value. Arrays must match element by element.
+fn contains(path: &str, got: &Value, want: &Value) -> Result<(), String> {
+    match want {
+        Value::Object(members) => {
+            if !got.is_object() {
+                return Err(format!("{path} is {got}, want an object"));
+            }
+            for (name, member) in members {
+                let Some(got) = got.get(name) else {
+                    return Err(format!("{path}.{name} is missing"));
+                };
+                contains(&format!("{path}.{name}"), got, member)?;
+            }
+            Ok(())
+        }
+        Value::Array(items) => match got.as_array() {
+            Some(got) if got.len() == items.len() => {
+                for (index, (got, want)) in got.iter().zip(items).enumerate() {
+                    contains(&format!("{path}[{index}]"), got, want)?;
+                }
+                Ok(())
+            }
+            _ => Err(format!("{path} is {got}, want {} elements", items.len())),
+        },
+        _ if got == want => Ok(()),
+        _ => Err(format!("{path} is {got}, want {want}")),
+    }
+}
+
 fn run_fixture(path: &Path) -> Outcome {
     let fixture: Value = match std::fs::read(path).map(|bytes| serde_json::from_slice(&bytes)) {
         Ok(Ok(fixture)) => fixture,
@@ -145,8 +175,9 @@ fn run_fixture(path: &Path) -> Outcome {
     let accepted = output["accepted"].as_bool().unwrap_or(false);
 
     // What a full-verification fixture declares of the report: the failed
-    // step, and every step's status and the partial facts. Step messages
-    // are not compared.
+    // step, and members of the report's JSON form, which the report must
+    // have with those values. A member that the fixture leaves out, such
+    // as a step's message, is not compared.
     let failed_step = &expected["failed_step"];
     if let Some(want) = failed_step.as_str() {
         let got = output["report"]["steps"]
@@ -158,15 +189,10 @@ fn run_fixture(path: &Path) -> Outcome {
         }
     }
     let report = &expected["report"];
-    if !report.is_null() {
-        for member in ["steps", "partial_facts"] {
-            if output["report"][member] != report[member] {
-                return Outcome::Fail(format!(
-                    "report {member}: got {}, want {}",
-                    output["report"][member], report[member]
-                ));
-            }
-        }
+    if !report.is_null()
+        && let Err(reason) = contains("report", &output["report"], report)
+    {
+        return Outcome::Fail(reason);
     }
 
     if expect_accept {

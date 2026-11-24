@@ -132,6 +132,7 @@
 //! | feature | what it adds |
 //! |---|---|
 //! | `openai` (default) | the OpenAI client over `async_openai`, with its chat completion, embedding, audio and responses APIs; the relaxed chat helper; the `sse` and `multimodal` modules |
+//! | `serde` | `serde::Serialize` for [`verifier::VerificationReport`] and the types that it holds, in the JSON form that `to_json()` writes, through the verifier's feature of the same name |
 //!
 //! The other API families of `async_openai` are opt-in. Each feature below
 //! implies `openai` and adds the family's calls to the OpenAI client,

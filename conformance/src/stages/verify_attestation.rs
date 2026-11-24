@@ -38,7 +38,7 @@ fn rejection(error: &Error) -> (Output, i32) {
         Some(code) => {
             let (mut output, exit) = rejected(stage, code);
             if let Error::Verification(rejected) = error {
-                output.report = Some(facts::report(rejected.report()));
+                output.report = Some(rejected.report().clone());
             }
             (output, exit)
         }
@@ -92,7 +92,7 @@ pub(crate) fn run(input: &Input, verifier: &Verifier) -> (Output, i32) {
     match report.verified_facts().and_then(facts::verified) {
         Some(outputs) => {
             let (mut output, exit) = accepted(stage, Some(outputs));
-            output.report = Some(facts::report(&report));
+            output.report = Some(report);
             (output, exit)
         }
         None => rejected(stage, CODE_ENVELOPE_REJECTED),
