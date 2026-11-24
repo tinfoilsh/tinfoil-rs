@@ -1236,16 +1236,60 @@ async fn an_observer_can_read_the_last_verification_without_a_deadlock() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_observer_that_panics_changes_nothing() {
+async fn an_observer_that_panics_changes_no_outcome_and_later_attempts_are_still_told() {
     let clock = tokio_clock();
-    let script = Script::new([ok("a", &clock, HOUR), ok("b", &clock, HOUR)]);
-    let notify: crate::options::Notify<Record> = Arc::new(|_, _| panic!("the observer's bug"));
+    let gate = Arc::new(Notify::new());
+    let script = Script::new([
+        ok("a", &clock, HOUR),
+        Step::Gated(Arc::clone(&gate), Ok(record("b", &clock, 3 * HOUR))),
+        Step::Ready(Err(Error::configuration("refused"))),
+    ]);
+    // Records each call, then panics.
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let notify: crate::options::Notify<Record> = {
+        let told = Arc::clone(&told);
+        Arc::new(move |_, outcome| {
+            let outcome = outcome.map(|r| r.name).map_err(ToString::to_string);
+            told.lock().unwrap().push(outcome);
+            panic!("the observer's bug");
+        })
+    };
     let enclave = Enclave::from_source(HOST, script.source(), None, clock).notifying(notify);
     let transport = Transport::connect(enclave, Arc::new(FakeMode::default()), true)
         .await
-        .expect("connected");
-    assert_eq!(transport.reverify().await.expect("verified").name, "b");
+        .expect("connected despite the panic");
+
+    // Two callers wait on one verification; both get its outcome.
+    tokio::time::advance(HOUR).await;
+    let waiters: Vec<_> = (0..2)
+        .map(|_| {
+            let transport = transport.clone();
+            tokio::spawn(async move { transport.ensure_verified().await.map(|e| e.name) })
+        })
+        .collect();
+    settle().await;
+    gate.notify_one();
+    for waiter in waiters {
+        assert_eq!(
+            waiter.await.expect("no panic reaches a caller").unwrap(),
+            "b"
+        );
+    }
     assert_eq!(last(&transport), Ok("b"));
+    assert_eq!(served_by(&transport).await, "b");
+
+    // A later attempt is still told, and its outcome is its own.
+    let error = transport.reverify().await.expect_err("refused");
+    assert_eq!(error.to_string(), "configuration error: refused");
+    assert_eq!(last(&transport), Err(error.to_string()));
+    assert_eq!(
+        *told.lock().unwrap(),
+        [
+            Ok("a"),
+            Ok("b"),
+            Err("configuration error: refused".to_owned())
+        ]
+    );
 }
 
 #[tokio::test(start_paused = true)]
