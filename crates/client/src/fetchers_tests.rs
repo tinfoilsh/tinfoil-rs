@@ -645,3 +645,72 @@ async fn discovery_tells_each_router_that_it_tries_with_its_own_host() {
     })
     .await
 }
+
+/// Every report that a rejection hands out names the host that the client
+/// contacted: the error's, and each one that the observer is told.
+#[tokio::test(start_paused = true)]
+async fn the_reports_of_a_rejection_name_the_host() {
+    use crate::internal::testing::{json_host, rejected_report};
+
+    unstuck(async {
+        let calls = Calls::default();
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&told);
+        let error = EnclaveHttpClient::builder("enclave.example.com:8443", Trust::repo("o/n"))
+            .fetch_attestation(calls.fetcher(b"{}"))
+            .on_verification_attempt(move |host, outcome| {
+                let error = outcome.expect_err("rejected");
+                let report = rejected_report(error).expect("a report");
+                log.lock()
+                    .unwrap()
+                    .push((host.to_owned(), json_host(report)));
+            })
+            .connect()
+            .await
+            .expect_err("the document fails verification");
+        let report = rejected_report(&error).expect("a report");
+        assert_eq!(
+            json_host(report).as_deref(),
+            Some("enclave.example.com:8443")
+        );
+        let named = (
+            "enclave.example.com:8443".to_owned(),
+            Some("enclave.example.com:8443".to_owned()),
+        );
+        assert_eq!(*told.lock().unwrap(), [named.clone(), named]);
+    })
+    .await
+}
+
+/// During discovery, the report of each router that is tried names that
+/// router.
+#[tokio::test(start_paused = true)]
+async fn the_report_of_each_router_that_discovery_tries_names_it() {
+    use crate::internal::testing::{json_host, rejected_report};
+
+    unstuck(async {
+        let calls = Calls::default();
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&told);
+        let list =
+            || async { Ok::<_, BoxError>(vec!["a.example".to_owned(), "b.example".to_owned()]) };
+        let _ = RouterHttpClient::builder()
+            .fetch_attestation(calls.fetcher(b"{}"))
+            .fetch_router_list(list)
+            .on_verification_attempt(move |host, outcome| {
+                let report = rejected_report(outcome.expect_err("rejected")).expect("a report");
+                log.lock()
+                    .unwrap()
+                    .push((host.to_owned(), json_host(report)));
+            })
+            .connect()
+            .await
+            .expect_err("no router passes");
+        let told = told.lock().unwrap();
+        assert_eq!(told.len(), 4);
+        for (host, named) in told.iter() {
+            assert_eq!(named.as_deref(), Some(host.as_str()));
+        }
+    })
+    .await
+}

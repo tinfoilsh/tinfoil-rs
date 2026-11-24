@@ -632,6 +632,7 @@ impl Verifier {
                 version: VERIFIER_VERSION.to_owned(),
             },
             verified_at,
+            host: None,
         };
         let mut steps = ReportBuilder::new();
         match self.appraise(trust, doc, nonce, references, pins, now, &mut steps) {

@@ -150,6 +150,14 @@ impl VerificationError {
     pub fn report(&self) -> &VerificationReport {
         &self.report
     }
+
+    /// The error with `host` named in its report, as
+    /// [`VerificationReport::with_host`] names it.
+    #[must_use]
+    pub fn with_host(mut self, host: impl Into<String>) -> Self {
+        self.report.metadata.host = Some(host.into());
+        self
+    }
 }
 
 impl fmt::Display for VerificationError {

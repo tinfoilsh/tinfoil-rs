@@ -316,9 +316,11 @@ release candidates, to the form that every Tinfoil SDK writes. Compared with
 registers of a rejection are `partial_facts.measured.cpu_measurement`, not
 `cpu.measurement`; a code measurement that fixes no register, an empty
 `code_tag` and an unrepresentable time are left out rather than written as
-`{"platform": ..}`, `""` or `null`; and `metadata.verifier` is left out when
-its name or version is empty. No API reads the JSON back: it authorizes
-nothing.
+`{"platform": ..}`, `""` or `null`; `metadata.verifier` is left out when
+its name or version is empty; and a report that a client hands out names the
+host that the client contacted in `metadata.host`, which
+`VerificationMetadata::host` holds too. No API reads the JSON back: it
+authorizes nothing.
 
 `VerifiedFacts` also has `freshness_expires_at()`, which is when the client
 will verify again, and `config()`, `runtime()` and `platform()`, which describe
