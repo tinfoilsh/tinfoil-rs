@@ -77,10 +77,15 @@
 //!
 //! # Features
 //!
-//! - `serde`: implements `serde::Serialize` for [`VerificationReport`],
-//!   [`VerifiedFacts`], [`Register`], [`Measurement`] and [`Expected`], in
-//!   the shape of [`VerificationReport::to_json`] and
-//!   [`VerifiedFacts::to_json`]. Off by default.
+//! - `serde`: implements `serde::Serialize` for [`VerificationReport`] and
+//!   the types that it holds ([`Step`], [`VerifiedFacts`], [`PartialFacts`],
+//!   [`ExpectedFacts`], [`MeasuredFacts`] and [`VerificationMetadata`]), so
+//!   that `serde_json::to_string(&report)` writes the JSON form that every
+//!   Tinfoil SDK writes, as [`VerificationReport::to_json`] describes; for
+//!   [`Measurement`] and [`Expected`], as a measurement of that form; and
+//!   for [`Register`], as a lowercase hex string. There is no `Deserialize`: the JSON form is for
+//!   display and transport, and verified facts that were read from JSON
+//!   would be forgeable. Off by default.
 
 // Clippy has no test exemption for this lint, unlike the other denied
 // lints (see clippy.toml). Overflow in a test is a test failure, not a risk.
@@ -97,6 +102,8 @@ mod options;
 #[cfg(test)]
 mod probes;
 mod report;
+#[cfg(test)]
+mod report_json_tests;
 mod semver;
 mod stub;
 mod verification;

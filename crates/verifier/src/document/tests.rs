@@ -41,9 +41,10 @@ fn default_device_evidence() -> String {
 
 /// The parts of a well-formed document around a dummy quote. Rendering
 /// serializes the endorsed sections once, hashes those bytes, wraps them in
-/// base64 and derives the report data, as an enclave does.
+/// base64 and derives the report data, as an enclave does. Other modules'
+/// tests build their documents with it too.
 #[derive(Clone)]
-struct TestDocument {
+pub(crate) struct TestDocument {
     nonce: Vec<u8>,
     evidence_format: String,
     crypto_material: Vec<u8>,
@@ -54,7 +55,7 @@ struct TestDocument {
 }
 
 impl TestDocument {
-    fn new(nonce: &[u8]) -> Self {
+    pub(crate) fn new(nonce: &[u8]) -> Self {
         Self {
             nonce: nonce.to_vec(),
             evidence_format: SEV_SNP_REPORT_V1_FORMAT.to_owned(),
@@ -65,12 +66,12 @@ impl TestDocument {
         }
     }
 
-    fn with_crypto_material(mut self, section: &str) -> Self {
+    pub(crate) fn with_crypto_material(mut self, section: &str) -> Self {
         self.crypto_material = section.as_bytes().to_vec();
         self
     }
 
-    fn with_collateral(mut self, format: Option<&str>, entries: &str) -> Self {
+    pub(crate) fn with_collateral(mut self, format: Option<&str>, entries: &str) -> Self {
         self.collateral_format = format.map(str::to_owned);
         self.collateral = Some(entries.to_owned());
         self
@@ -85,7 +86,7 @@ impl TestDocument {
         .unwrap()
     }
 
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         let mut out = format!(
             r#"{{"format":"{ATTESTATION_V3_FORMAT}","challenge":{{"nonce":"{}","report_data":"{}","report_data_algorithm":"{REPORT_DATA_V1_ALGORITHM}"}},"cpu_evidence":{{"format":"{}","report_base64":"{}","endorsed":{{"crypto_material_hash":"{}","device_evidence_hash":"{}"}}}},"crypto_material":"{}","device_evidence":"{}""#,
             hex(&self.nonce),

@@ -229,27 +229,35 @@ impl VerifiedFacts {
         self.platform.as_ref()
     }
 
-    /// The facts as compact JSON, for logging or persisting.
+    /// The facts as compact JSON: the `verified_facts` member of the JSON
+    /// form that every Tinfoil SDK writes, which
+    /// [`VerificationReport::to_json`](crate::VerificationReport::to_json)
+    /// describes.
     ///
-    /// Registers are lowercase hex and times are RFC 3339 in UTC. A fact
-    /// that was not established is left out: an open register, an absent
-    /// name or time, and the `config`, `runtime` and `platform` records of
-    /// a code-release verification. The members, in order:
+    /// Registers and digests are lowercase hex and times are RFC 3339 in
+    /// UTC. A fact that was not established is left out, and no member is
+    /// `null` or `""`. The members:
     ///
-    /// - `code_digest`, `code_tag`, `config_repo`: strings;
-    /// - `code_measurement`, `enclave_measurement`: `platform` (`sev-snp`
-    ///   or `tdx`) and the registers `launch`, or `mrtd` and `rtmr0` to
-    ///   `rtmr3`;
-    /// - `crypto_material`: an array of `id`, `format`, `data`;
+    /// - `config_repo`, `code_digest` and `code_tag`: strings, with
+    ///   `code_tag` only when the artifact has a tag;
+    /// - `code_measurement`: `platform` (`sev-snp` or `tdx`) and the
+    ///   registers that the release fixes, `launch`, or some of `mrtd` and
+    ///   `rtmr0` to `rtmr3`; left out when the release fixes none;
+    /// - `enclave_measurement`: `platform` and every register;
     /// - `config`: `source`, `name`, `digest`, `reference`,
-    ///   `signing_key_hint`, `approval_time`, `registry_id`,
-    ///   `signature_time`;
-    /// - `runtime`, `platform`: `source`, `repo`, `tag`, `digest`, `name`,
-    ///   `commit`, `approval_time`;
+    ///   `signing_key_hint`, `approval_time`, `registry_id` and
+    ///   `signature_time`, for a config-based verification only;
+    /// - `runtime` and `platform`: `source`, `repo`, `tag`, `digest`,
+    ///   `name`, `commit` and `approval_time`, for a config-based
+    ///   verification only;
+    /// - `crypto_material`: an array of `id`, `format` and `data`, in the
+    ///   document's order. It is the only member that holds the TLS and
+    ///   HPKE keys;
     /// - `freshness_expires_at`.
     ///
-    /// [`VerificationReport::to_json`](crate::VerificationReport::to_json)
-    /// writes them as its `verified_facts` member, next to the metadata.
+    /// The JSON is for display and transport, and authorizes nothing: no
+    /// API of this crate reads it back into verified facts, so a channel is
+    /// bound only to the keys of facts that a verification returned.
     pub fn to_json(&self) -> String {
         let mut out = String::new();
         self.record().write(&mut out);
@@ -258,31 +266,17 @@ impl VerifiedFacts {
 
     /// The serialised form of the facts.
     pub(crate) fn record(&self) -> Json {
-        let mut members = vec![
-            ("code_digest", Json::text(&self.code_digest)),
-            ("code_tag", Json::text(&self.code_tag)),
-            ("config_repo", Json::text(&self.config_repo)),
-            ("code_measurement", expected_record(&self.code_measurement)),
-            (
-                "enclave_measurement",
-                measurement_record(&self.enclave_measurement),
-            ),
-            (
-                "crypto_material",
-                Json::Array(
-                    self.crypto_material
-                        .iter()
-                        .map(|item| {
-                            Json::Object(vec![
-                                ("id", Json::text(&item.id)),
-                                ("format", Json::text(&item.format)),
-                                ("data", Json::text(&item.data)),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
-        ];
+        let mut members = Vec::new();
+        push_text(&mut members, "config_repo", Some(&self.config_repo));
+        push_text(&mut members, "code_digest", Some(&self.code_digest));
+        push_text(&mut members, "code_tag", Some(&self.code_tag));
+        if let Some(code) = code_measurement_record(&self.code_measurement) {
+            members.push(("code_measurement", code));
+        }
+        members.push((
+            "enclave_measurement",
+            measurement_record(&self.enclave_measurement),
+        ));
         if let Some(config) = &self.config {
             members.push(("config", config_record(config)));
         }
@@ -292,26 +286,46 @@ impl VerifiedFacts {
         if let Some(platform) = &self.platform {
             members.push(("platform", artifact_record(platform)));
         }
-        if let Some(expires_at) = self.freshness_expires_at {
-            members.push(("freshness_expires_at", time_record(expires_at)));
-        }
+        members.push((
+            "crypto_material",
+            Json::Array(
+                self.crypto_material
+                    .iter()
+                    .map(|item| {
+                        let mut members = Vec::new();
+                        push_text(&mut members, "id", Some(&item.id));
+                        push_text(&mut members, "format", Some(&item.format));
+                        push_text(&mut members, "data", Some(&item.data));
+                        Json::Object(members)
+                    })
+                    .collect(),
+            ),
+        ));
+        push_time(
+            &mut members,
+            "freshness_expires_at",
+            self.freshness_expires_at,
+        );
         Json::Object(members)
     }
 }
 
 impl VerificationMetadata {
-    /// The serialised form of the metadata.
+    /// The serialised form of the metadata: `verified_at` and, when its
+    /// name and version are known, `verifier`.
     pub(crate) fn record(&self) -> Json {
-        Json::Object(vec![
-            (
+        let mut members = Vec::new();
+        push_time(&mut members, "verified_at", Some(self.verified_at));
+        if !self.verifier.name.is_empty() && !self.verifier.version.is_empty() {
+            members.push((
                 "verifier",
                 Json::Object(vec![
                     ("name", Json::text(&self.verifier.name)),
                     ("version", Json::text(&self.verifier.version)),
                 ]),
-            ),
-            ("verified_at", time_record(self.verified_at)),
-        ])
+            ));
+        }
+        Json::Object(members)
     }
 }
 
@@ -331,11 +345,12 @@ pub fn crypto_material_data<'a>(
         .map(|item| item.data.as_str())
 }
 
-/// A JSON value of the serialised record: strings, arrays and objects with
-/// their members in order.
+/// A JSON value of the serialised record: integers, strings, arrays and
+/// objects with their members in order. It has no `null`, because the JSON
+/// form leaves out a fact that was not established.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Json {
-    Null,
+    Integer(u32),
     String(String),
     Array(Vec<Json>),
     Object(Vec<(&'static str, Json)>),
@@ -349,7 +364,7 @@ impl Json {
     /// Appends the compact JSON text of the value.
     pub(crate) fn write(&self, out: &mut String) {
         match self {
-            Json::Null => out.push_str("null"),
+            Json::Integer(value) => out.push_str(&value.to_string()),
             Json::String(value) => write_string(value, out),
             Json::Array(items) => {
                 out.push('[');
@@ -411,32 +426,29 @@ fn push_register(
     }
 }
 
-/// Appends `name` with the text when there is one.
+/// Appends `name` with the text when there is one that is not empty: the
+/// JSON form never writes a string that is absent as `""`.
 pub(crate) fn push_text(
     members: &mut Vec<(&'static str, Json)>,
     name: &'static str,
     value: Option<&str>,
 ) {
-    if let Some(value) = value {
+    if let Some(value) = value.filter(|value| !value.is_empty()) {
         members.push((name, Json::text(value)));
     }
 }
 
-/// Appends `name` with the time when there is one.
+/// Appends `name` with the time as RFC 3339 in UTC when there is one. A
+/// time outside the years 0000 to 9999 has no such form and is left out; a
+/// verification holds none.
 fn push_time(
     members: &mut Vec<(&'static str, Json)>,
     name: &'static str,
     value: Option<SystemTime>,
 ) {
-    if let Some(value) = value {
-        members.push((name, time_record(value)));
+    if let Some(instant) = value.and_then(Instant::from_system_time) {
+        members.push((name, Json::String(instant.to_rfc3339())));
     }
-}
-
-/// A time as RFC 3339 in UTC. A time outside the years 0000 to 9999 has no
-/// such form and is written as `null`; a verification holds none.
-pub(crate) fn time_record(time: SystemTime) -> Json {
-    Instant::from_system_time(time).map_or(Json::Null, |instant| Json::String(instant.to_rfc3339()))
 }
 
 /// The registers of an expectation, with the open ones left out.
@@ -459,6 +471,8 @@ pub(crate) fn expected_members(expected: &Expected) -> Vec<(&'static str, Option
     }
 }
 
+/// A measurement in the JSON form: its `platform` and the registers that
+/// are set, named, in lowercase hex.
 pub(crate) fn expected_record(expected: &Expected) -> Json {
     let platform = match expected {
         Expected::SevSnp { .. } => PLATFORM_SEV_SNP,
@@ -471,6 +485,15 @@ pub(crate) fn expected_record(expected: &Expected) -> Json {
     Json::Object(members)
 }
 
+/// The registers that a release fixes, or `None` when it fixes none, so
+/// that a code measurement without a register is left out.
+pub(crate) fn code_measurement_record(expected: &Expected) -> Option<Json> {
+    expected_members(expected)
+        .iter()
+        .any(|(_, register)| register.is_some())
+        .then(|| expected_record(expected))
+}
+
 pub(crate) fn measurement_record(measurement: &Measurement) -> Json {
     expected_record(&measurement.expected())
 }
@@ -478,7 +501,7 @@ pub(crate) fn measurement_record(measurement: &Measurement) -> Json {
 pub(crate) fn config_record(config: &ConfigVerification) -> Json {
     let mut members = vec![("source", Json::text(config.source.as_str()))];
     push_text(&mut members, "name", config.name.as_deref());
-    members.push(("digest", Json::text(&config.digest)));
+    push_text(&mut members, "digest", Some(&config.digest));
     push_text(&mut members, "reference", config.reference.as_deref());
     push_text(
         &mut members,
@@ -495,28 +518,29 @@ pub(crate) fn artifact_record(artifact: &ArtifactVerification) -> Json {
     let mut members = vec![("source", Json::text(artifact.source.as_str()))];
     push_text(&mut members, "repo", artifact.repo.as_deref());
     push_text(&mut members, "tag", artifact.tag.as_deref());
-    members.push(("digest", Json::text(&artifact.digest)));
+    push_text(&mut members, "digest", Some(&artifact.digest));
     push_text(&mut members, "name", artifact.name.as_deref());
     push_text(&mut members, "commit", artifact.commit.as_deref());
     push_time(&mut members, "approval_time", artifact.approval_time);
     Json::Object(members)
 }
 
-/// `serde::Serialize` for the public record types, in the shape of
-/// [`VerifiedFacts::to_json`] and
-/// [`VerificationReport::to_json`](crate::VerificationReport::to_json).
+/// `serde::Serialize` for the report and the types that it holds, in the
+/// JSON form that
+/// [`VerificationReport::to_json`](crate::VerificationReport::to_json) writes. There is no
+/// `Deserialize`: verified facts read from JSON would be forgeable.
 #[cfg(feature = "serde")]
 mod serialize {
     use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 
-    use super::{Json, VerifiedFacts, expected_record, measurement_record};
+    use super::{Json, VerificationMetadata, VerifiedFacts, expected_record, measurement_record};
     use crate::measurement::{Expected, Measurement, Register};
-    use crate::report::VerificationReport;
+    use crate::report::{ExpectedFacts, MeasuredFacts, PartialFacts, Step, VerificationReport};
 
     impl Serialize for Json {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             match self {
-                Json::Null => serializer.serialize_none(),
+                Json::Integer(value) => serializer.serialize_u32(*value),
                 Json::String(value) => serializer.serialize_str(value),
                 Json::Array(items) => {
                     let mut sequence = serializer.serialize_seq(Some(items.len()))?;
@@ -536,18 +560,33 @@ mod serialize {
         }
     }
 
-    /// The fields of [`VerifiedFacts::to_json`], in the same order.
-    impl Serialize for VerifiedFacts {
-        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            self.record().serialize(serializer)
-        }
+    /// Implements `Serialize` as the type's serialised record.
+    macro_rules! serialize_record {
+        ($($(#[$doc:meta])* $type:ty;)*) => {$(
+            $(#[$doc])*
+            impl Serialize for $type {
+                fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                    self.record().serialize(serializer)
+                }
+            }
+        )*};
     }
 
-    /// The fields of [`VerificationReport::to_json`], in the same order.
-    impl Serialize for VerificationReport {
-        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            self.record().serialize(serializer)
-        }
+    serialize_record! {
+        /// The JSON form of [`VerificationReport::to_json`].
+        VerificationReport;
+        /// The `verified_facts` member of the JSON form.
+        VerifiedFacts;
+        /// The `partial_facts` member of the JSON form.
+        PartialFacts;
+        /// The `partial_facts.expected` member of the JSON form.
+        ExpectedFacts;
+        /// The `partial_facts.measured` member of the JSON form.
+        MeasuredFacts;
+        /// A member of the `steps` of the JSON form.
+        Step;
+        /// The `metadata` member of the JSON form.
+        VerificationMetadata;
     }
 
     /// Lowercase hex.
