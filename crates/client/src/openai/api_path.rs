@@ -168,6 +168,18 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_api_path_is_a_configuration_error_and_an_absent_one_is_the_default() {
+        let root = url("https://enclave.example.com/");
+        let error = join(&root, Some("")).expect_err("an empty API path is refused");
+        assert_eq!(error.kind(), ErrorKind::Configuration);
+        assert!(error.to_string().contains("invalid API path"), "{error}");
+        assert_eq!(
+            join(&root, None).unwrap().as_str(),
+            "https://enclave.example.com/v1/"
+        );
+    }
+
+    #[test]
     fn an_api_path_outside_the_rules_is_refused() {
         let refused = [
             ("", "absolute path"),
