@@ -250,7 +250,7 @@ fn a_quote_rejection_after_a_skipped_provenance_matches_the_golden_file() {
     )
     .into_bytes();
     let config = format!(
-        "cvm-version: 0.15.0@sha256:{}\n",
+        r#"{{"cvm-version":"0.15.0@sha256:{}"}}"#,
         encode_lower_hex(&Sha256::digest(&runtime))
     )
     .into_bytes();

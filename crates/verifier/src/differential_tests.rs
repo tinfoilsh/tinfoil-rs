@@ -798,11 +798,11 @@ fn the_fixture_covers_both_flows_on_both_platforms() {
     for prefix in ["legacy-sev/", "legacy-tdx/", "config-sev/", "config-tdx/"] {
         assert!(accepted(prefix) >= 10, "{prefix}: {}", accepted(prefix));
     }
-    // A config, a runtime and a platform artifact that are all endorsed and
-    // approved, with the earliest approval setting the deadline.
+    // A runtime and a platform artifact that are endorsed and approved,
+    // with the earliest approval setting the deadline.
     assert!(accepted("config-sev/full-") >= 10);
     // Config endorsements under a registry certificate, for the public and
     // for a private registry.
-    assert!(accepted("config-sev/certified-private-") >= 10);
-    assert!(accepted("config-sev/certified-public-") >= 10);
+    assert!(accepted("config-sev/certified-private-") >= 7);
+    assert!(accepted("config-sev/certified-public-") >= 7);
 }

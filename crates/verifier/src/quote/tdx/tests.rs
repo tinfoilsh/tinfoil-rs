@@ -1721,7 +1721,7 @@ fn every_dimension_of_the_policy_is_enforced() {
 #[test]
 fn a_config_binding_fixes_the_config_identifier_and_every_register() {
     let mut bytes = production_quote();
-    let config_hash = Sha256::digest(b"approved YAML bytes");
+    let config_hash = Sha256::digest(b"approved config bytes");
     let mut config_id = [0u8; 48];
     config_id[..32].copy_from_slice(&config_hash);
     bytes[48 + 0xb8..48 + 0xe8].copy_from_slice(&config_id);

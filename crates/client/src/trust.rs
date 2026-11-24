@@ -77,7 +77,7 @@ pub enum Trust {
         /// The `/org/project/revision` identity that the caller associates
         /// with the config.
         name: Option<String>,
-        /// The config, 1 byte to 1 MiB.
+        /// The config, 1 byte to 1 MiB. It must be a JSON config.
         bytes: Vec<u8>,
     },
     /// `attestation-collaterals/v2` collateral for `repo` or
@@ -223,11 +223,11 @@ mod tests {
     fn debug_output_shows_no_config_bytes() {
         let trust = Trust::EmbeddedConfig {
             name: Some("/org/project/v1".into()),
-            bytes: b"cvm-version: secret-config".to_vec(),
+            bytes: br#"{"cvm-version":"secret-config"}"#.to_vec(),
         };
         let printed = format!("{trust:?}");
         assert!(!printed.contains("secret-config"), "{printed}");
-        assert!(printed.contains("[26 bytes]"), "{printed}");
+        assert!(printed.contains("[31 bytes]"), "{printed}");
         assert!(printed.contains("/org/project/v1"), "{printed}");
     }
 

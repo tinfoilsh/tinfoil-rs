@@ -30,7 +30,7 @@ pub enum EmbeddedConfig {
     /// The exact config bytes. Their digest and the runtime that they pin
     /// are derived from them.
     Bytes {
-        /// The config, 1 byte to 1 MiB.
+        /// The config, 1 byte to 1 MiB. It must be a JSON config.
         bytes: Vec<u8>,
         /// The `/org/project/revision` identity that the caller associates
         /// with the config. Without one, the config matches no repository

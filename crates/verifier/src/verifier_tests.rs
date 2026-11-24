@@ -6,10 +6,12 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use sha2::{Digest, Sha256};
 
 use crate::canonical::encode_lower_hex;
-use crate::differential_tests::{Fixture, instant, pin, text};
+use crate::differential_tests::{Fixture, instant, member, object, pin, text};
 use crate::document::DocumentError;
 use crate::endorsement::EndorsementError;
 use crate::error::{BoxError, Error, Layer};
@@ -56,7 +58,7 @@ impl Inputs {
         )
         .into_bytes();
         let config = format!(
-            "cvm-version: 0.15.0@sha256:{}\n",
+            r#"{{"cvm-version":"0.15.0@sha256:{}"}}"#,
             encode_lower_hex(&Sha256::digest(&runtime))
         )
         .into_bytes();
@@ -445,7 +447,10 @@ fn embedded_references_are_checked_when_the_verifier_is_built() {
             only(bytes(&vec![b'a'; (1 << 20) + 1], None), None, None),
             "outside allowed bounds",
         ),
-        (only(bytes(b"a: b\n", None), None, None), "cvm-version"),
+        (
+            only(bytes(br#"{"a":"b"}"#, None), None, None),
+            "cvm-version",
+        ),
         (
             only(bytes(&inputs.config, Some("/invalid")), None, None),
             "config",
@@ -826,7 +831,7 @@ fn the_collateral_of_the_document_selects_the_part_of_the_pin() {
 
     // Registry collateral: only the project part is matched, and a
     // repository of the project's name does not stand for it.
-    let name = "config-sev/full-same";
+    let name = "config-sev/endorsed-v2-keyed-digest-only";
     let approved = text(fixture.case(name), "repo");
     accepted(name, &Pin::project(approved));
     accepted(name, &Pin::repo(OTHER).with_project(approved));
@@ -848,7 +853,10 @@ fn the_collateral_of_the_document_selects_the_part_of_the_pin() {
 
     // A malformed part is the caller's mistake whichever collateral the
     // document carries.
-    for name in ["legacy-sev/default", "config-sev/full-same"] {
+    for name in [
+        "legacy-sev/default",
+        "config-sev/endorsed-v2-keyed-digest-only",
+    ] {
         let named = text(fixture.case(name), "repo");
         for malformed in [
             Pin::repo("not a reference").with_project(named),
@@ -1283,19 +1291,46 @@ fn a_config_authorizer_never_chooses_the_kind_of_error() {
         cause.downcast_ref::<Error>(),
         Some(Error::Usage(_))
     ));
+}
 
-    let accepting = artifacts(authorizer(accept));
-    let report = verify(&accepting).unwrap();
-    let verified = report.verified_facts().unwrap();
-    let config = verified.config().unwrap();
-    assert_eq!(config.source, ReferenceSource::Policy);
+#[test]
+fn the_runtime_pin_of_an_authorized_config_is_enforced() {
+    let fixture = Fixture::load();
+    let case = fixture.case("config-sev/authorizer-accept");
+    let recorded = String::from_utf8(fixture.document(text(case, "doc")).unwrap()).unwrap();
+    let carried = crate::document::decode(recorded.as_bytes()).unwrap();
+    let carried = carried.config_endorsement().unwrap().config().unwrap();
+    // The document, with a config that pins the embedded runtime manifest
+    // under another release.
+    let embedded = fixture.verifier(case).unwrap().embedded;
+    let manifest = encode_lower_hex(&Sha256::digest(embedded.runtime.as_ref().unwrap()));
+    let config = format!(r#"{{"cvm-version":"0.16.0@sha256:{manifest}"}}"#);
+    let (from, to) = (STANDARD.encode(carried), STANDARD.encode(config));
+    assert_eq!(recorded.matches(&from).count(), 1);
+    let document = recorded.replace(&from, &to);
+
+    let (trust, policy) = authorizer(accept);
+    let mut verifier = Verifier::with_test_roots(
+        trust,
+        policy,
+        fixture.root(text(case, "sigstore")).as_deref(),
+        fixture.root(text(case, "amd")),
+        None,
+    )
+    .unwrap();
+    verifier.embedded = embedded;
+    let Err(Error::Verification(rejected)) = verifier.verify_at(
+        document.as_bytes(),
+        &Fixture::nonce(case),
+        &Pin::none(),
+        instant(case),
+    ) else {
+        panic!("want a rejection");
+    };
+    assert_eq!(rejected.layer(), Layer::Provenance);
     assert_eq!(
-        (config.name.as_deref(), config.reference.as_deref()),
-        (None, None)
-    );
-    assert_eq!(
-        verified.freshness_expires_at(),
-        at("2034-12-30T00:00:00Z").to_system_time()
+        rejected.to_string(),
+        "verification error: provenance: runtime manifest version \"v0.15.0\" does not match the config's pin \"v0.16.0\""
     );
 }
 
@@ -1304,6 +1339,9 @@ fn a_config_authorizer_sees_the_material_of_the_document() {
     use std::sync::{Arc, Mutex};
 
     let fixture = Fixture::load();
+    // The digest of the config that the recorded documents measure.
+    let options = object(member(fixture.case("config-sev/embedded-all"), "options"));
+    let measured = text(object(member(options, "embedded")), "config_ref_digest");
     for (name, signed) in [
         ("config-sev/authorizer-accept", false),
         ("config-sev/endorsed-v1-authorizer-accept", true),
@@ -1326,21 +1364,23 @@ fn a_config_authorizer_sees_the_material_of_the_document() {
         )
         .unwrap();
         verifier.embedded = embedded;
-        let verified = verifier
+        // The recorded config is not JSON, so verification ends at its
+        // runtime pin, after the authorizer has run.
+        verifier
             .verify_at(
                 &document,
                 &Fixture::nonce(case),
                 &Pin::none(),
                 instant(case),
             )
-            .unwrap();
+            .unwrap_err();
 
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "{name}");
         let endorsement = &seen[0];
         assert_eq!(
             encode_lower_hex(&Sha256::digest(endorsement.config())),
-            verified.verified_facts().unwrap().config().unwrap().digest
+            measured
         );
         assert_eq!(endorsement.issuer_certificate_der(), None);
         assert_eq!(endorsement.reference().is_some(), signed, "{name}");
@@ -1395,10 +1435,10 @@ fn the_accepted_registries_are_never_left_open_by_default() {
     let fixture = Fixture::load();
     for (name, accepted) in [
         (
-            "config-sev/certified-private-with-config-public-only/",
+            "config-sev/certified-private-digest-only-public-only/",
             false,
         ),
-        ("config-sev/certified-private-with-config-exclusive/", true),
+        ("config-sev/certified-private-digest-only-exclusive/", true),
     ] {
         let case = fixture.case(name);
         let verifier = fixture.verifier(case).unwrap();

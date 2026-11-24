@@ -343,7 +343,7 @@ fn recorded_config_endorsements_get_their_recorded_outcomes() {
     let outcome = replay(&fixture, "config", |case, reference| {
         verify_config(&fixture, case, reference)
     });
-    assert_eq!(outcome, (52, 0));
+    assert_eq!(outcome, (49, 0));
 }
 
 #[test]
