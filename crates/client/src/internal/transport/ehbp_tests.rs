@@ -1432,7 +1432,7 @@ async fn a_rejected_request_succeeds_once_more_under_a_new_verification() {
     let response = transport.round_trip(replay).await.expect("a response");
     assert_eq!(text(response).await, "opened the body");
     assert_eq!(script.calls(), 2);
-    assert_eq!(transport.current().name, "new");
+    assert_eq!(transport.last_success().name, "new");
 
     let seen = server.seen();
     assert_eq!(seen.len(), 2);

@@ -67,12 +67,21 @@ impl RouterHttpClient {
     /// client chose, without I/O: the attempt's report if it passed, and
     /// otherwise the error that the client reported for it. It describes
     /// the chosen router only; the attempts that discovery made on other
-    /// routers are told only to the `on_verification` observer, which is
-    /// not told of a host that discovery refused, never reached or
+    /// routers are told only to the `on_verification_attempt` observer,
+    /// which is not told of a host that discovery refused, never reached or
     /// abandoned at its deadline. See
-    /// [`EnclaveHttpClient::last_verification`](crate::EnclaveHttpClient::last_verification).
-    pub fn last_verification(&self) -> Result<VerificationReport, Error> {
-        self.inner.last_verification()
+    /// [`EnclaveHttpClient::last_verification_attempt`](crate::EnclaveHttpClient::last_verification_attempt).
+    pub fn last_verification_attempt(&self) -> Result<VerificationReport, Error> {
+        self.inner.last_verification_attempt()
+    }
+
+    /// The report of the verification of the chosen router that the
+    /// client's requests are bound to now, without I/O, or `None` when
+    /// there is none: once it has expired or a failure has discarded it.
+    /// See
+    /// [`EnclaveHttpClient::current_verification`](crate::EnclaveHttpClient::current_verification).
+    pub fn current_verification(&self) -> Option<VerificationReport> {
+        self.inner.current_verification()
     }
 
     /// Returns the report of a verification of the router that is valid
@@ -188,14 +197,14 @@ impl RouterHttpClientBuilder {
     /// router that the attempt verified: each router that discovery tries,
     /// the fallback router included, and the chosen router whenever the
     /// client verifies it again. Otherwise as
-    /// [`EnclaveHttpClientBuilder::on_verification`](crate::EnclaveHttpClientBuilder::on_verification).
+    /// [`EnclaveHttpClientBuilder::on_verification_attempt`](crate::EnclaveHttpClientBuilder::on_verification_attempt).
     /// A probe that discovery abandons when its 30 seconds run out has no
     /// outcome and is not told.
-    pub fn on_verification<F>(mut self, observer: F) -> Self
+    pub fn on_verification_attempt<F>(mut self, observer: F) -> Self
     where
         F: Fn(&str, Result<&VerificationReport, &Error>) + Send + Sync + 'static,
     {
-        self.options.common.on_verification = Some(Arc::new(observer));
+        self.options.common.on_verification_attempt = Some(Arc::new(observer));
         self
     }
 
@@ -308,14 +317,14 @@ impl RouterHttpClientBuilder {
         // against the router pin.
         let verifier = Arc::clone(fallback.verifier());
         let check = fallback.verification_check().cloned();
-        let observer = fallback.on_verification().cloned();
+        let observer = fallback.on_verification_attempt().cloned();
         let enclave_for = move |host: &str| {
             let checked = enclave::Config {
                 host: host.to_owned(),
                 pin: router::router_pin(),
                 verifier: Some(Arc::clone(&verifier)),
                 verification_check: check.clone(),
-                on_verification: observer.clone(),
+                on_verification_attempt: observer.clone(),
             }
             .check()?;
             Ok(Enclave::from_checked(
@@ -353,7 +362,7 @@ impl RouterHttpClientBuilder {
             pin: router::router_pin(),
             verifier: Some(Arc::new(verifier)),
             verification_check: common.verification_check,
-            on_verification: common.on_verification,
+            on_verification_attempt: common.on_verification_attempt,
         }
         .check()?;
         Ok((

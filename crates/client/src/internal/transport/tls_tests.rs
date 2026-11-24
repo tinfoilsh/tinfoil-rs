@@ -1068,7 +1068,7 @@ async fn a_key_failure_makes_the_transport_verify_again_and_the_request_then_suc
     let response = f.transport.send(get(&server, "/secret")).await.unwrap();
     assert_eq!(response.body().await.unwrap(), "/secret");
     assert_eq!(f.script.calls(), 2);
-    assert_eq!(f.transport.current().name, "after");
+    assert_eq!(f.transport.last_success().name, "after");
     assert_eq!(server.requests(), ["GET /secret"]);
 }
 
@@ -1165,7 +1165,7 @@ async fn a_reverify_that_fails_attestation_closes_the_old_connection_and_the_nex
     let response = f.transport.send(get(&server, "/2")).await.unwrap();
     assert_eq!(response.body().await.unwrap(), "/2");
     assert_eq!(f.script.calls(), 3);
-    assert_eq!(f.transport.current().name, "second");
+    assert_eq!(f.transport.last_success().name, "second");
     assert_eq!(server.accepted(), 2);
     assert_eq!(server.requests(), ["GET /1", "GET /2"]);
 }

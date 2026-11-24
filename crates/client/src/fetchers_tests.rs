@@ -319,7 +319,7 @@ async fn a_verification_after_the_first_uses_the_fetcher_too() {
             pin: crate::verifier::Pin::repo("o/n"),
             verifier: None,
             verification_check: None,
-            on_verification: None,
+            on_verification_attempt: None,
         }
         .check()
         .unwrap();
@@ -549,7 +549,7 @@ async fn a_rejected_document_reaches_the_caller_and_the_observer_with_its_report
                 *count.lock().unwrap() += 1;
                 Ok(())
             })
-            .on_verification(observe)
+            .on_verification_attempt(observe)
             .connect()
             .await
             .expect_err("the document fails verification");
@@ -589,7 +589,7 @@ async fn a_failed_fetch_is_told_without_a_report() {
         };
         let error = EnclaveHttpClient::builder("enclave.example.com", Trust::repo("o/n"))
             .fetch_attestation(failing)
-            .on_verification(observe)
+            .on_verification_attempt(observe)
             .connect()
             .await
             .expect_err("the fetch fails");
@@ -617,7 +617,7 @@ async fn discovery_tells_each_router_that_it_tries_with_its_own_host() {
         let _ = RouterHttpClient::builder()
             .fetch_attestation(calls.fetcher(b"{}"))
             .fetch_router_list(list)
-            .on_verification(observe)
+            .on_verification_attempt(observe)
             .connect()
             .await
             .expect_err("no router passes");

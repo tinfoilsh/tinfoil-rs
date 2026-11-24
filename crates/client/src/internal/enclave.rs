@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use crate::error::{Error, ErrorKind};
 use crate::internal::transport::base_url::authority_url;
 use crate::internal::{BoxFuture, Clock, fetch};
-use crate::options::{Check, Notify, OnVerification, VerificationCheck};
+use crate::options::{Check, Notify, OnVerificationAttempt, VerificationCheck};
 use crate::verifier::{
     BoxError, CRYPTO_MATERIAL_ID_HPKE, CRYPTO_MATERIAL_ID_TLS, CryptoMaterialItem,
     KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT, NONCE_SIZE, Pin, VerificationReport,
@@ -98,7 +98,7 @@ pub(crate) struct Config {
     /// The caller's veto.
     pub(crate) verification_check: Option<VerificationCheck>,
     /// The caller's observer of each attempt.
-    pub(crate) on_verification: Option<OnVerification>,
+    pub(crate) on_verification_attempt: Option<OnVerificationAttempt>,
 }
 
 /// One enclave and the policy that its attestation is verified against.
@@ -108,7 +108,7 @@ pub(crate) struct Enclave<V: Evidence = VerificationReport> {
     verifier: Option<Arc<Verifier>>,
     source: Source<V>,
     check: Option<Check<V::Facts>>,
-    on_verification: Option<Notify<V>>,
+    on_verification_attempt: Option<Notify<V>>,
     clock: Clock,
 }
 
@@ -118,7 +118,7 @@ pub(crate) struct Checked {
     pin: Pin,
     verifier: Arc<Verifier>,
     verification_check: Option<VerificationCheck>,
-    on_verification: Option<OnVerification>,
+    on_verification_attempt: Option<OnVerificationAttempt>,
 }
 
 impl Checked {
@@ -133,8 +133,8 @@ impl Checked {
     }
 
     /// The caller's observer of each attempt, if there is one.
-    pub(crate) fn on_verification(&self) -> Option<&OnVerification> {
-        self.on_verification.as_ref()
+    pub(crate) fn on_verification_attempt(&self) -> Option<&OnVerificationAttempt> {
+        self.on_verification_attempt.as_ref()
     }
 
     /// The verification policy: the configured one, or the default
@@ -171,7 +171,7 @@ impl Config {
             pin: self.pin,
             verifier,
             verification_check: self.verification_check,
-            on_verification: self.on_verification,
+            on_verification_attempt: self.on_verification_attempt,
         })
     }
 }
@@ -226,7 +226,7 @@ impl Enclave<VerificationReport> {
             verifier: Some(verifier),
             source,
             check: checked.verification_check,
-            on_verification: checked.on_verification,
+            on_verification_attempt: checked.on_verification_attempt,
             clock,
         }
     }
@@ -254,7 +254,7 @@ impl<V: Evidence> Enclave<V> {
             verifier: None,
             source,
             check,
-            on_verification: None,
+            on_verification_attempt: None,
             clock,
         }
     }
@@ -262,7 +262,7 @@ impl<V: Evidence> Enclave<V> {
     /// This enclave, with `notify` as the observer of each attempt.
     #[cfg(test)]
     pub(crate) fn notifying(mut self, notify: Notify<V>) -> Self {
-        self.on_verification = Some(notify);
+        self.on_verification_attempt = Some(notify);
         self
     }
 
@@ -356,7 +356,7 @@ impl<V: Evidence> Enclave<V> {
     /// code: a panic ends here, so that it never unwinds through a
     /// verification that other callers share, and it changes nothing.
     pub(crate) fn notify(&self, outcome: Result<&V, &Error>) {
-        if let Some(notify) = &self.on_verification {
+        if let Some(notify) = &self.on_verification_attempt {
             let _ = catch_unwind(AssertUnwindSafe(|| notify(&self.host, outcome)));
         }
     }
@@ -849,7 +849,7 @@ mod tests {
             pin,
             verifier: None,
             verification_check: None,
-            on_verification: None,
+            on_verification_attempt: None,
         }
     }
 

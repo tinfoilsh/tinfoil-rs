@@ -26,7 +26,7 @@ async fn the_router_is_discovered_verified_and_reached_over_a_pinned_connection(
         .await
         .unwrap();
 
-    let report = client.last_verification().unwrap();
+    let report = client.last_verification_attempt().unwrap();
     let verified = report.verified_facts().unwrap();
     assert_eq!(
         verified.config_repo(),
@@ -103,7 +103,7 @@ mod openai {
             .await
             .unwrap();
         let client = OpenAIClient::new(http, OpenAIOptions::default(), openai_config()).unwrap();
-        let report = client.http_client().last_verification().unwrap();
+        let report = client.http_client().last_verification_attempt().unwrap();
         assert!(report.verified_facts().unwrap().hpke_public_key().is_some());
         let response = client.chat().create(chat_request()).await.unwrap();
         assert!(!response.choices.is_empty());

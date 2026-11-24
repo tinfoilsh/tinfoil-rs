@@ -315,11 +315,136 @@ async fn the_client_reports_its_route_and_its_last_verification() {
         assert_eq!(f.client.enclave(), ENCLAVE);
         assert_eq!(f.client.transport_mode(), TransportMode::Tls);
         assert_eq!(f.client.base_url().as_str(), "https://enclave.example.com/");
-        assert_eq!(f.client.current().name, "first");
+        assert_eq!(f.client.last_success().name, "first");
         assert_eq!(f.client.ensure_verified().await.unwrap().name, "first");
         assert_eq!(f.script.calls(), 1);
         assert_eq!(f.client.reverify().await.unwrap().name, "second");
-        assert_eq!(f.client.current().name, "second");
+        assert_eq!(f.client.last_success().name, "second");
+    })
+    .await
+}
+
+// The current verification.
+
+fn name_of(evidence: Option<Record>) -> Option<&'static str> {
+    evidence.map(|evidence| evidence.name)
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_current_verification_is_the_fresh_one_without_io() {
+    unstuck(async {
+        let f = fake(vec![ready("first")], settings(), |_| Answer::Text("ok")).await;
+        let ensured = f.client.ensure_verified().await.unwrap();
+        let current = f.client.current_verification().expect("a verification");
+        assert_eq!(current, ensured);
+        assert_eq!(f.client.last_verification_attempt().unwrap(), current);
+        assert_eq!(f.script.calls(), 1, "no verification for the getter");
+
+        // The report is a copy.
+        let mut copy = current;
+        copy.name = "changed";
+        assert_eq!(name_of(f.client.current_verification()), Some("first"));
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reverification_that_fails_with_a_network_error_keeps_the_current_verification() {
+    unstuck(async {
+        let f = fake(
+            vec![
+                ready("first"),
+                Step::Ready(Err(Error::network("unreachable"))),
+                Step::Ready(Err(Error::network("still unreachable"))),
+            ],
+            settings(),
+            |_| Answer::Text("ok"),
+        )
+        .await;
+        let error = f.client.reverify().await.expect_err("unreachable");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert_eq!(name_of(f.client.current_verification()), Some("first"));
+        let last = f
+            .client
+            .last_verification_attempt()
+            .expect_err("the failure");
+        assert_eq!(last.to_string(), error.to_string());
+
+        // Requests still go through under it.
+        get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect("sent under the cached verification");
+        assert_eq!(f.bindings(), ["first"]);
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reverification_that_fails_attestation_leaves_no_current_verification() {
+    unstuck(async {
+        let mut steps = vec![ready("first")];
+        steps.extend(rejected_twice());
+        steps.push(later("second"));
+        let f = fake(steps, settings(), |_| Answer::Text("ok")).await;
+
+        let error = f.client.reverify().await.expect_err("rejected");
+        assert_eq!(error.kind(), ErrorKind::Attestation);
+        // "first" is fresh for another hour, but a failure discarded it.
+        assert_eq!(name_of(f.client.current_verification()), None);
+
+        let second = f.client.ensure_verified().await.unwrap();
+        assert_eq!(second.name, "second");
+        assert_eq!(f.client.current_verification(), Some(second));
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_key_rejection_leaves_no_current_verification() {
+    unstuck(async {
+        let f = fake(
+            vec![ready("before"), later("after")],
+            settings(),
+            |sent| match sent.binding {
+                "before" => Answer::LacksKey,
+                _ => Answer::Text("ok"),
+            },
+        )
+        .await;
+        // A stream is not replayed, so nothing verifies after the
+        // rejection.
+        post(&f.client, "https://enclave.example.com/v1/x")
+            .body(stream(&["payload"]))
+            .send()
+            .await
+            .expect_err("rejected");
+        assert_eq!(f.script.calls(), 1);
+        assert_eq!(name_of(f.client.current_verification()), None);
+        assert_eq!(f.client.last_verification_attempt().unwrap().name, "before");
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_expired_verification_is_not_current_until_the_next_one() {
+    unstuck(async {
+        let f = fake(vec![ready("first"), later("second")], settings(), |_| {
+            Answer::Text("ok")
+        })
+        .await;
+        tokio::time::advance(HOUR - Duration::from_secs(1)).await;
+        assert_eq!(name_of(f.client.current_verification()), Some("first"));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(name_of(f.client.current_verification()), None);
+        assert_eq!(f.script.calls(), 1, "the getter starts no verification");
+        assert_eq!(f.client.last_verification_attempt().unwrap().name, "first");
+
+        get(&f.client, "https://enclave.example.com/")
+            .send()
+            .await
+            .expect("verified by the request");
+        assert_eq!(name_of(f.client.current_verification()), Some("second"));
     })
     .await
 }
@@ -539,7 +664,7 @@ async fn a_key_rejection_is_healed_by_one_replay_under_a_new_verification() {
         assert_eq!(sent[1].text(), "payload");
         assert_eq!(sent[1].headers.get("x-request").unwrap(), "1");
         assert_eq!(sent[1].method, Method::POST);
-        assert_eq!(f.client.current().name, "after");
+        assert_eq!(f.client.last_success().name, "after");
     })
     .await
 }
@@ -966,7 +1091,7 @@ async fn a_failed_reverification_fails_the_request_and_sends_nothing() {
         assert_eq!(error.kind(), ErrorKind::Network);
         assert!(f.sent().is_empty());
         // The last verification is still what the client reports.
-        assert_eq!(f.client.current().name, "first");
+        assert_eq!(f.client.last_success().name, "first");
 
         get(&f.client, "https://enclave.example.com/")
             .send()
@@ -1162,7 +1287,7 @@ async fn a_late_rejection_of_a_replaced_verification_starts_no_new_one() {
             .unwrap()
             .expect("replayed under the newer verification");
         assert_eq!(f.script.calls(), 2);
-        assert_eq!(f.client.current().name, "after");
+        assert_eq!(f.client.last_success().name, "after");
     })
     .await
 }
@@ -1280,7 +1405,7 @@ async fn the_deadline_covers_the_wait_for_a_verification() {
             .await
             .expect("verified again");
         assert_eq!(f.script.calls(), 3);
-        assert_eq!(f.client.current().name, "third");
+        assert_eq!(f.client.last_success().name, "third");
     })
     .await
 }
@@ -1414,7 +1539,7 @@ async fn ensure_verified_and_reverify_end_at_the_clients_timeout() {
         let error = f.client.reverify().await.expect_err("stuck");
         assert_deadline(&error);
         assert_eq!(started.elapsed(), Duration::from_secs(5));
-        assert_eq!(f.client.current().name, "first");
+        assert_eq!(f.client.last_success().name, "first");
 
         tokio::time::advance(HOUR).await;
         let started = tokio::time::Instant::now();
@@ -1460,7 +1585,7 @@ async fn a_callers_deadline_ends_its_wait_for_a_verification_that_another_caller
         gate.notify_one();
         soon(patient).await.unwrap().expect("verified and sent");
         assert_eq!(f.script.calls(), 2);
-        assert_eq!(f.client.current().name, "second");
+        assert_eq!(f.client.last_success().name, "second");
     })
     .await
 }
@@ -1509,13 +1634,13 @@ async fn dropping_a_request_leaves_the_client_usable_whatever_it_was_waiting_for
         waiting.abort();
         assert!(waiting.await.unwrap_err().is_cancelled());
         // Nothing half-finished was published.
-        assert_eq!(f.client.current().name, "first");
+        assert_eq!(f.client.last_success().name, "first");
         get(&f.client, "https://enclave.example.com/")
             .send()
             .await
             .expect("usable");
         assert_eq!(f.script.calls(), 3);
-        assert_eq!(f.client.current().name, "third");
+        assert_eq!(f.client.last_success().name, "third");
     })
     .await
 }
@@ -1600,7 +1725,7 @@ mod options {
             pin,
             verifier,
             verification_check: None,
-            on_verification: None,
+            on_verification_attempt: None,
         }
     }
 
@@ -1971,7 +2096,7 @@ mod over_tls {
             .expect("healed");
         assert_eq!(soon(response.text()).await.unwrap(), "/secret");
         assert_eq!(script.calls(), 2);
-        assert_eq!(client.current().name, "after");
+        assert_eq!(client.last_success().name, "after");
         // The request reached the server once: the first attempt ended in
         // the handshake.
         assert_eq!(server.requests(), ["GET /secret"]);
@@ -2423,7 +2548,7 @@ mod over_ehbp {
             .await
             .expect("still valid");
         assert_eq!(soon(response.text()).await.unwrap(), "echo:two");
-        assert_eq!((script.calls(), client.current().name), (1, "first"));
+        assert_eq!((script.calls(), client.last_success().name), (1, "first"));
 
         // At the deadline the next request verifies before it is sent.
         *now.lock().unwrap() += Duration::from_micros(1);
@@ -2431,7 +2556,7 @@ mod over_ehbp {
             .await
             .expect("under the renewed verification");
         assert_eq!(soon(response.text()).await.unwrap(), "echo:three");
-        assert_eq!((script.calls(), client.current().name), (2, "second"));
+        assert_eq!((script.calls(), client.last_success().name), (2, "second"));
         // A new verification binds anew: its requests take a connection of
         // their own.
         assert_eq!(server.accepted(), 2);

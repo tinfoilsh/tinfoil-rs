@@ -125,11 +125,46 @@ impl EnclaveHttpClient {
     /// refused, has no report.
     ///
     /// It checks no freshness: a report that it returns may have expired
-    /// or been discarded since. Use
-    /// [`ensure_verified`](Self::ensure_verified) for one that is valid
-    /// now. The report is a copy for the caller to keep.
-    pub fn last_verification(&self) -> Result<VerificationReport, Error> {
-        self.inner.last_verification()
+    /// or been discarded since.
+    /// [`current_verification`](Self::current_verification) returns the
+    /// verification that requests are bound to now, and
+    /// [`ensure_verified`](Self::ensure_verified) one that is valid now,
+    /// verifying first if needed. The report is a copy for the caller to
+    /// keep.
+    pub fn last_verification_attempt(&self) -> Result<VerificationReport, Error> {
+        self.inner.last_verification_attempt()
+    }
+
+    /// The report of the verification that the client's requests are
+    /// bound to now, without I/O, or `None` when there is none.
+    ///
+    /// It is the report of the latest successful verification while that
+    /// verification admits requests: its freshness deadline has not
+    /// passed, and no failure has discarded it. It is `None`:
+    ///
+    /// - after a verification that failed with an attestation error,
+    ///   whether through [`reverify`](Self::reverify), a verification
+    ///   after an expiry or the verification after a key rotation, and
+    ///   after the enclave rejected the keys that a request was sent
+    ///   under;
+    /// - once the freshness deadline has passed.
+    ///
+    /// Either way it stays `None` until a later verification succeeds. A
+    /// failure that keeps the verification, a network or a configuration
+    /// error or a verification that every caller dropped, leaves it
+    /// unchanged while it is fresh, although
+    /// [`last_verification_attempt`](Self::last_verification_attempt) then
+    /// returns that failure.
+    ///
+    /// It never starts a verification, and the client does not verify in
+    /// the background, so it is `None` between a verification's expiry and
+    /// the next request or [`ensure_verified`](Self::ensure_verified). A
+    /// readiness or health check should therefore call `ensure_verified`,
+    /// which returns at once while the verification is valid. The answer
+    /// holds when it is given: the verification can expire right after.
+    /// The report is a copy for the caller to keep.
+    pub fn current_verification(&self) -> Option<VerificationReport> {
+        self.inner.current_verification()
     }
 
     /// Returns the report of a verification that is valid now, verifying
@@ -295,25 +330,26 @@ impl EnclaveHttpClientBuilder {
     ///
     /// It is given the enclave's host and the attempt's outcome: the same
     /// report or error that
-    /// [`last_verification`](EnclaveHttpClient::last_verification) returns
-    /// for the attempt. A first attempt that is retried is told before the
+    /// [`last_verification_attempt`](EnclaveHttpClient::last_verification_attempt)
+    /// returns for the attempt. A first attempt that is retried is told before the
     /// pause that precedes the retry. An attempt that is abandoned, because
     /// every caller that waited for it was dropped or ran out of time, has
     /// no outcome and is not told.
     ///
     /// The client holds none of its locks while it calls the observer, so
-    /// the observer may call the client, `last_verification` for example.
+    /// the observer may call the client, `last_verification_attempt` or
+    /// `current_verification` for example.
     /// Requests that wait for the verification wait for the observer too,
     /// so it should be fast, and it may be called from several threads at
     /// once. It cannot change the outcome; reject an enclave with
     /// [`verification_check`](Self::verification_check). A panic in the
     /// observer is caught and ignored. (A program built with
     /// `panic = "abort"` aborts instead.)
-    pub fn on_verification<F>(mut self, observer: F) -> Self
+    pub fn on_verification_attempt<F>(mut self, observer: F) -> Self
     where
         F: Fn(&str, Result<&VerificationReport, &Error>) + Send + Sync + 'static,
     {
-        self.options.common.on_verification = Some(Arc::new(observer));
+        self.options.common.on_verification_attempt = Some(Arc::new(observer));
         self
     }
 
@@ -421,7 +457,7 @@ impl EnclaveHttpClientBuilder {
             pin,
             verifier: Some(Arc::new(verifier)),
             verification_check: common.verification_check,
-            on_verification: common.on_verification,
+            on_verification_attempt: common.on_verification_attempt,
         }
         .check()?;
         if let Some(proxy_url) = &base_url {

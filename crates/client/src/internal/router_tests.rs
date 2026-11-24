@@ -383,7 +383,7 @@ async fn the_first_router_of_the_list_that_verifies_is_chosen_and_no_other_is_tr
             .await
             .unwrap();
         assert_eq!(transport.enclave().host(), "a.example");
-        assert_eq!(transport.current().name, "a");
+        assert_eq!(transport.last_success().name, "a");
         assert_eq!(world.asked(), ["a.example"]);
         // The verification of the probe is the client's: no second one.
         assert_eq!(world.attempts("a.example"), 1);
@@ -480,7 +480,7 @@ async fn a_host_that_is_refused_is_skipped_and_a_repeated_host_is_tried_again() 
         )
         .await
         .unwrap();
-        assert_eq!(transport.current().name, "second try");
+        assert_eq!(transport.last_success().name, "second try");
         assert_eq!(
             world.asked(),
             [
@@ -514,7 +514,7 @@ async fn with_no_router_from_the_list_the_fallback_is_verified_with_its_retry() 
         let transport = discovered(&world, hosts(&["a.example", "b.example"]))
             .await
             .unwrap();
-        assert_eq!(transport.current().name, "fallback");
+        assert_eq!(transport.last_success().name, "fallback");
         assert_eq!(world.asked(), ["a.example", "b.example", FALLBACK_ROUTER]);
         assert_eq!(world.attempts(FALLBACK_ROUTER), 2);
         assert_eq!(started.elapsed(), Duration::from_secs(1));
@@ -577,7 +577,7 @@ async fn the_list_and_the_probes_share_thirty_seconds_and_the_fallback_is_outsid
         };
         let started = tokio::time::Instant::now();
         let transport = discovered(&world, list).await.unwrap();
-        assert_eq!(transport.current().name, "fallback");
+        assert_eq!(transport.last_success().name, "fallback");
         // No router is tried once the budget is spent.
         assert_eq!(world.asked(), ["a.example", "b.example", FALLBACK_ROUTER]);
         assert_eq!(started.elapsed(), Duration::from_secs(30 + 20));
@@ -603,7 +603,7 @@ async fn a_router_that_would_answer_at_once_is_not_tried_after_the_budget() {
         let transport = discovered(&world, hosts(&["a.example", "b.example"]))
             .await
             .unwrap();
-        assert_eq!(transport.current().name, "fallback");
+        assert_eq!(transport.last_success().name, "fallback");
         assert_eq!(world.asked(), ["a.example", FALLBACK_ROUTER]);
     })
     .await
@@ -619,7 +619,7 @@ async fn a_list_that_takes_the_whole_budget_leaves_only_the_fallback() {
         // A list that never arrives.
         let started = tokio::time::Instant::now();
         let transport = discovered(&world, std::future::pending()).await.unwrap();
-        assert_eq!(transport.current().name, "fallback");
+        assert_eq!(transport.last_success().name, "fallback");
         assert_eq!(started.elapsed(), DISCOVERY_BUDGET);
         assert_eq!(world.asked(), [FALLBACK_ROUTER]);
 
@@ -633,7 +633,7 @@ async fn a_list_that_takes_the_whole_budget_leaves_only_the_fallback() {
             vec!["a.example".to_owned()]
         };
         let transport = discovered(&world, list).await.unwrap();
-        assert_eq!(transport.current().name, "a");
+        assert_eq!(transport.last_success().name, "a");
     })
     .await
 }
@@ -656,7 +656,7 @@ async fn dropping_discovery_keeps_nothing_and_the_next_one_starts_over() {
             assert!(waited.is_err());
         }
         let transport = discovered(&world, hosts(&["a.example"])).await.unwrap();
-        assert_eq!(transport.current().name, "again");
+        assert_eq!(transport.last_success().name, "again");
     })
     .await
 }
@@ -690,7 +690,9 @@ async fn the_client_is_bound_to_the_router_that_discovery_chose() {
         .unwrap();
         assert_eq!(client.enclave(), "b.example:8443");
         assert_eq!(client.base_url().as_str(), "https://b.example:8443/");
-        assert_eq!(client.current().name, "b");
+        assert_eq!(client.last_success().name, "b");
+        assert_eq!(client.current_verification().unwrap().name, "b");
+        assert_eq!(client.last_verification_attempt().unwrap().name, "b");
     })
     .await
 }
@@ -1058,7 +1060,11 @@ async fn each_router_that_discovery_tries_is_told_with_its_own_host() {
             ]
         );
         assert_eq!(transport.enclave().host(), FALLBACK_ROUTER);
-        assert_eq!(transport.last_verification().unwrap().name, "fallback");
+        assert_eq!(
+            transport.last_verification_attempt().unwrap().name,
+            "fallback"
+        );
+        assert_eq!(transport.current_verification().unwrap().name, "fallback");
     })
     .await
 }
