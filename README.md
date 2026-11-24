@@ -221,7 +221,9 @@ A verification passes only if all of the following hold. They are checked offlin
 - **The evidence is fresh.** The signed freshness proofs are no older than the freshness window (seven days by default), and the verification expires when they stop vouching for the document.
 - **The keys belong to the enclave.** The TLS key fingerprint and the HPKE key that the client binds its traffic to are part of what the hardware signed.
 
-The result is a `tinfoil::verifier::VerificationReport`: one step for each layer (`envelope`, `provenance`, `quote` and `policy`), each `passed`, `failed`, `skipped` or `not_run`, and the `VerifiedFacts` of a verification that passed: the code digest and tag, the measurements, the endorsed keys, and when the verification expires. `to_json()` serializes it. A rejected document is an attestation error whose source is the verifier's `Error::Verification`; its `VerificationError` names the layer that rejected the document and carries the report, with the step that failed and the partial facts that the steps before it established, such as the expected and the measured registers of a measurement that does not match. Partial facts authorize nothing: only verified facts hold the keys that a channel is bound to.
+The result is a `tinfoil::verifier::VerificationReport`: one step for each layer (`envelope`, `provenance`, `quote` and `policy`), each `passed`, `failed`, `skipped` or `not_run`, and the `VerifiedFacts` of a verification that passed: the code digest and tag, the measurements, the endorsed keys, and when the verification expires. A rejected document is an attestation error whose source is the verifier's `Error::Verification`; its `VerificationError` names the layer that rejected the document and carries the report, with the step that failed and the partial facts that the steps before it established, such as the expected and the measured registers of a measurement that does not match. Partial facts authorize nothing: only verified facts hold the keys that a channel is bound to.
+
+`report.to_json()` writes the report in the JSON form that every Tinfoil SDK writes, so that a user interface, a proxy or another process reads the reports of every SDK in the same way: snake_case members, a `schema_version` of `1`, the `steps`, exactly one of `verified_facts` and `partial_facts`, and `metadata`. With the verifier's `serde` feature, `serde_json::to_string(&report)` writes the same form. The JSON is for display and transport, and never authorizes anything: anyone can write it, and nothing in the SDK reads it back into a report or into verified facts. Bind a channel only to the keys of the `VerifiedFacts` that a verification returned in your own process.
 
 ```rust
 use std::error::Error as _;
@@ -375,7 +377,7 @@ The OpenAI client sets async-openai's API base itself, after your `OpenAIConfig`
 
 Every call of an enabled family goes through the attested client. async-openai's realtime API is not offered, because it opens WebSocket connections of its own that the attested client cannot protect. One helper of async-openai makes a request of its own: `ImagesResponse::save` (`openai-images`) downloads with a plain HTTP client, and that download is not attested.
 
-`tinfoil-verifier` has one feature, `serde`, which implements `serde::Serialize` for `VerificationReport`, `VerifiedFacts` and the measurement types.
+`tinfoil-verifier` has one feature, `serde`, which implements `serde::Serialize` for `VerificationReport`, the facts types that it holds and the measurement types, in the JSON form that `to_json()` writes. It implements no `Deserialize`.
 
 ## Platform support
 
