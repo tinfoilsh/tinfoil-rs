@@ -154,6 +154,7 @@ fn every_public_name_is_importable_and_has_its_signature() {
     let _: fn(&VerificationReport) -> &VerificationMetadata = VerificationReport::metadata;
     let _: fn(&VerificationReport) -> Option<&Step> = VerificationReport::failed_step;
     let _: fn(&VerificationReport) -> String = VerificationReport::to_json;
+    let _: u32 = VerificationReport::SCHEMA_VERSION;
     let _: fn(&VerificationReport) -> VerificationReport = VerificationReport::clone;
     let _: fn(&StepStatus) -> &'static str = StepStatus::as_str;
     let _: fn(&str) -> Option<String> = hpke_public_key_fp;

@@ -1587,9 +1587,9 @@ fn a_code_release_verification_serialises_its_facts() {
         "aabb",
     )]);
     let want = [
-        r#"{"code_digest":""#,
+        r#"{"config_repo":"org/repo","code_digest":""#,
         &"aa".repeat(32),
-        r#"","code_tag":"v1.2.3","config_repo":"org/repo","#,
+        r#"","code_tag":"v1.2.3","#,
         r#""code_measurement":{"platform":"tdx","rtmr1":""#,
         &"33".repeat(48),
         r#"","rtmr2":""#,
@@ -1652,12 +1652,11 @@ fn a_config_verification_serialises_what_was_established() {
     });
     let launch = "ab".repeat(48);
     let want = [
-        r#"{"code_digest":""#,
+        r#"{"config_repo":"org/repo","code_digest":""#,
         &"aa".repeat(32),
-        r#"","code_tag":"v1.2.3","config_repo":"org/repo","#,
+        r#"","code_tag":"v1.2.3","#,
         &format!(r#""code_measurement":{{"platform":"sev-snp","launch":"{launch}"}},"#),
         &format!(r#""enclave_measurement":{{"platform":"sev-snp","launch":"{launch}"}},"#),
-        r#""crypto_material":[],"#,
         r#""config":{"source":"endorsement","name":"/org/project/v1","digest":""#,
         &"cc".repeat(32),
         r#"","reference":"sha256:"#,
@@ -1671,13 +1670,14 @@ fn a_config_verification_serialises_what_was_established() {
         r#"","approval_time":"2026-08-06T10:00:00Z"},"#,
         r#""platform":{"source":"embedded","digest":""#,
         &"ff".repeat(32),
-        r#""}}"#,
+        r#""},"crypto_material":[]}"#,
     ]
     .concat();
     assert_eq!(verified.to_json(), want);
 
     // A config that the caller's authorizer accepted has a digest only, and
-    // an open register is left out.
+    // a code measurement without a register is left out, as is an empty
+    // tag.
     verified.config = Some(ConfigVerification {
         source: ReferenceSource::Policy,
         name: None,
@@ -1689,12 +1689,15 @@ fn a_config_verification_serialises_what_was_established() {
         signature_time: None,
     });
     verified.code_measurement = Expected::SevSnp { launch: None };
+    verified.code_tag = String::new();
     let text = verified.to_json();
     assert!(text.contains(&format!(
         r#""config":{{"source":"policy","digest":"{}"}}"#,
         "cc".repeat(32)
     )));
-    assert!(text.contains(r#""code_measurement":{"platform":"sev-snp"},"#));
+    assert!(!text.contains("code_measurement"), "{text}");
+    assert!(!text.contains("code_tag"), "{text}");
+    assert!(!text.contains(r#""""#), "no member is empty: {text}");
 }
 
 #[test]
@@ -1702,12 +1705,12 @@ fn serialised_strings_are_escaped() {
     let mut verified = verification(vec![item(
         "quote\" slash\\ tab\t line\n return\r bell\u{7} é \u{1F512}",
         "f",
-        "",
+        "ab",
     )]);
     verified.code_tag = "\u{0}\u{1f}\u{7f}".to_owned();
     let text = verified.to_json();
     assert!(text.contains(
-        r#""id":"quote\" slash\\ tab\t line\n return\r bell\u0007 é 🔒","format":"f","data":"""#
+        r#""id":"quote\" slash\\ tab\t line\n return\r bell\u0007 é 🔒","format":"f","data":"ab""#
     ));
     assert!(text.contains("\"code_tag\":\"\\u0000\\u001f\u{7f}\""));
     let parsed = json::parse(text.as_bytes()).unwrap();
@@ -1763,16 +1766,16 @@ fn the_record_of_a_real_verification_reads_back_as_json() {
         }
         let names: Vec<&str> = record.iter().map(|(name, _)| name).collect();
         let mut want = vec![
+            "config_repo",
             "code_digest",
             "code_tag",
-            "config_repo",
             "code_measurement",
             "enclave_measurement",
-            "crypto_material",
         ];
         if verified.config().is_some() {
             want.extend(["config", "runtime", "platform"]);
         }
+        want.push("crypto_material");
         if verified.freshness_expires_at().is_some() {
             want.push("freshness_expires_at");
         }
@@ -1783,7 +1786,11 @@ fn the_record_of_a_real_verification_reads_back_as_json() {
         let parsed = json::parse(text.as_bytes()).unwrap();
         let record = parsed.as_object().unwrap();
         let names: Vec<&str> = record.iter().map(|(name, _)| name).collect();
-        assert_eq!(names, ["steps", "verified_facts", "metadata"], "{name}");
+        assert_eq!(
+            names,
+            ["schema_version", "steps", "verified_facts", "metadata"],
+            "{name}"
+        );
         assert!(text.contains(&format!(r#""verified_facts":{}"#, verified.to_json())));
     }
 }
@@ -1880,7 +1887,7 @@ mod serde_feature {
             "tdx"
         );
         assert_eq!(
-            value["partial_facts"]["measured"]["cpu"]["measurement"]["platform"],
+            value["partial_facts"]["measured"]["cpu_measurement"]["platform"],
             "tdx"
         );
         assert!(value.get("verified_facts").is_none());

@@ -810,4 +810,4 @@ fn decode_collateral(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

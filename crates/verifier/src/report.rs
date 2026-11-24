@@ -14,8 +14,8 @@ use crate::error::Layer;
 use crate::measurement::{Expected, Measurement};
 use crate::verification::{
     ArtifactVerification, ConfigVerification, Json, VerificationMetadata, VerifiedFacts,
-    artifact_record, config_record, crypto_material_data, expected_record, measurement_record,
-    push_text,
+    artifact_record, code_measurement_record, config_record, crypto_material_data,
+    measurement_record, push_text,
 };
 
 /// The layers in the order that a report lists their steps.
@@ -82,25 +82,69 @@ impl VerificationReport {
             .find(|step| step.status == StepStatus::Failed)
     }
 
-    /// The report as compact JSON, for logging or persisting.
+    /// The version of the JSON form that [`to_json`](Self::to_json) writes,
+    /// as its `schema_version` member. Adding a member, a layer or a
+    /// platform keeps the version; removing or renaming a member, or
+    /// changing its type or its meaning, bumps it.
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    /// The report as compact JSON, in the form that every Tinfoil SDK
+    /// writes, so that a user interface, a proxy or another process reads
+    /// the reports of every SDK in the same way:
     ///
-    /// Registers and fingerprints are lowercase hex and times are RFC 3339
-    /// in UTC. A fact that was not established is left out. The members, in
-    /// order:
+    /// ```json
+    /// {
+    ///   "schema_version": 1,
+    ///   "steps": [
+    ///     {"layer": "envelope", "status": "passed"},
+    ///     {"layer": "provenance", "status": "passed"},
+    ///     {"layer": "quote", "status": "failed", "message": "<detail>"},
+    ///     {"layer": "policy", "status": "not_run"}
+    ///   ],
+    ///   "partial_facts": {
+    ///     "expected": {"config_repo": "<owner/name>", "artifact": {"source": "endorsement", "digest": "<hex>"}},
+    ///     "measured": {"tls_public_key_fp": "<hex>", "hpke_public_key_fp": "<hex>"}
+    ///   },
+    ///   "metadata": {
+    ///     "verified_at": "<RFC 3339, UTC>",
+    ///     "verifier": {"name": "tinfoil-rs", "version": "<version>"}
+    ///   }
+    /// }
+    /// ```
     ///
-    /// - `steps`: an array of `layer`, `status` (`passed`, `failed`,
-    ///   `skipped` or `not_run`) and, when it is not empty, `message`;
-    /// - `verified_facts`: the facts as
-    ///   [`VerifiedFacts::to_json`] writes them, when no step failed;
-    /// - `partial_facts`, when a step failed: `expected` with
-    ///   `config_repo`, `artifact`, `config`, `platform`,
-    ///   `code_measurement` and `measurement`; and `measured` with `cpu`
-    ///   (its `measurement`), `tls_public_key_fp` and
-    ///   `hpke_public_key_fp`;
-    /// - `metadata`: `verifier` with `name` and `version`, and
-    ///   `verified_at`.
+    /// Member names are snake_case, hex is lowercase and times are RFC 3339
+    /// in UTC. A fact that was not established is left out, but one that
+    /// was established and holds nothing stays, as in `"measured": {}`; no
+    /// member is `null` or `""`. The members:
     ///
-    /// The step messages are diagnostic: their text is not stable.
+    /// - `schema_version`: [`SCHEMA_VERSION`](Self::SCHEMA_VERSION);
+    /// - `steps`: one for each layer, in layer order, with `layer`,
+    ///   `status` (`passed`, `failed`, `skipped` or `not_run`) and, for a
+    ///   failed or a skipped step only, `message`. Messages are
+    ///   diagnostic: their text is not stable;
+    /// - `verified_facts`, when no step failed, as
+    ///   [`VerifiedFacts::to_json`] writes them;
+    /// - `partial_facts`, when a step failed: `expected`, once the
+    ///   provenance step passed or was skipped, with `config_repo`,
+    ///   `artifact`, `config`, `platform`, `code_measurement` and
+    ///   `measurement`; and `measured`, once the envelope step passed, with
+    ///   `cpu_measurement`, `tls_public_key_fp` and `hpke_public_key_fp`.
+    ///   The key fingerprints are the document's claim, never verified;
+    /// - `metadata`: `verified_at` and, when its name and version are
+    ///   known, `verifier`, with `name` and `version`.
+    ///
+    /// Exactly one of `verified_facts` and `partial_facts` is present. A
+    /// measurement names its `platform`, `sev-snp` with `launch` or `tdx`
+    /// with `mrtd` and `rtmr0` to `rtmr3`; a code measurement holds only
+    /// the registers that the release fixes. The channel keys appear only
+    /// in `verified_facts.crypto_material`.
+    ///
+    /// The JSON is for display and transport, and authorizes nothing.
+    /// Anyone can write it, and no API of this crate reads it back into a
+    /// report or into verified facts, so a channel is bound only to the
+    /// keys of the [`VerifiedFacts`] that a verification returned in
+    /// process. With the `serde` feature, the report and the facts that it
+    /// holds implement `serde::Serialize`, which writes the same form.
     pub fn to_json(&self) -> String {
         let mut out = String::new();
         self.record().write(&mut out);
@@ -109,21 +153,13 @@ impl VerificationReport {
 
     /// The serialised form of the report.
     pub(crate) fn record(&self) -> Json {
-        let steps = self
-            .steps
-            .iter()
-            .map(|step| {
-                let mut members = vec![
-                    ("layer", Json::text(step.layer.as_str())),
-                    ("status", Json::text(step.status.as_str())),
-                ];
-                if !step.message.is_empty() {
-                    members.push(("message", Json::text(&step.message)));
-                }
-                Json::Object(members)
-            })
-            .collect();
-        let mut members = vec![("steps", Json::Array(steps))];
+        let mut members = vec![
+            ("schema_version", Json::Integer(Self::SCHEMA_VERSION)),
+            (
+                "steps",
+                Json::Array(self.steps.iter().map(Step::record).collect()),
+            ),
+        ];
         if let Some(facts) = &self.verified_facts {
             members.push(("verified_facts", facts.record()));
         }
@@ -164,6 +200,19 @@ pub struct Step {
     /// rejected the document with; for a skipped step, the reason that it
     /// was skipped; otherwise empty. Messages are diagnostic.
     pub message: String,
+}
+
+impl Step {
+    /// The serialised form of the step: `layer`, `status` and, when it is
+    /// not empty, `message`.
+    pub(crate) fn record(&self) -> Json {
+        let mut members = vec![
+            ("layer", Json::text(self.layer.as_str())),
+            ("status", Json::text(self.status.as_str())),
+        ];
+        push_text(&mut members, "message", Some(&self.message));
+        Json::Object(members)
+    }
 }
 
 /// The outcome of a [`Step`].
@@ -219,7 +268,7 @@ pub struct PartialFacts {
 }
 
 impl PartialFacts {
-    fn record(&self) -> Json {
+    pub(crate) fn record(&self) -> Json {
         let mut members = Vec::new();
         if let Some(expected) = &self.expected {
             members.push(("expected", expected.record()));
@@ -264,19 +313,22 @@ pub struct ExpectedFacts {
 }
 
 impl ExpectedFacts {
-    fn record(&self) -> Json {
-        let mut members = vec![
-            ("config_repo", Json::text(&self.config_repo)),
-            ("artifact", artifact_record(&self.artifact)),
-        ];
+    pub(crate) fn record(&self) -> Json {
+        let mut members = Vec::new();
+        push_text(&mut members, "config_repo", Some(&self.config_repo));
+        members.push(("artifact", artifact_record(&self.artifact)));
         if let Some(config) = &self.config {
             members.push(("config", config_record(config)));
         }
         if let Some(platform) = &self.platform {
             members.push(("platform", artifact_record(platform)));
         }
-        if let Some(code) = &self.code_measurement {
-            members.push(("code_measurement", expected_record(code)));
+        if let Some(code) = self
+            .code_measurement
+            .as_ref()
+            .and_then(code_measurement_record)
+        {
+            members.push(("code_measurement", code));
         }
         if let Some(measurement) = &self.measurement {
             members.push(("measurement", measurement_record(measurement)));
@@ -327,13 +379,10 @@ impl MeasuredFacts {
         }
     }
 
-    fn record(&self) -> Json {
+    pub(crate) fn record(&self) -> Json {
         let mut members = Vec::new();
         if let Some(cpu) = &self.cpu {
-            members.push((
-                "cpu",
-                Json::Object(vec![("measurement", measurement_record(&cpu.measurement))]),
-            ));
+            members.push(("cpu_measurement", measurement_record(&cpu.measurement)));
         }
         push_text(
             &mut members,
@@ -578,13 +627,14 @@ mod tests {
         assert_eq!(
             report.to_json(),
             concat!(
-                r#"{"steps":[{"layer":"envelope","status":"passed"},"#,
+                r#"{"schema_version":1,"#,
+                r#""steps":[{"layer":"envelope","status":"passed"},"#,
                 r#"{"layer":"provenance","status":"skipped","message":"embedded"},"#,
                 r#"{"layer":"quote","status":"failed","message":"bad \"quote\""},"#,
                 r#"{"layer":"policy","status":"not_run"}],"#,
                 r#""partial_facts":{"measured":{}},"#,
-                r#""metadata":{"verifier":{"name":"tinfoil-rs","version":"1.0.0"},"#,
-                r#""verified_at":"1970-01-01T00:00:00Z"}}"#
+                r#""metadata":{"verified_at":"1970-01-01T00:00:00Z","#,
+                r#""verifier":{"name":"tinfoil-rs","version":"1.0.0"}}}"#
             )
         );
     }
