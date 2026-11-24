@@ -309,6 +309,78 @@ fn write_canonical_string(out: &mut Vec<u8>, text: &str) {
     out.push(b'"');
 }
 
+/// The RFC 8785 canonical JSON encoding of a parsed value, under the rules
+/// that [`timestamp_input`] states, at any depth and without recursion.
+///
+/// A number is encoded only when it is an integer that every JSON
+/// implementation reads exactly ([`json::RawNumber::to_safe_integer`]): it
+/// is written in decimal, and `-0` as `0`. A value that holds any other
+/// number has no encoding here, and the result is `None`.
+pub fn canonical_json(value: &Value) -> Option<Vec<u8>> {
+    /// The elements of an open container that are still to be written.
+    enum Rest<'a> {
+        Array(std::slice::Iter<'a, Value>),
+        Object(std::vec::IntoIter<(&'a str, &'a Value)>),
+    }
+
+    let mut out = Vec::new();
+    let mut open: Vec<Rest<'_>> = Vec::new();
+    let mut value = value;
+    loop {
+        // The first element of a container that opens here takes no comma.
+        let mut first = false;
+        match value {
+            Value::Null => out.extend_from_slice(b"null"),
+            Value::Bool(true) => out.extend_from_slice(b"true"),
+            Value::Bool(false) => out.extend_from_slice(b"false"),
+            Value::Number(number) => {
+                out.extend_from_slice(number.to_safe_integer()?.to_string().as_bytes());
+            }
+            Value::String(text) => write_canonical_string(&mut out, text),
+            Value::Array(items) => {
+                out.push(b'[');
+                open.push(Rest::Array(items.iter()));
+                first = true;
+            }
+            Value::Object(object) => {
+                let mut members: Vec<(&str, &Value)> = object.iter().collect();
+                members.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
+                out.push(b'{');
+                open.push(Rest::Object(members.into_iter()));
+                first = true;
+            }
+        }
+        // The innermost open container has the next value. One with nothing
+        // left ends here, which completes an element of the one around it.
+        value = loop {
+            let Some(rest) = open.last_mut() else {
+                return Some(out);
+            };
+            let (next, end) = match rest {
+                Rest::Array(items) => (items.next().map(|item| (None, item)), b']'),
+                Rest::Object(members) => (
+                    members.next().map(|(name, member)| (Some(name), member)),
+                    b'}',
+                ),
+            };
+            let Some((name, next)) = next else {
+                out.push(end);
+                open.pop();
+                first = false;
+                continue;
+            };
+            if !first {
+                out.push(b',');
+            }
+            if let Some(name) = name {
+                write_canonical_string(&mut out, name);
+                out.push(b':');
+            }
+            break next;
+        };
+    }
+}
+
 /// Checks that every number in a predicate, at any depth, is one that a
 /// double can hold: a literal whose nearest double is infinite is an error.
 /// The walk uses no recursion.
@@ -392,6 +464,147 @@ mod tests {
                 "{rejected}"
             );
         }
+    }
+
+    fn canonical(text: &str) -> Option<String> {
+        let value = json::parse(text.as_bytes()).unwrap();
+        canonical_json(&value).map(|encoded| String::from_utf8(encoded).unwrap())
+    }
+
+    #[test]
+    fn canonical_json_orders_members_by_utf16_code_units() {
+        // The members of RFC 8785, section 3.2.3, in the order that it
+        // gives. U+1F600 is written as surrogates, which come before U+FB33
+        // although its code point is the higher one.
+        let sorted = [
+            ("\\r", "Carriage Return"),
+            ("1", "One"),
+            ("\u{80}", "Control"),
+            ("\u{f6}", "Latin Small Letter O With Diaeresis"),
+            ("\u{20ac}", "Euro Sign"),
+            ("\u{1f600}", "Emoji: Grinning Face"),
+            ("\u{fb33}", "Hebrew Letter Dalet With Dagesh"),
+        ];
+        let object = |members: &[(&str, &str)]| {
+            let members: Vec<String> = members
+                .iter()
+                .map(|(name, value)| format!("\"{name}\":\"{value}\""))
+                .collect();
+            format!("{{{}}}", members.join(","))
+        };
+        let expected = object(&sorted);
+        assert_eq!(canonical(&expected), Some(expected.clone()));
+        let mut by_code_point = sorted;
+        by_code_point.swap(5, 6);
+        assert_eq!(canonical(&object(&by_code_point)), Some(expected.clone()));
+        let mut reversed = sorted;
+        reversed.reverse();
+        assert_eq!(canonical(&object(&reversed)), Some(expected));
+        // Members are ordered at every depth, and a longer name follows its
+        // prefix.
+        assert_eq!(
+            canonical(r#"[{"b":{"ab":1,"a":2,"":3},"a":[{"z":1,"y":2}]}]"#).as_deref(),
+            Some(r#"[{"a":[{"y":2,"z":1}],"b":{"":3,"a":2,"ab":1}}]"#)
+        );
+    }
+
+    #[test]
+    fn canonical_json_escapes_only_what_a_string_requires() {
+        let backslash = '\\';
+        let escape = |unit: u32| format!("{backslash}u{unit:04x}");
+        // Every control character has one escape: a short one where JSON
+        // defines it, and four lowercase hex digits otherwise.
+        for unit in 0..0x20_u32 {
+            let short = match unit {
+                0x08 => Some('b'),
+                0x09 => Some('t'),
+                0x0a => Some('n'),
+                0x0c => Some('f'),
+                0x0d => Some('r'),
+                _ => None,
+            };
+            let want = match short {
+                Some(letter) => format!("\"{backslash}{letter}\""),
+                None => format!("\"{}\"", escape(unit)),
+            };
+            let upper = format!("\"{backslash}u{unit:04X}\"");
+            assert_eq!(canonical(&upper), Some(want.clone()), "{unit:#x}");
+            assert_eq!(canonical(&want), Some(want), "{unit:#x}");
+        }
+        let quote_and_backslash = format!("\"{backslash}\"{backslash}{backslash}\"");
+        assert_eq!(
+            canonical(&quote_and_backslash),
+            Some(quote_and_backslash.clone())
+        );
+        assert_eq!(
+            canonical(&format!("\"{}{}\"", escape(0x22), escape(0x5c))),
+            Some(quote_and_backslash)
+        );
+        // Everything else is written as itself, however it was escaped.
+        let plain = "\"/ A \u{7f} \u{80} \u{e9} \u{2028} \u{ffff} \u{1f600}\"";
+        assert_eq!(canonical(plain).as_deref(), Some(plain));
+        let escaped = format!(
+            "\"{backslash}/ {} {} {} {} {} {} {}{}\"",
+            escape(0x41),
+            escape(0x7f),
+            escape(0x80),
+            escape(0xe9),
+            escape(0x2028),
+            escape(0xffff),
+            escape(0xd83d),
+            escape(0xde00),
+        );
+        assert_eq!(canonical(&escaped).as_deref(), Some(plain));
+        // A member name is a string like any other.
+        assert_eq!(
+            canonical(&format!("{{\"{}{backslash}n\":1}}", escape(0x61))),
+            Some(format!("{{\"a{backslash}n\":1}}"))
+        );
+    }
+
+    #[test]
+    fn canonical_json_writes_exact_integers_and_no_whitespace() {
+        assert_eq!(
+            canonical(
+                " { \"b\" : [ true , false , null , 0 , -7 , 9007199254740991 ] ,\n\t\"a\" : { } , \"c\" : [ ] }\r\n"
+            )
+            .as_deref(),
+            Some(r#"{"a":{},"b":[true,false,null,0,-7,9007199254740991],"c":[]}"#)
+        );
+        assert_eq!(
+            canonical("-9007199254740991").as_deref(),
+            Some("-9007199254740991")
+        );
+        assert_eq!(canonical("-0").as_deref(), Some("0"));
+        assert_eq!(canonical("[-0]").as_deref(), Some("[0]"));
+        for unsupported in [
+            "1.0",
+            "1e2",
+            "-0.0",
+            "9007199254740992",
+            "-9007199254740992",
+            r#"{"a":[{"b":1.5}]}"#,
+            "[1,2,[3,4e0]]",
+        ] {
+            assert_eq!(canonical(unsupported), None, "{unsupported}");
+        }
+    }
+
+    #[test]
+    fn canonical_json_of_a_deep_value_needs_no_deep_stack() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(|| {
+                let arrays = "[".repeat(json::MAX_DEPTH) + &"]".repeat(json::MAX_DEPTH);
+                assert_eq!(canonical(&arrays), Some(arrays));
+                let objects = "{\"a\":".repeat(json::MAX_DEPTH - 2)
+                    + "[1,{}]"
+                    + &"}".repeat(json::MAX_DEPTH - 2);
+                assert_eq!(canonical(&objects), Some(objects));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

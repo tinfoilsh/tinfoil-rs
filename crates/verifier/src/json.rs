@@ -24,6 +24,9 @@ pub const MAX_DEPTH: usize = 10_000;
 /// comparing against each earlier member; larger ones use a hash set.
 const LINEAR_DUPLICATE_CHECK: usize = 16;
 
+/// The largest integer that every JSON implementation reads exactly, 2^53-1.
+pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
 /// A parsed JSON value.
 pub enum Value {
     /// `null`.
@@ -247,6 +250,14 @@ impl RawNumber {
             return None;
         }
         self.0.parse().ok()
+    }
+
+    /// The value as an integer that every JSON implementation reads
+    /// exactly: one of at most [`MAX_SAFE_INTEGER`] in absolute value, under
+    /// the rules of [`RawNumber::to_i64`].
+    pub fn to_safe_integer(&self) -> Option<i64> {
+        self.to_i64()
+            .filter(|value| value.unsigned_abs() <= MAX_SAFE_INTEGER)
     }
 }
 
@@ -1031,6 +1042,20 @@ mod tests {
         assert_eq!(number("9223372036854775808").to_i64(), None);
         assert_eq!(number("-1.0").to_i64(), None);
         assert_eq!(number("-1e0").to_i64(), None);
+        let largest = MAX_SAFE_INTEGER as i64;
+        assert_eq!(largest, 9_007_199_254_740_991);
+        assert_eq!(number("9007199254740991").to_safe_integer(), Some(largest));
+        assert_eq!(
+            number("-9007199254740991").to_safe_integer(),
+            Some(-largest)
+        );
+        assert_eq!(number("-0").to_safe_integer(), Some(0));
+        assert_eq!(number("9007199254740992").to_safe_integer(), None);
+        assert_eq!(number("-9007199254740992").to_safe_integer(), None);
+        assert_eq!(number("-9223372036854775808").to_safe_integer(), None);
+        assert_eq!(number("100000000000000000000").to_safe_integer(), None);
+        assert_eq!(number("1.0").to_safe_integer(), None);
+        assert_eq!(number("1e2").to_safe_integer(), None);
     }
 
     #[test]
