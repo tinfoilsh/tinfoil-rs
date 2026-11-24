@@ -177,6 +177,10 @@ fn to_json_text(value: &Value) -> Vec<u8> {
 /// The function receives untrusted material from the document and must
 /// return an error for config bytes that it does not authorize. It may be
 /// called from several threads at once.
+///
+/// The runtime pin is read from the bytes that the function authorizes,
+/// which must be a JSON config. Any other bytes are rejected, such as the
+/// YAML config of a cvm-version before 0.15.5-rc.1.
 #[derive(Clone)]
 pub struct ConfigAuthorizer(pub(crate) Arc<AuthorizeFn>);
 

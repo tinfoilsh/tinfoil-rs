@@ -626,7 +626,7 @@ fn v2_config_collateral_allows_optional_bytes() {
 
 #[test]
 fn config_endorsement() {
-    let config = "cvm-version: 1.0.0\n";
+    let config = r#"{"cvm-version":"1.0.0"}"#;
     let reference = format!("sha256:{DIGEST}");
     let data = config_data(&b64(config));
     let good = || config_entry(CONFIG_ENDORSEMENT_V1_FORMAT, &data);

@@ -16,6 +16,11 @@
 //! `vector/…` take their document from a checkout of the shared vectors
 //! and are skipped without one.
 //!
+//! The config that these documents measure is YAML, which the verifier does
+//! not read. A case gives it by reference, or relies on an endorsement that
+//! states the runtime; a case that leaves the config's bytes to the
+//! verifier records that they are turned down.
+//!
 //! The outcome here must be the recorded one, except for the cases that
 //! [`STRICTER`] lists with the rule by which this crate turns down what
 //! the other implementation accepts. No case that the other implementation
@@ -798,11 +803,11 @@ fn the_fixture_covers_both_flows_on_both_platforms() {
     for prefix in ["legacy-sev/", "legacy-tdx/", "config-sev/", "config-tdx/"] {
         assert!(accepted(prefix) >= 10, "{prefix}: {}", accepted(prefix));
     }
-    // A config, a runtime and a platform artifact that are all endorsed and
-    // approved, with the earliest approval setting the deadline.
+    // A runtime and a platform artifact that are endorsed and approved,
+    // with the earliest approval setting the deadline.
     assert!(accepted("config-sev/full-") >= 10);
-    // Config endorsements under a registry certificate, for the public and
-    // for a private registry.
-    assert!(accepted("config-sev/certified-private-") >= 10);
-    assert!(accepted("config-sev/certified-public-") >= 10);
+    // Config endorsements under a registry certificate that state the
+    // runtime, for the public and for a private registry.
+    assert!(accepted("config-sev/certified-private-digest-only-") >= 7);
+    assert!(accepted("config-sev/certified-public-digest-only-") >= 7);
 }

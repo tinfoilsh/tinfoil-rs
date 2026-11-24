@@ -67,7 +67,9 @@ pub enum Trust {
     /// error for config bytes that it does not authorize; it may be called
     /// from several threads at once. Runtime, platform and hardware checks
     /// still apply. An authorized config has no authenticated registry
-    /// name or approval time, so this variant has no pin.
+    /// name or approval time, so this variant has no pin. The authorized
+    /// bytes must be a JSON config; any other bytes are rejected, such as
+    /// the YAML config of a cvm-version before 0.15.5-rc.1.
     AuthorizedBy(ConfigAuthorizer),
     /// `attestation-collaterals/v3` collateral for exactly the config bytes
     /// that the caller supplies, which must come from trusted client
@@ -77,7 +79,9 @@ pub enum Trust {
         /// The `/org/project/revision` identity that the caller associates
         /// with the config.
         name: Option<String>,
-        /// The config, 1 byte to 1 MiB.
+        /// The config, 1 byte to 1 MiB. It is a JSON config; the YAML
+        /// config of a cvm-version before 0.15.5-rc.1 is a configuration
+        /// error.
         bytes: Vec<u8>,
     },
     /// `attestation-collaterals/v2` collateral for `repo` or
@@ -223,11 +227,11 @@ mod tests {
     fn debug_output_shows_no_config_bytes() {
         let trust = Trust::EmbeddedConfig {
             name: Some("/org/project/v1".into()),
-            bytes: b"cvm-version: secret-config".to_vec(),
+            bytes: br#"{"cvm-version":"secret-config"}"#.to_vec(),
         };
         let printed = format!("{trust:?}");
         assert!(!printed.contains("secret-config"), "{printed}");
-        assert!(printed.contains("[26 bytes]"), "{printed}");
+        assert!(printed.contains("[31 bytes]"), "{printed}");
         assert!(printed.contains("/org/project/v1"), "{printed}");
     }
 

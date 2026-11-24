@@ -1071,29 +1071,23 @@ mod stage_tests {
 
         let json_config = format!("{{\"cvm-version\":\"0.15.5-rc.1@sha256:{RUNTIME_DIGEST}\"}}");
         let yaml_config = format!("cvm-version: 0.15.4@sha256:{RUNTIME_DIGEST}\n");
-        for (name, config, tag) in [
-            ("JSON config", &json_config, "v0.15.5-rc.1"),
-            ("YAML config", &yaml_config, "v0.15.4"),
-        ] {
-            let document = document_with(serde_json::json!([plain_config(config)]));
-            let (output, code) = read_runtime(&document, "");
-            assert_eq!(code, EXIT_ACCEPTED, "{name}");
-            assert_eq!(
-                serde_json::to_value(&output).unwrap(),
-                serde_json::json!({
-                    "stage": "v3-read-config-runtime",
-                    "accepted": true,
-                    "outputs": {
-                        "runtime": {
-                            "repo": "tinfoilsh/cvmimage",
-                            "tag": tag,
-                            "digest": RUNTIME_DIGEST,
-                        },
+        let document = document_with(serde_json::json!([plain_config(&json_config)]));
+        let (output, code) = read_runtime(&document, "");
+        assert_eq!(code, EXIT_ACCEPTED);
+        assert_eq!(
+            serde_json::to_value(&output).unwrap(),
+            serde_json::json!({
+                "stage": "v3-read-config-runtime",
+                "accepted": true,
+                "outputs": {
+                    "runtime": {
+                        "repo": "tinfoilsh/cvmimage",
+                        "tag": "v0.15.5-rc.1",
+                        "digest": RUNTIME_DIGEST,
                     },
-                }),
-                "{name}"
-            );
-        }
+                },
+            })
+        );
 
         // The reference of a signed entry stands for a config that the
         // document does not carry.
@@ -1105,15 +1099,20 @@ mod stage_tests {
             }),
         );
         for (name, entries) in [
+            ("YAML config", vec![plain_config(&yaml_config)]),
             (
                 "YAML for a JSON version",
                 vec![plain_config(&yaml_config.replace("0.15.4", "0.15.5-rc.1"))],
             ),
             (
+                "JSON before the first JSON version",
+                vec![plain_config(&json_config.replace("0.15.5-rc.1", "0.15.4"))],
+            ),
+            (
                 "JSON not in its one form",
                 vec![plain_config(&json_config.replace("\":\"", "\": \""))],
             ),
-            ("no pin", vec![plain_config("cpus: 2\n")]),
+            ("no pin", vec![plain_config("{\"cpus\":2}")]),
             ("no config", Vec::new()),
             ("no config bytes", vec![reference_only]),
         ] {
@@ -1136,7 +1135,7 @@ mod stage_tests {
     fn the_runtime_stage_takes_what_does_not_decode_as_malformed_input() {
         use tinfoil_verifier::conformance::document::collateral::ROLE_ENDORSEMENT;
 
-        let config = format!("cvm-version: 0.15.4@sha256:{RUNTIME_DIGEST}\n");
+        let config = format!("{{\"cvm-version\":\"0.15.5-rc.1@sha256:{RUNTIME_DIGEST}\"}}");
         let document = document_with(serde_json::json!([plain_config(&config)]));
         assert_eq!(read_runtime(&document, NONCE_HEX).1, EXIT_ACCEPTED);
 

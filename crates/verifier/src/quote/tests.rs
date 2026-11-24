@@ -1,15 +1,13 @@
 //! Tests of policy assembly: how reference values, caller pins and the
 //! document's challenge resolve into the expected state of a quote.
 
-use sha2::{Digest, Sha256};
-
 use super::resolve::{apply_pins, complete};
 use super::{
     Authenticated, ConfigReferenceValues, LegacyReferenceValues, ReferenceValues, VendorRoots,
     assemble, assemble_resolving, assemble_resolving_with_report_data, assemble_with_report_data,
     authenticate, code_measurement,
 };
-use crate::canonical::encode_lower_hex;
+use crate::canonical::{decode_hex, encode_lower_hex};
 use crate::differential_tests::{Fixture, instant, member, object, text};
 use crate::document::{self, Document};
 use crate::endorsement::ProvenanceClient;
@@ -170,11 +168,11 @@ fn quoted(fixture: &Fixture, name: &str) -> Quoted {
 fn config_references(fixture: &Fixture, name: &str) -> ([u8; 32], Measurements, Artifact) {
     let options = object(member(fixture.case(name), "options"));
     let embedded = object(member(options, "embedded"));
-    let config = fixture.blob(embedded, "config_b64").unwrap();
+    let config = decode_hex(text(embedded, "config_ref_digest")).unwrap();
     let manifest = fixture.blob(embedded, "runtime_b64").unwrap();
     let platform = fixture.blob(embedded, "platform_b64").unwrap();
     (
-        Sha256::digest(&config).into(),
+        config.try_into().unwrap(),
         decode_manifest(&manifest).unwrap().measurements,
         policy::parse(&platform).unwrap(),
     )

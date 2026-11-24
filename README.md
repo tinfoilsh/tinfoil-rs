@@ -130,7 +130,7 @@ The `Trust` argument names who vouches for the enclave's config. It is one of:
 | `Trust::EmbeddedConfig { name, bytes }` | v3 collateral for exactly the config bytes that you supply |
 | `Trust::EitherPin { repo, project }` | either of the first two, for the migration from v2 to v3 collateral |
 
-The same name can belong to different owners as a repository and as a project, so neither is satisfied by the other's collateral. An empty repository or project, and an empty list of registry IDs, are configuration errors.
+The same name can belong to different owners as a repository and as a project, so neither is satisfied by the other's collateral. An empty repository or project, and an empty list of registry IDs, are configuration errors. The config bytes that `AuthorizedBy` authorizes and that `EmbeddedConfig` supplies must be a JSON config; a YAML config is rejected.
 
 `RouterHttpClient::connect()` takes no host: it tries the routers of Tinfoil's published list in a random order and keeps the first that passes verification, or else `inference.tinfoil.sh`.
 
