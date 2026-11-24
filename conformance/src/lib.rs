@@ -53,11 +53,9 @@ pub const STAGE_AUTHENTICATE_QUOTE: &str = "v3-authenticate-quote";
 pub const STAGE_AUTHENTICATE_APPROVAL: &str = "v3-authenticate-approval";
 /// An RFC 3161 timestamp response against the trusted timestamp authorities.
 pub const STAGE_VERIFY_TIMESTAMP: &str = "v3-verify-timestamp";
-/// The runtime pin that the config of a document states.
-pub const STAGE_READ_CONFIG_RUNTIME: &str = "v3-read-config-runtime";
 
 /// Every stage name of the wire contract.
-pub const STAGES: [&str; 8] = [
+pub const STAGES: [&str; 7] = [
     STAGE_VERIFY,
     STAGE_CHECK_ENVELOPE,
     STAGE_AUTHENTICATE_PROVENANCE,
@@ -65,7 +63,6 @@ pub const STAGES: [&str; 8] = [
     STAGE_AUTHENTICATE_QUOTE,
     STAGE_AUTHENTICATE_APPROVAL,
     STAGE_VERIFY_TIMESTAMP,
-    STAGE_READ_CONFIG_RUNTIME,
 ];
 
 /// The stages that this build of the adapter implements, in the order of
@@ -211,20 +208,6 @@ pub struct AcceptOutputs {
     /// The authenticated timestamp, RFC 3339 in UTC at second precision.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub timestamp: String,
-    /// The runtime pin that the document's config states.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime: Option<Runtime>,
-}
-
-/// A runtime pin on the wire.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Runtime {
-    /// The repository that publishes the runtime.
-    pub repo: String,
-    /// The release tag: a full semantic version with a leading `v`.
-    pub tag: String,
-    /// The SHA-256 of the runtime manifest, lowercase hex.
-    pub digest: String,
 }
 
 /// A measurement on the wire: its type and its registers as lowercase hex,
@@ -1012,155 +995,5 @@ mod stage_tests {
         assert_eq!(decode_hex("0"), None);
         assert_eq!(decode_hex("+1"), None);
         assert_eq!(decode_hex("\u{e9}"), None);
-    }
-
-    const RUNTIME_DIGEST: &str = "abababababababababababababababababababababababababababababababab";
-
-    /// [`DOCUMENT_B64`] with the given entries as its v3 collateral.
-    fn document_with(entries: serde_json::Value) -> String {
-        use base64::Engine as _;
-        use tinfoil_verifier::conformance::document::collateral::FORMAT_V3;
-
-        let mut document: serde_json::Map<String, serde_json::Value> = decode_base64(DOCUMENT_B64)
-            .and_then(|document| serde_json::from_slice(&document).ok())
-            .unwrap_or_default();
-        document.insert("collateral_format".to_owned(), FORMAT_V3.into());
-        document.insert("collateral".to_owned(), entries);
-        let document = serde_json::Value::Object(document).to_string();
-        base64::engine::general_purpose::STANDARD.encode(document)
-    }
-
-    /// A config entry of the given format and data.
-    fn config_entry(format: &str, data: serde_json::Value) -> serde_json::Value {
-        use tinfoil_verifier::conformance::document::collateral::{
-            CONFIG_ID, ROLE_REFERENCE_VALUES,
-        };
-
-        serde_json::json!({
-            "id": CONFIG_ID,
-            "role": ROLE_REFERENCE_VALUES,
-            "format": format,
-            "data": data,
-        })
-    }
-
-    /// An entry that carries the bytes of a config without an endorsement.
-    fn plain_config(config: &str) -> serde_json::Value {
-        use base64::Engine as _;
-        use tinfoil_verifier::conformance::document::collateral::CONFIG_V1_FORMAT;
-
-        let encoded = base64::engine::general_purpose::STANDARD.encode(config);
-        config_entry(
-            CONFIG_V1_FORMAT,
-            serde_json::json!({ "config_base64": encoded }),
-        )
-    }
-
-    fn read_runtime(document_b64: &str, nonce_hex: &str) -> (Output, i32) {
-        let input = serde_json::json!({
-            "schema_version": SCHEMA_VERSION,
-            "document_b64": document_b64,
-            "nonce_hex": nonce_hex,
-        });
-        run(STAGE_READ_CONFIG_RUNTIME, input.to_string().as_bytes())
-    }
-
-    #[test]
-    fn the_runtime_stage_reads_the_pin_that_a_config_states() {
-        use tinfoil_verifier::conformance::document::collateral::CONFIG_ENDORSEMENT_V2_FORMAT;
-
-        let json_config = format!("{{\"cvm-version\":\"0.15.5-rc.1@sha256:{RUNTIME_DIGEST}\"}}");
-        let yaml_config = format!("cvm-version: 0.15.4@sha256:{RUNTIME_DIGEST}\n");
-        let document = document_with(serde_json::json!([plain_config(&json_config)]));
-        let (output, code) = read_runtime(&document, "");
-        assert_eq!(code, EXIT_ACCEPTED);
-        assert_eq!(
-            serde_json::to_value(&output).unwrap(),
-            serde_json::json!({
-                "stage": "v3-read-config-runtime",
-                "accepted": true,
-                "outputs": {
-                    "runtime": {
-                        "repo": "tinfoilsh/cvmimage",
-                        "tag": "v0.15.5-rc.1",
-                        "digest": RUNTIME_DIGEST,
-                    },
-                },
-            })
-        );
-
-        // The reference of a signed entry stands for a config that the
-        // document does not carry.
-        let reference_only = config_entry(
-            CONFIG_ENDORSEMENT_V2_FORMAT,
-            serde_json::json!({
-                "endorsement_ref": format!("sha256:{RUNTIME_DIGEST}"),
-                "sigstore_bundle": {},
-            }),
-        );
-        for (name, entries) in [
-            ("YAML config", vec![plain_config(&yaml_config)]),
-            (
-                "YAML for a JSON version",
-                vec![plain_config(&yaml_config.replace("0.15.4", "0.15.5-rc.1"))],
-            ),
-            (
-                "JSON before the first JSON version",
-                vec![plain_config(&json_config.replace("0.15.5-rc.1", "0.15.4"))],
-            ),
-            (
-                "JSON not in its one form",
-                vec![plain_config(&json_config.replace("\":\"", "\": \""))],
-            ),
-            ("no pin", vec![plain_config("{\"cpus\":2}")]),
-            ("no config", Vec::new()),
-            ("no config bytes", vec![reference_only]),
-        ] {
-            let document = document_with(serde_json::Value::Array(entries));
-            let (output, code) = read_runtime(&document, "");
-            assert_eq!(code, EXIT_REJECTED, "{name}");
-            assert_eq!(
-                serde_json::to_value(&output).unwrap(),
-                serde_json::json!({
-                    "stage": "v3-read-config-runtime",
-                    "accepted": false,
-                    "rejection": { "code": "PROVENANCE_REJECTED" },
-                }),
-                "{name}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_runtime_stage_takes_what_does_not_decode_as_malformed_input() {
-        use tinfoil_verifier::conformance::document::collateral::ROLE_ENDORSEMENT;
-
-        let config = format!("{{\"cvm-version\":\"0.15.5-rc.1@sha256:{RUNTIME_DIGEST}\"}}");
-        let document = document_with(serde_json::json!([plain_config(&config)]));
-        assert_eq!(read_runtime(&document, NONCE_HEX).1, EXIT_ACCEPTED);
-
-        // A config entry under another role is one that no document may
-        // carry.
-        let mut misfiled = plain_config(&config);
-        misfiled["role"] = ROLE_ENDORSEMENT.into();
-        let undecodable = document_with(serde_json::json!([misfiled]));
-        let cases = [
-            ("a document that does not decode", undecodable.as_str(), ""),
-            ("an empty document", "", ""),
-            ("base64 with a stray character", "e30=*", ""),
-            ("hex with an odd length", document.as_str(), "abc"),
-        ];
-        for (name, document_b64, nonce_hex) in cases {
-            let (output, code) = read_runtime(document_b64, nonce_hex);
-            assert_eq!(code, EXIT_MALFORMED, "{name}");
-            assert_eq!(
-                output.rejection,
-                Some(Rejection {
-                    code: CODE_MALFORMED_INPUT.to_owned()
-                }),
-                "{name}"
-            );
-            assert_eq!(output.outputs, None, "{name}");
-        }
     }
 }

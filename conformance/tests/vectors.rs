@@ -25,7 +25,7 @@ const VECTORS_ENV: &str = "TINFOIL_CONFORMANCE_VECTORS";
 
 /// The accept facts that a fixture may declare; each declared fact must
 /// match the adapter's output exactly.
-const FACTS: [&str; 8] = [
+const FACTS: [&str; 7] = [
     "code_digest",
     "code_measurement",
     "enclave_measurement",
@@ -33,7 +33,6 @@ const FACTS: [&str; 8] = [
     "hpke_public_key",
     "signing_key_hint",
     "timestamp",
-    "runtime",
 ];
 
 /// Vector directories whose fixtures must all pass, not merely not fail:

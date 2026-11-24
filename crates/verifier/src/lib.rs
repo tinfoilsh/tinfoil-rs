@@ -120,17 +120,19 @@ mod instant;
 mod policy;
 #[cfg_attr(not(tinfoil_conformance), allow(dead_code, unused_imports))]
 mod quote;
-#[cfg_attr(not(tinfoil_conformance), allow(unused_imports))]
-mod runtime;
 #[cfg_attr(not(tinfoil_conformance), allow(dead_code))]
 mod sigstore;
 #[cfg_attr(not(tinfoil_conformance), allow(dead_code, unused_imports))]
 mod x509;
 
 // These are not exported to the adapter. Only the tests read the detail of
-// a JSON error and the recorded hashes of the embedded trust anchors.
+// a JSON error and the recorded hashes of the embedded trust anchors, and
+// the runtime module gathers the names of its types whether or not the
+// crate spells each of them out.
 #[cfg_attr(not(test), allow(dead_code))]
 mod json;
+#[allow(unused_imports)]
+mod runtime;
 #[cfg_attr(not(test), allow(dead_code, unused_imports))]
 mod trust;
 
@@ -187,10 +189,6 @@ pub mod conformance {
     /// Authentication and appraisal of CPU evidence.
     pub mod quote {
         pub use crate::quote::*;
-    }
-    /// The runtime manifest, and the runtime pin of a config.
-    pub mod runtime {
-        pub use crate::runtime::*;
     }
     /// Sigstore bundles, trusted roots and timestamps.
     pub mod sigstore {

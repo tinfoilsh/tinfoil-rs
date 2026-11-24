@@ -7,7 +7,6 @@ pub(crate) mod authenticate_approval;
 pub(crate) mod authenticate_provenance;
 pub(crate) mod authenticate_quote;
 pub(crate) mod check_envelope;
-pub(crate) mod read_config_runtime;
 pub(crate) mod verify_attestation;
 pub(crate) mod verify_timestamp;
 
@@ -21,8 +20,8 @@ use tinfoil_verifier::{ConfigTrust, DangerousTestOnlyRoots, Policy, Verifier};
 use super::{
     AcceptOutputs, EXIT_ACCEPTED, EXIT_REJECTED, Input, Output, Rejection, STAGE_ASSEMBLE_POLICY,
     STAGE_AUTHENTICATE_APPROVAL, STAGE_AUTHENTICATE_PROVENANCE, STAGE_AUTHENTICATE_QUOTE,
-    STAGE_CHECK_ENVELOPE, STAGE_READ_CONFIG_RUNTIME, STAGE_VERIFY, STAGE_VERIFY_TIMESTAMP,
-    decode_base64, malformed, unsupported,
+    STAGE_CHECK_ENVELOPE, STAGE_VERIFY, STAGE_VERIFY_TIMESTAMP, decode_base64, malformed,
+    unsupported,
 };
 
 /// The vendor anchors of an input: the AMD chain, intermediate and then
@@ -69,8 +68,7 @@ pub(crate) fn run(stage: &str, input: &Input) -> (Output, i32) {
         | STAGE_CHECK_ENVELOPE
         | STAGE_AUTHENTICATE_PROVENANCE
         | STAGE_ASSEMBLE_POLICY
-        | STAGE_AUTHENTICATE_QUOTE
-        | STAGE_READ_CONFIG_RUNTIME => {}
+        | STAGE_AUTHENTICATE_QUOTE => {}
         _ => return unsupported(stage),
     }
     let Some(verifier) = verifier(input) else {
@@ -82,7 +80,6 @@ pub(crate) fn run(stage: &str, input: &Input) -> (Output, i32) {
         STAGE_AUTHENTICATE_PROVENANCE => authenticate_provenance::run(input),
         STAGE_ASSEMBLE_POLICY => assemble_policy::run(input),
         STAGE_AUTHENTICATE_QUOTE => authenticate_quote::run(input),
-        STAGE_READ_CONFIG_RUNTIME => read_config_runtime::run(input),
         _ => unsupported(stage),
     }
 }

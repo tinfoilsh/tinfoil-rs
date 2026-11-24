@@ -60,7 +60,6 @@ fn capabilities_list_the_stages_of_this_build() {
         "v3-check-envelope",
         "v3-authenticate-approval",
         "v3-verify-timestamp",
-        "v3-read-config-runtime",
     ] {
         let listed = stages.iter().any(|listed| listed == stage);
         assert_eq!(listed, cfg!(tinfoil_conformance), "{stage}");
