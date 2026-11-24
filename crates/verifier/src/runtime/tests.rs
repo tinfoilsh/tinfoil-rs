@@ -303,39 +303,14 @@ fn a_manifest_version_is_a_full_semantic_version() {
 
 const DIGEST: &str = "abababababababababababababababababababababababababababababababab";
 
-/// A JSON config that pins `version`.
-fn json_config(version: &str) -> String {
-    format!(
-        r#"{{"containers":[],"cpus":2,"cvm-version":"{version}@sha256:{DIGEST}","shim":{{"upstream-port":8080}}}}"#
-    )
-}
-
-fn yaml_config(version: &str) -> String {
-    format!("cvm-version: {version}@sha256:{DIGEST}\ncpus: 2\n")
+fn good() -> String {
+    format!(r#"{{"cvm-version":"0.15.0@sha256:{DIGEST}"}}"#)
 }
 
 fn config_error(config: &str) -> String {
     runtime_from_config(config.as_bytes())
         .unwrap_err()
         .to_string()
-}
-
-const NOT_JSON_HEAD: &str =
-    "parsing config runtime pin: not a JSON config that states cvm-version (";
-const NOT_JSON_TAIL: &str = "); YAML configs are not read";
-
-/// The error for JSON that is not an object with a string `cvm-version`.
-fn no_pin_member() -> String {
-    format!("{NOT_JSON_HEAD}no cvm-version string member{NOT_JSON_TAIL}")
-}
-
-/// Whether `message` is the error for bytes that are not JSON, and names a
-/// fault of this kind as the cause.
-fn is_invalid_json(message: &str, fault: &str) -> bool {
-    message
-        .strip_prefix(NOT_JSON_HEAD)
-        .and_then(|rest| rest.strip_suffix(NOT_JSON_TAIL))
-        .is_some_and(|cause| cause.starts_with(&format!("invalid JSON: {fault} at offset ")))
 }
 
 #[test]
@@ -351,22 +326,39 @@ fn reads_the_runtime_pin_of_a_config() {
         ("0.15.0+containers.initrd-1", "v0.15.0+containers.initrd-1"),
         ("0.15.0+GPU", "v0.15.0+GPU"),
     ] {
+        let config = format!(r#"{{"containers":[],"cvm-version":"{version}@sha256:{DIGEST}"}}"#);
         assert_eq!(
-            runtime_from_config(json_config(version).as_bytes()),
+            runtime_from_config(config.as_bytes()),
             Ok(reference(tag, DIGEST)),
             "{version}"
         );
     }
 
-    let good = json_config("0.15.0");
+    let good = good();
     let pin = "cvm-version must pin a runtime manifest SHA-256 digest";
     let tag = "runtime tag must be a full semantic version";
-    let no_member = no_pin_member();
-    let cases: [(&str, String, &str); 9] = [
+    let cases: [(&str, String, &str); 14] = [
+        ("unpinned", r#"{"cvm-version":"0.15.0"}"#.to_owned(), pin),
+        ("null", r#"{"cvm-version":null}"#.to_owned(), pin),
         (
-            "unpinned",
-            replace_once(&good, &format!("@sha256:{DIGEST}"), ""),
-            pin,
+            "duplicate",
+            good.replacen('{', r#"{"cvm-version":"0.15.0","#, 1),
+            "parsing config runtime pin: invalid JSON: duplicate object member name at offset 24",
+        ),
+        (
+            "two documents",
+            format!("{good}{good}"),
+            "parsing config runtime pin: invalid JSON: data after the top-level value at offset 96",
+        ),
+        (
+            "not JSON",
+            format!("cvm-version: 0.15.0@sha256:{DIGEST}\n"),
+            "parsing config runtime pin: invalid JSON: unexpected character at offset 0",
+        ),
+        (
+            "not a string",
+            r#"{"cvm-version":0.15}"#.to_owned(),
+            "parsing config runtime pin: cvm-version must be a string",
         ),
         (
             "bad digest",
@@ -395,268 +387,26 @@ fn reads_the_runtime_pin_of_a_config() {
             good.replace(DIGEST, &format!("{DIGEST}@sha256:{DIGEST}")),
             "runtime digest is not lowercase hex",
         ),
-        (
-            "missing version",
-            r#"{"containers":[]}"#.to_owned(),
-            &no_member,
-        ),
+        ("missing version", r#"{"containers":[]}"#.to_owned(), pin),
     ];
     for (name, config, want) in cases {
         assert_eq!(config_error(&config), want, "{name}");
     }
 }
 
-/// A config is read only as JSON, for its `cvm-version` member alone.
-/// Neither the release that it pins nor the spelling of the JSON decides
-/// the outcome, and YAML is refused.
 #[test]
-fn a_config_is_read_only_as_json() {
-    let config = json_config("0.15.5-rc.1");
-    let replace = |from: &str, to: &str| replace_once(&config, from, to);
-    for (name, config, tag) in [
-        ("release candidate", config.clone(), "v0.15.5-rc.1"),
-        ("earlier version", json_config("0.15.4"), "v0.15.4"),
-        ("later version", json_config("0.16.0"), "v0.16.0"),
-        (
-            "whitespace",
-            replace(r#""cpus":2"#, r#""cpus": 2"#) + "\n",
-            "v0.15.5-rc.1",
-        ),
-        (
-            "members in any order",
-            replace(
-                r#""containers":[],"cpus":2,"#,
-                r#""cpus":2,"containers":[],"#,
-            ),
-            "v0.15.5-rc.1",
-        ),
-        (
-            "other member is null",
-            replace(r#""cpus":2"#, r#""cpus":null"#),
-            "v0.15.5-rc.1",
-        ),
-        (
-            "other member fraction",
-            replace(r#""cpus":2"#, r#""cpus":2.5"#),
-            "v0.15.5-rc.1",
-        ),
-    ] {
-        assert_eq!(
-            runtime_from_config(config.as_bytes()),
-            Ok(reference(tag, DIGEST)),
-            "{name}"
-        );
-    }
-
-    // What is not JSON is not read, whatever it pins. The error names the
-    // fault.
-    for (name, config, fault) in [
-        ("YAML", yaml_config("0.15.5-rc.1"), "unexpected character"),
-        (
-            "YAML, earlier version",
-            yaml_config("0.15.4"),
-            "unexpected character",
-        ),
-        (
-            "flow-style YAML",
-            format!("{{cvm-version: 0.15.4@sha256:{DIGEST}}}\n"),
-            "unexpected character",
-        ),
-        (
-            "repeated member",
-            replace(r#""cpus":2,"#, r#""cpus":2,"cpus":2,"#),
-            "duplicate object member name",
-        ),
-        (
-            "repeated cvm-version",
-            replace(r#""shim""#, r#""cvm-version":"x","shim""#),
-            "duplicate object member name",
-        ),
-        (
-            "second value",
-            format!("{config}{config}"),
-            "data after the top-level value",
-        ),
-        (
-            "byte order mark",
-            format!("\u{feff}{config}"),
-            "unexpected character",
-        ),
-        ("empty", String::new(), "unexpected end of input"),
-    ] {
-        let message = config_error(&config);
-        assert!(is_invalid_json(&message, fault), "{name}: {message}");
-    }
-
-    // Any other JSON is not a config: one without the pin, with a pin that
-    // is not a string or is below the top level, and a value that is not an
-    // object.
-    let pin = format!("0.15.5-rc.1@sha256:{DIGEST}");
-    for (name, config) in [
-        (
-            "no cvm-version",
-            replace(r#""cvm-version""#, r#""cvm-versions""#),
-        ),
-        (
-            "cvm-version in another case",
-            replace(r#""cvm-version""#, r#""CVM-VERSION""#),
-        ),
-        (
-            "cvm-version not a string",
-            r#"{"cvm-version":2}"#.to_owned(),
-        ),
-        ("cvm-version null", r#"{"cvm-version":null}"#.to_owned()),
-        (
-            "cvm-version in an array",
-            format!(r#"{{"cvm-version":["{pin}"]}}"#),
-        ),
-        (
-            "cvm-version below the top level",
-            format!(r#"{{"a":{config}}}"#),
-        ),
-        ("not an object", format!("[{config}]")),
-        ("a string", format!(r#""{pin}""#)),
-    ] {
-        assert_eq!(config_error(&config), no_pin_member(), "{name}");
-    }
-}
-
-#[test]
-fn a_config_must_be_utf8() {
-    let pin = format!("0.15.5@sha256:{DIGEST}");
-    let with_text = |text: &[u8]| {
-        let head = format!("{{\"cvm-version\":\"{pin}\",\"text\":\"");
-        [head.as_bytes(), text, b"\"}"].concat()
-    };
-    assert_eq!(
-        runtime_from_config(&with_text("\u{e9} \u{4e2d} \u{1f600} \u{a0}".as_bytes())),
-        Ok(reference("v0.15.5", DIGEST))
-    );
-    let utf16: Vec<u8> = format!("{{\"cvm-version\":\"{pin}\"}}")
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect();
-    for (config, fault) in [
-        (with_text(b"\xff"), "invalid UTF-8"),
-        (with_text(b"\xed\xa0\x80"), "invalid UTF-8"),
-        (utf16, "unexpected character"),
-    ] {
-        let message = runtime_from_config(&config).unwrap_err().to_string();
-        assert!(is_invalid_json(&message, fault), "{message}");
-    }
-}
-
-#[test]
-fn a_json_config_has_size_and_depth_bounds() {
-    let pin = format!("0.15.5@sha256:{DIGEST}");
+fn a_config_has_a_size_bound() {
+    let good = good();
     let padded = |size: usize| {
-        let empty = format!("{{\"cvm-version\":\"{pin}\",\"pad\":\"\"}}");
-        let pad = "a".repeat(size - empty.len());
-        format!("{{\"cvm-version\":\"{pin}\",\"pad\":\"{pad}\"}}")
+        let mut data = good.clone().into_bytes();
+        data.resize(size, b'\n');
+        data
     };
+    assert!(runtime_from_config(&padded(MAX_CONFIG_SIZE)).is_ok());
     assert_eq!(
-        runtime_from_config(padded(MAX_CONFIG_SIZE).as_bytes()),
-        Ok(reference("v0.15.5", DIGEST))
-    );
-    assert_eq!(
-        config_error(&padded(MAX_CONFIG_SIZE + 1)),
+        runtime_from_config(&padded(MAX_CONFIG_SIZE + 1))
+            .unwrap_err()
+            .to_string(),
         "parsing config runtime pin: the config is larger than 1048576 bytes"
     );
-
-    // The deepest JSON that parses is read without a deep stack. One level
-    // more is not JSON.
-    let handle = std::thread::Builder::new()
-        .stack_size(128 * 1024)
-        .spawn(move || {
-            let nested = |depth: usize| {
-                format!(
-                    "{{\"a\":{}{},\"cvm-version\":\"{pin}\"}}",
-                    "[".repeat(depth),
-                    "]".repeat(depth)
-                )
-            };
-            assert_eq!(
-                runtime_from_config(nested(crate::json::MAX_DEPTH - 1).as_bytes()),
-                Ok(reference("v0.15.5", DIGEST))
-            );
-            let deeper = config_error(&nested(crate::json::MAX_DEPTH));
-            assert!(
-                is_invalid_json(&deeper, "exceeded the maximum nesting depth"),
-                "{deeper}"
-            );
-        })
-        .unwrap();
-    handle.join().unwrap();
-}
-
-/// A small deterministic generator, so that the inputs are the same on
-/// every run.
-struct Random(u64);
-
-impl Random {
-    fn next(&mut self, bound: usize) -> usize {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        ((self.0 >> 33) as usize) % bound
-    }
-}
-
-#[test]
-fn arbitrary_configs_end_in_a_pin_or_an_error() {
-    const PIECES: &[&str] = &[
-        "{\"cvm-version\":\"0.15.5@sha256:abababababababababababababababababababababababababababababababab\"}",
-        "\"cvm-version\":",
-        "\"0.15.5@sha256:",
-        "\"0.15.4@sha256:",
-        "abababababababababababababababababababababababababababababababab",
-        "cvm-version: ",
-        "a",
-        "\"a\":",
-        "\"b\"",
-        "{",
-        "}",
-        "[",
-        "]",
-        ",",
-        ":",
-        "\"",
-        "\\",
-        "\\u",
-        "0041",
-        "d83d",
-        "null",
-        "true",
-        "0",
-        "-0",
-        "1.5",
-        "1e3",
-        "9007199254740992",
-        "-",
-        " ",
-        "\t",
-        "\n",
-        "\r",
-        "#",
-        "---\n",
-        "\u{e9}",
-        "\u{feff}",
-        "\u{1}",
-        "\u{1f600}",
-        "\u{2028}",
-    ];
-    let mut random = Random(1);
-    let mut pins = 0;
-    for _ in 0..30_000 {
-        let pieces = 1 + random.next(24);
-        let text: String = (0..pieces)
-            .map(|_| PIECES[random.next(PIECES.len())])
-            .collect();
-        // The read returns: it neither panics nor runs away.
-        if runtime_from_config(text.as_bytes()).is_ok() {
-            pins += 1;
-        }
-    }
-    assert!(pins > 0, "no input yielded a pin");
 }

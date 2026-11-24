@@ -4,8 +4,6 @@
 //! release and the SHA-256 of its manifest, as `VERSION@sha256:DIGEST`. This
 //! module reads that one member and nothing else: the publisher and the
 //! guest own the validation of every other field.
-//!
-//! The YAML config that earlier enclave versions take is not read.
 
 use std::fmt;
 
@@ -54,32 +52,18 @@ impl std::error::Error for RuntimeConfigError {}
 /// The pin's release may be written with or without a leading `v`; the
 /// returned tag always has one. The reference is validated before it is
 /// returned: a full semantic version and a lowercase SHA-256 digest.
-///
-/// The config is read as JSON, whatever release it pins and however the
-/// JSON is spelled. Bytes that are not JSON are an error, the YAML config
-/// that earlier enclave versions take included.
 pub fn runtime_from_config(data: &[u8]) -> Result<RuntimeReference, RuntimeConfigError> {
     if data.len() > MAX_CONFIG_SIZE {
         return Err(RuntimeConfigError::parsing(format_args!(
             "the config is larger than {MAX_CONFIG_SIZE} bytes"
         )));
     }
-    let not_json = |cause: &dyn fmt::Display| {
-        RuntimeConfigError::parsing(format_args!(
-            "not a JSON config that states cvm-version ({cause}); YAML configs are not read"
-        ))
+    let value = json::parse(data).map_err(RuntimeConfigError::parsing)?;
+    let pin = match value.as_object().and_then(|object| object.get(VERSION_KEY)) {
+        None | Some(Value::Null) => "",
+        Some(Value::String(pin)) => pin,
+        Some(_) => return Err(RuntimeConfigError::parsing("cvm-version must be a string")),
     };
-    let config = json::parse(data).map_err(|cause| not_json(&cause))?;
-    let pin = config
-        .as_object()
-        .and_then(|members| members.get(VERSION_KEY))
-        .and_then(Value::as_str)
-        .ok_or_else(|| not_json(&"no cvm-version string member"))?;
-    reference_from_pin(pin)
-}
-
-/// The reference that a pin states, validated.
-fn reference_from_pin(pin: &str) -> Result<RuntimeReference, RuntimeConfigError> {
     let Some((version, digest)) = pin.split_once(DIGEST_SEPARATOR) else {
         return Err(RuntimeConfigError::new(
             "cvm-version must pin a runtime manifest SHA-256 digest",

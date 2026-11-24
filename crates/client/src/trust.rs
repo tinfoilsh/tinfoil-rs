@@ -67,9 +67,7 @@ pub enum Trust {
     /// error for config bytes that it does not authorize; it may be called
     /// from several threads at once. Runtime, platform and hardware checks
     /// still apply. An authorized config has no authenticated registry
-    /// name or approval time, so this variant has no pin. The authorized
-    /// bytes must be a JSON config; any other bytes are rejected, such as
-    /// the YAML config that earlier enclave versions take.
+    /// name or approval time, so this variant has no pin.
     AuthorizedBy(ConfigAuthorizer),
     /// `attestation-collaterals/v3` collateral for exactly the config bytes
     /// that the caller supplies, which must come from trusted client
@@ -79,9 +77,7 @@ pub enum Trust {
         /// The `/org/project/revision` identity that the caller associates
         /// with the config.
         name: Option<String>,
-        /// The config, 1 byte to 1 MiB. It is a JSON config; the YAML
-        /// config that earlier enclave versions take is a configuration
-        /// error.
+        /// The config, 1 byte to 1 MiB. It must be a JSON config.
         bytes: Vec<u8>,
     },
     /// `attestation-collaterals/v2` collateral for `repo` or

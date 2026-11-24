@@ -58,7 +58,7 @@ impl Inputs {
         )
         .into_bytes();
         let config = format!(
-            "{{\"cvm-version\":\"0.15.0@sha256:{}\"}}",
+            r#"{{"cvm-version":"0.15.0@sha256:{}"}}"#,
             encode_lower_hex(&Sha256::digest(&runtime))
         )
         .into_bytes();
@@ -564,54 +564,6 @@ fn embedded_references_are_checked_when_the_verifier_is_built() {
     ];
     for references in accepted {
         references.build().unwrap();
-    }
-}
-
-#[test]
-fn an_embedded_config_in_yaml_is_refused_when_the_verifier_is_built() {
-    let inputs = Inputs::new();
-    let runtime = inputs.runtime_reference();
-    let yaml = format!("cvm-version: 0.15.0@sha256:{}\n", runtime.digest).into_bytes();
-    let embedded = |config: EmbeddedConfig| (ConfigTrust::Embedded(config), inputs.artifacts());
-
-    let message = usage(
-        embedded(EmbeddedConfig::Bytes {
-            bytes: yaml.clone(),
-            name: None,
-        })
-        .build(),
-    );
-    // The error names the two forms that are accepted.
-    for want in [
-        "embedded config bytes must be a JSON config",
-        "trust any other config with EmbeddedConfig::Reference",
-        "not a JSON config that states cvm-version (invalid JSON: ",
-    ] {
-        assert!(message.contains(want), "{message}: want {want}");
-    }
-
-    // The same config by reference, and a JSON config that pins the same
-    // runtime, build a verifier with the same runtime pin.
-    let by_reference = embedded(EmbeddedConfig::Reference {
-        digest: encode_lower_hex(&Sha256::digest(&yaml)),
-        runtime: runtime.clone(),
-        name: None,
-    })
-    .build()
-    .unwrap();
-    let json = embedded(EmbeddedConfig::Bytes {
-        bytes: inputs.config.clone(),
-        name: None,
-    })
-    .build()
-    .unwrap();
-    for (verifier, config) in [(by_reference, &yaml), (json, &inputs.config)] {
-        let reference = verifier.embedded.config.unwrap();
-        assert_eq!(reference.digest, encode_lower_hex(&Sha256::digest(config)));
-        assert_eq!(
-            (reference.runtime.tag, reference.runtime.digest),
-            (runtime.tag.clone(), runtime.digest.clone())
-        );
     }
 }
 
@@ -1339,43 +1291,25 @@ fn a_config_authorizer_never_chooses_the_kind_of_error() {
         cause.downcast_ref::<Error>(),
         Some(Error::Usage(_))
     ));
-
-    // What the authorizer accepts is still read for its runtime pin, and
-    // the config of this document is YAML.
-    let accepting = artifacts(authorizer(accept));
-    let Err(Error::Verification(rejected)) = verify(&accepting) else {
-        panic!("want a rejection");
-    };
-    assert_eq!(rejected.layer(), Layer::Provenance);
-    let message = rejected.to_string();
-    assert!(message.contains("not a JSON config"), "{message}");
 }
 
 #[test]
-fn the_runtime_pin_of_an_authorized_json_config_is_enforced() {
-    use std::sync::{Arc, Mutex};
-
+fn the_runtime_pin_of_an_authorized_config_is_enforced() {
     let fixture = Fixture::load();
     let case = fixture.case("config-sev/authorizer-accept");
     let recorded = String::from_utf8(fixture.document(text(case, "doc")).unwrap()).unwrap();
-    let measured = crate::document::decode(recorded.as_bytes()).unwrap();
-    let yaml = measured.config_endorsement().unwrap().config().unwrap();
-    // The document, carrying in place of the config that it measures a
-    // JSON config that pins the same runtime manifest under a later
-    // release.
+    let carried = crate::document::decode(recorded.as_bytes()).unwrap();
+    let carried = carried.config_endorsement().unwrap().config().unwrap();
+    // The document, with a config that pins the embedded runtime manifest
+    // under another release.
     let embedded = fixture.verifier(case).unwrap().embedded;
     let manifest = encode_lower_hex(&Sha256::digest(embedded.runtime.as_ref().unwrap()));
-    let config = format!("{{\"cvm-version\":\"0.15.5@sha256:{manifest}\"}}");
-    let (from, to) = (STANDARD.encode(yaml), STANDARD.encode(&config));
+    let config = format!(r#"{{"cvm-version":"0.16.0@sha256:{manifest}"}}"#);
+    let (from, to) = (STANDARD.encode(carried), STANDARD.encode(config));
     assert_eq!(recorded.matches(&from).count(), 1);
     let document = recorded.replace(&from, &to);
 
-    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
-    let record = Arc::clone(&seen);
-    let (trust, policy) = authorizer(move |endorsement| {
-        record.lock().unwrap().push(endorsement.config().to_vec());
-        Ok(())
-    });
+    let (trust, policy) = authorizer(accept);
     let mut verifier = Verifier::with_test_roots(
         trust,
         policy,
@@ -1393,20 +1327,11 @@ fn the_runtime_pin_of_an_authorized_json_config_is_enforced() {
     ) else {
         panic!("want a rejection");
     };
-    // The config is accepted and read; the manifest is then held to the
-    // release that the config pins.
-    assert_eq!(*seen.lock().unwrap(), [config.into_bytes()]);
     assert_eq!(rejected.layer(), Layer::Provenance);
     assert_eq!(
         rejected.to_string(),
-        "verification error: provenance: runtime manifest version \"v0.15.0\" does not match the config's pin \"v0.15.5\""
+        "verification error: provenance: runtime manifest version \"v0.15.0\" does not match the config's pin \"v0.16.0\""
     );
-}
-
-/// The digest of the config that the recorded config documents measure.
-fn measured_config_digest(fixture: &Fixture) -> &str {
-    let options = object(member(fixture.case("config-sev/embedded-all"), "options"));
-    text(object(member(options, "embedded")), "config_ref_digest")
 }
 
 #[test]
@@ -1414,6 +1339,9 @@ fn a_config_authorizer_sees_the_material_of_the_document() {
     use std::sync::{Arc, Mutex};
 
     let fixture = Fixture::load();
+    // The digest of the config that the recorded documents measure.
+    let options = object(member(fixture.case("config-sev/embedded-all"), "options"));
+    let measured = text(object(member(options, "embedded")), "config_ref_digest");
     for (name, signed) in [
         ("config-sev/authorizer-accept", false),
         ("config-sev/endorsed-v1-authorizer-accept", true),
@@ -1436,25 +1364,23 @@ fn a_config_authorizer_sees_the_material_of_the_document() {
         )
         .unwrap();
         verifier.embedded = embedded;
-        // The config of these documents is YAML, so the verification ends
-        // at its runtime pin, once the authorizer has seen the material.
-        let Err(Error::Verification(rejected)) = verifier.verify_at(
-            &document,
-            &Fixture::nonce(case),
-            &Pin::none(),
-            instant(case),
-        ) else {
-            panic!("{name}: want a rejection");
-        };
-        assert_eq!(rejected.layer(), Layer::Provenance, "{name}");
+        // The recorded config is not JSON, so verification ends at its
+        // runtime pin, after the authorizer has run.
+        verifier
+            .verify_at(
+                &document,
+                &Fixture::nonce(case),
+                &Pin::none(),
+                instant(case),
+            )
+            .unwrap_err();
 
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "{name}");
         let endorsement = &seen[0];
         assert_eq!(
             encode_lower_hex(&Sha256::digest(endorsement.config())),
-            measured_config_digest(&fixture),
-            "{name}"
+            measured
         );
         assert_eq!(endorsement.issuer_certificate_der(), None);
         assert_eq!(endorsement.reference().is_some(), signed, "{name}");

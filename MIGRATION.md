@@ -293,8 +293,7 @@ async fn connect(
 ```
 
 To verify against a config that you supply yourself rather than a pin,
-see `Trust::EmbeddedConfig` and `Trust::AuthorizedBy`. Both read the
-config's bytes as JSON; a YAML config is rejected.
+see `Trust::EmbeddedConfig` and `Trust::AuthorizedBy`.
 
 ## Verification results
 

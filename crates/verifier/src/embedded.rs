@@ -29,12 +29,8 @@ pub struct RuntimeReference {
 pub enum EmbeddedConfig {
     /// The exact config bytes. Their digest and the runtime that they pin
     /// are derived from them.
-    ///
-    /// The bytes are a JSON config. The YAML config that earlier enclave
-    /// versions take is not read and is a usage error: give that config as
-    /// a [`Reference`](Self::Reference).
     Bytes {
-        /// The config, 1 byte to 1 MiB.
+        /// The config, 1 byte to 1 MiB. It must be a JSON config.
         bytes: Vec<u8>,
         /// The `/org/project/revision` identity that the caller associates
         /// with the config. Without one, the config matches no repository
@@ -134,11 +130,7 @@ impl Embedded {
                 if bytes.is_empty() || bytes.len() > MAX_CONFIG_SIZE {
                     return Err("embedded config size is outside allowed bounds".to_owned());
                 }
-                let runtime = runtime_from_config(&bytes).map_err(|cause| {
-                    format!(
-                        "embedded config bytes must be a JSON config; trust any other config with EmbeddedConfig::Reference: {cause}"
-                    )
-                })?;
+                let runtime = runtime_from_config(&bytes).map_err(|cause| cause.to_string())?;
                 Some(ConfigReference {
                     name,
                     digest: canonical::encode_lower_hex(&Sha256::digest(&bytes)),
