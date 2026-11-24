@@ -24,7 +24,7 @@ use crate::verification::{
 use crate::{
     ArtifactTrust, CRYPTO_MATERIAL_ID_HPKE, CRYPTO_MATERIAL_ID_TLS, CRYPTO_MATERIAL_V1_FORMAT,
     ConfigTrust, CryptoMaterialItem, EmbeddedConfig, KEY_SPKI_FP_SHA256_V1_FORMAT,
-    KEY_X25519_HPKE_V1_FORMAT, NONCE_SIZE, Pin, Policy, Verifier,
+    KEY_X25519_HPKE_V1_FORMAT, Pin, Policy, Verifier,
 };
 
 /// The members of the form that hold a time.
@@ -115,7 +115,9 @@ fn time(text: &str) -> Option<SystemTime> {
 
 /// The verified facts of a config-based verification on SEV-SNP, with
 /// every record member: the facts that the golden file
-/// `acceptance-config-facts` was written from.
+/// `acceptance-config-facts` was written from. The Go test gives the times
+/// in UTC-5; a `SystemTime` has no zone, so here they are the same
+/// instants, and the form writes them in UTC either way.
 fn golden_config_facts() -> VerifiedFacts {
     let mut launch = [0; REGISTER_SIZE];
     launch[..2].copy_from_slice(&[0xab, 0xcd]);
@@ -186,7 +188,7 @@ fn golden_metadata() -> VerificationMetadata {
 /// A document with an SEV-SNP quote that isn't authentic, that endorses no
 /// keys, and whose collateral is empty.
 fn document_without_keys() -> (Vec<u8>, Vec<u8>) {
-    let nonce = vec![0; NONCE_SIZE];
+    let nonce = crate::random_nonce().unwrap().to_vec();
     let document = TestDocument::new(&nonce)
         .with_crypto_material(&format!(
             r#"{{"format":"{CRYPTO_MATERIAL_V1_FORMAT}","items":[]}}"#

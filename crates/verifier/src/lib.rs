@@ -81,9 +81,9 @@
 //!   the types that it holds ([`Step`], [`VerifiedFacts`], [`PartialFacts`],
 //!   [`ExpectedFacts`], [`MeasuredFacts`] and [`VerificationMetadata`]), so
 //!   that `serde_json::to_string(&report)` writes the JSON form that every
-//!   Tinfoil SDK writes, as [`VerificationReport::to_json`] describes; and
-//!   for [`Register`], [`Measurement`] and [`Expected`], in the form of a
-//!   measurement in it. There is no `Deserialize`: the JSON form is for
+//!   Tinfoil SDK writes, as [`VerificationReport::to_json`] describes; for
+//!   [`Measurement`] and [`Expected`], as a measurement of that form; and
+//!   for [`Register`], as a lowercase hex string. There is no `Deserialize`: the JSON form is for
 //!   display and transport, and verified facts that were read from JSON
 //!   would be forgeable. Off by default.
 

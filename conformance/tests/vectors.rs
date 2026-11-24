@@ -125,7 +125,10 @@ fn contains(path: &str, got: &Value, want: &Value) -> Result<(), String> {
                 return Err(format!("{path} is {got}, want an object"));
             }
             for (name, member) in members {
-                contains(&format!("{path}.{name}"), &got[name], member)?;
+                let Some(got) = got.get(name) else {
+                    return Err(format!("{path}.{name} is missing"));
+                };
+                contains(&format!("{path}.{name}"), got, member)?;
             }
             Ok(())
         }

@@ -337,6 +337,40 @@ pub fn check_report_json(output: &Value) -> Result<(), String> {
                 && [STATUS_PASSED, STATUS_SKIPPED].contains(&status(step).as_str())
         })
     };
+    // A fact that is present is an object: the form has no null member.
+    let objects = [
+        ("verified_facts", report.get("verified_facts")),
+        ("partial_facts", report.get("partial_facts")),
+        (
+            "partial_facts.expected",
+            report.get("partial_facts").and_then(|p| p.get("expected")),
+        ),
+        (
+            "partial_facts.expected.measurement",
+            report
+                .get("partial_facts")
+                .and_then(|p| p.get("expected"))
+                .and_then(|e| e.get("measurement")),
+        ),
+        (
+            "partial_facts.measured",
+            report.get("partial_facts").and_then(|p| p.get("measured")),
+        ),
+        (
+            "partial_facts.measured.cpu_measurement",
+            report
+                .get("partial_facts")
+                .and_then(|p| p.get("measured"))
+                .and_then(|m| m.get("cpu_measurement")),
+        ),
+    ];
+    for (name, value) in objects {
+        if let Some(value) = value
+            && !value.is_object()
+        {
+            return Err(format!("{name} is {value}, want an object"));
+        }
+    }
     let partial = report.get("partial_facts");
     if accepted {
         if let Some(step) = steps.iter().find(|step| !ran(&layer_of(step))) {
@@ -759,7 +793,7 @@ mod tests {
     #[test]
     fn a_report_that_disagrees_with_its_verdict_or_its_rules_fails_its_check() {
         type Mutation = fn(&mut Value);
-        let cases: [(&str, Mutation); 11] = [
+        let cases: [(&str, Mutation); 13] = [
             ("wrong layer", |o| {
                 o["rejection"]["code"] = json!(CODE_QUOTE_REJECTED);
             }),
@@ -786,6 +820,12 @@ mod tests {
             }),
             ("verified facts", |o| {
                 o["report"]["verified_facts"] = json!({});
+            }),
+            ("null partial facts", |o| {
+                o["report"]["partial_facts"] = Value::Null;
+            }),
+            ("null measured facts", |o| {
+                o["report"]["partial_facts"]["measured"] = Value::Null;
             }),
             ("another schema version", |o| {
                 o["report"]["schema_version"] = json!(2);
