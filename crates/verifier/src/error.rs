@@ -3,6 +3,8 @@
 use std::error::Error as StdError;
 use std::fmt;
 
+use crate::report::VerificationReport;
+
 /// A boxed error that can cross threads: the cause carried by an error of
 /// this crate, and the error type of a caller's config authorizer.
 pub type BoxError = Box<dyn StdError + Send + Sync + 'static>;
@@ -112,24 +114,41 @@ impl fmt::Display for Layer {
     }
 }
 
-/// A document that must not be trusted, and the layer that rejected it.
+/// A document that must not be trusted, the layer that rejected it, and the
+/// report of the verification that rejected it.
 #[derive(Debug)]
 pub struct VerificationError {
     layer: Layer,
     source: BoxError,
+    /// Boxed, so that a `Result` that carries the error stays small.
+    report: Box<VerificationReport>,
 }
 
 impl VerificationError {
-    pub(crate) fn new(layer: Layer, source: impl Into<BoxError>) -> Self {
+    pub(crate) fn new(
+        layer: Layer,
+        source: impl Into<BoxError>,
+        report: VerificationReport,
+    ) -> Self {
         Self {
             layer,
             source: source.into(),
+            report: Box::new(report),
         }
     }
 
     /// The layer that rejected the document.
     pub fn layer(&self) -> Layer {
         self.layer
+    }
+
+    /// The report of the rejected verification: the step that failed, which
+    /// is the step of [`layer`](Self::layer), and the facts that the steps
+    /// before it established. Its
+    /// [`verified_facts`](VerificationReport::verified_facts) are `None`.
+    /// The verifier always sets it.
+    pub fn report(&self) -> &VerificationReport {
+        &self.report
     }
 }
 
@@ -149,9 +168,17 @@ impl StdError for VerificationError {
 mod tests {
     use super::*;
 
+    /// A rejection at `layer` with an empty report, for the tests of the
+    /// error's own behaviour.
+    fn rejected(layer: Layer, cause: impl Into<BoxError>) -> VerificationError {
+        let cause = cause.into();
+        let report = VerificationReport::rejected_for_test(layer, &cause.to_string());
+        VerificationError::new(layer, cause, report)
+    }
+
     #[test]
     fn a_verification_error_names_its_layer() {
-        let error = VerificationError::new(Layer::Quote, "report signature is invalid");
+        let error = rejected(Layer::Quote, "report signature is invalid");
         assert_eq!(
             error.to_string(),
             "verification error: quote: report signature is invalid"
@@ -161,6 +188,17 @@ mod tests {
             error.source().unwrap().to_string(),
             "report signature is invalid"
         );
+        assert_eq!(
+            error.report().failed_step().unwrap().message,
+            "report signature is invalid"
+        );
+    }
+
+    #[test]
+    fn a_result_that_carries_the_error_stays_small() {
+        // The report is boxed, so that the error is the size of its other
+        // fields and a pointer.
+        assert!(std::mem::size_of::<Error>() <= 40);
     }
 
     #[test]
@@ -181,7 +219,7 @@ mod tests {
         assert_eq!(usage.source().unwrap().to_string(), "bad option");
 
         let cause = std::io::Error::other("truncated");
-        let rejected: Error = VerificationError::new(Layer::Envelope, cause).into();
+        let rejected: Error = rejected(Layer::Envelope, cause).into();
         assert_eq!(
             rejected.to_string(),
             "verification error: envelope: truncated"

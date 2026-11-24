@@ -23,6 +23,10 @@ pub(crate) struct Record {
 }
 
 impl Evidence for Record {
+    type Facts = Record;
+    fn facts(&self) -> Option<&Record> {
+        Some(self)
+    }
     fn tls_public_key_fp(&self) -> Option<&str> {
         self.tls.as_deref()
     }
@@ -106,4 +110,41 @@ impl Script {
             })
         })
     }
+}
+
+/// One attempt as an observer was told it: the host, and the name of the
+/// evidence or the error's message.
+pub(crate) type Told = (String, Result<&'static str, String>);
+
+/// An observer of attempts that records what it is told, and the records.
+pub(crate) fn observer() -> (crate::options::Notify<Record>, Arc<Mutex<Vec<Told>>>) {
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&told);
+    let notify: crate::options::Notify<Record> = Arc::new(move |host, outcome| {
+        let outcome = outcome
+            .map(|record| record.name)
+            .map_err(ToString::to_string);
+        log.lock().unwrap().push((host.to_owned(), outcome));
+    });
+    (notify, told)
+}
+
+/// The report that a verifier's rejection carries, found from a client
+/// error through its sources.
+pub(crate) fn rejected_report(error: &Error) -> Option<&crate::verifier::VerificationReport> {
+    let source = std::error::Error::source(error)?;
+    match source.downcast_ref::<crate::verifier::Error>()? {
+        crate::verifier::Error::Verification(rejected) => Some(rejected.report()),
+        _ => None,
+    }
+}
+
+/// A client error for a document that the verifier rejected: an empty
+/// document, which the envelope step rejects, with its report.
+pub(crate) fn rejected_by_verifier() -> Error {
+    let nonce = crate::verifier::random_nonce().unwrap();
+    let rejection = crate::verifier::Verifier::default()
+        .verify_v3(b"{}", &nonce, &crate::verifier::Pin::repo("owner/name"))
+        .expect_err("an empty document is rejected");
+    crate::internal::enclave::from_verifier(rejection)
 }

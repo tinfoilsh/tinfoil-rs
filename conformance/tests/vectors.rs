@@ -134,11 +134,40 @@ fn run_fixture(path: &Path) -> Outcome {
     if code == EXIT_UNSUPPORTED {
         return Outcome::Skip;
     }
+    // Every report agrees with its verdict.
+    if let Err(reason) = tinfoil_conformance::check_report(&output) {
+        return Outcome::Fail(format!("report: {reason}"));
+    }
     let output = match serde_json::to_value(&output) {
         Ok(output) => output,
         Err(error) => return Outcome::Fail(format!("output does not serialise: {error}")),
     };
     let accepted = output["accepted"].as_bool().unwrap_or(false);
+
+    // What a full-verification fixture declares of the report: the failed
+    // step, and every step's status and the partial facts. Step messages
+    // are not compared.
+    let failed_step = &expected["failed_step"];
+    if let Some(want) = failed_step.as_str() {
+        let got = output["report"]["steps"]
+            .as_array()
+            .and_then(|steps| steps.iter().find(|step| step["status"] == "failed"))
+            .map(|step| step["layer"].clone());
+        if got.as_ref() != Some(failed_step) {
+            return Outcome::Fail(format!("failed step: got {got:?}, want {want}"));
+        }
+    }
+    let report = &expected["report"];
+    if !report.is_null() {
+        for member in ["steps", "partial_facts"] {
+            if output["report"][member] != report[member] {
+                return Outcome::Fail(format!(
+                    "report {member}: got {}, want {}",
+                    output["report"][member], report[member]
+                ));
+            }
+        }
+    }
 
     if expect_accept {
         if code != EXIT_ACCEPTED || !accepted {

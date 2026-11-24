@@ -23,7 +23,7 @@ use reqwest::{Request, Response};
 use crate::error::{Error, ErrorKind};
 use crate::internal::BoxFuture;
 use crate::internal::enclave::{Enclave, Evidence, fresh_at, freshness_expired};
-use crate::verifier::Verification;
+use crate::verifier::VerificationReport;
 
 pub(crate) mod base_url;
 pub(crate) mod cachesecret;
@@ -172,13 +172,19 @@ type WeakRefresh = WeakShared<BoxFuture<Result<(), Error>>>;
 ///   was sent under, not the current one, so a late rejection cannot retire
 ///   a newer verification. A failed verification likewise invalidates only
 ///   the state that it was replacing.
+/// - **Attempts.** Every attempt to verify the enclave, the first attempt
+///   of a verification that is retried included, becomes the last
+///   verification as soon as its outcome is decided, and is then told to
+///   the enclave's observer, outside every lock. The outcome of an attempt
+///   that binding or freshness refused afterwards is that error. An
+///   abandoned attempt has no outcome, and is neither kept nor told.
 ///
 /// The transport is a handle: a clone shares the same state.
-pub(crate) struct Transport<V = Verification> {
+pub(crate) struct Transport<V: Evidence = VerificationReport> {
     inner: Arc<Inner<V>>,
 }
 
-impl<V> Clone for Transport<V> {
+impl<V: Evidence> Clone for Transport<V> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -186,13 +192,13 @@ impl<V> Clone for Transport<V> {
     }
 }
 
-impl<V> std::fmt::Debug for Transport<V> {
+impl<V: Evidence> std::fmt::Debug for Transport<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Transport").finish_non_exhaustive()
     }
 }
 
-struct Inner<V> {
+struct Inner<V: Evidence> {
     enclave: Enclave<V>,
     mode: Arc<dyn Mode<V>>,
     slot: Mutex<Slot<V>>,
@@ -201,6 +207,9 @@ struct Inner<V> {
 struct Slot<V> {
     /// The last successful verification.
     state: Arc<State<V>>,
+    /// The outcome of the last attempt to verify the enclave, which may be
+    /// a failure after `state` was published.
+    last: Result<Arc<V>, Error>,
     /// The verification that callers are waiting for, with its number. The
     /// reference is weak: the waiters own the future, so that it is dropped
     /// with the last of them.
@@ -231,14 +240,19 @@ impl<V: Evidence> Inner<V> {
     }
 
     /// Verifies the enclave, binds the mode to the result and makes sure
-    /// that the evidence is fresh.
-    async fn fresh_state(&self, retry: bool) -> Result<Arc<State<V>>, Error> {
-        let evidence = if retry {
-            self.enclave.verify().await?
-        } else {
-            self.enclave.verify_once().await?
-        };
+    /// that the evidence is fresh. A first attempt that fails and is
+    /// retried is recorded and told at once ([`retried`](Self::retried)).
+    async fn fresh_state(&self) -> Result<Arc<State<V>>, Error> {
+        let evidence = self.enclave.verify(|error| self.retried(error)).await?;
         new_state(self.mode.as_ref(), self.enclave.clock(), evidence)
+    }
+
+    /// Records the failure of an attempt that is about to be retried as
+    /// the last verification, and tells the enclave's observer after the
+    /// slot's lock is released.
+    fn retried(&self, error: &Error) {
+        self.slot().last = Err(error.clone());
+        self.enclave.notify(Err(error));
     }
 
     /// One shared verification, numbered `id`, of an enclave whose last
@@ -253,8 +267,13 @@ impl<V: Evidence> Inner<V> {
     /// leaves `replacing` as valid as it was. A dropped verification
     /// touches nothing. Only `replacing` is invalidated, never a state
     /// that was published after it.
+    ///
+    /// The outcome becomes the last verification under the slot's lock, and
+    /// is told to the enclave's observer once the lock is released and the
+    /// refresh has left the slot, so that an observer that starts a
+    /// verification starts one of its own.
     async fn refresh(self: Arc<Self>, id: u64, replacing: Arc<State<V>>) -> Result<(), Error> {
-        let result = self.fresh_state(true).await;
+        let result = self.fresh_state().await;
         let mut slot = self.slot();
         if slot
             .refresh
@@ -270,10 +289,15 @@ impl<V: Evidence> Inner<V> {
         });
         match result {
             Ok(state) => {
+                let evidence = Arc::clone(&state.evidence);
+                slot.last = Ok(Arc::clone(&evidence));
                 slot.state = state;
+                drop(slot);
+                self.enclave.notify(Ok(&evidence));
                 Ok(())
             }
             Err(error) => {
+                slot.last = Err(error.clone());
                 // Under the slot's lock, so that no caller can take the
                 // state as valid after the verification has failed.
                 let retired = if error.kind() == ErrorKind::Attestation {
@@ -283,6 +307,7 @@ impl<V: Evidence> Inner<V> {
                 };
                 drop(slot);
                 drop(retired);
+                self.enclave.notify(Err(&error));
                 Err(error)
             }
         }
@@ -312,6 +337,11 @@ impl<V: Evidence> Transport<V> {
     /// that tries several enclaves moves on quickly. No transport exists
     /// without a successful verification.
     ///
+    /// Each attempt is told to the enclave's observer once its outcome is
+    /// decided: a first attempt that is retried before the pause, and the
+    /// last one after binding, a failure included. The successful one is
+    /// the transport's last verification.
+    ///
     /// Dropping the future abandons the verification and keeps nothing.
     pub(crate) async fn connect(
         enclave: Enclave<V>,
@@ -319,17 +349,28 @@ impl<V: Evidence> Transport<V> {
         retry: bool,
     ) -> Result<Self, Error> {
         let evidence = if retry {
-            enclave.verify().await?
+            enclave.verify(|error| enclave.notify(Err(error))).await
         } else {
-            enclave.verify_once().await?
+            enclave.verify_once().await
         };
-        let state = new_state(mode.as_ref(), enclave.clock(), evidence)?;
+        let state = match evidence
+            .and_then(|evidence| new_state(mode.as_ref(), enclave.clock(), evidence))
+        {
+            Ok(state) => state,
+            Err(error) => {
+                enclave.notify(Err(&error));
+                return Err(error);
+            }
+        };
+        enclave.notify(Ok(&state.evidence));
+        let last = Ok(Arc::clone(&state.evidence));
         Ok(Self {
             inner: Arc::new(Inner {
                 enclave,
                 mode,
                 slot: Mutex::new(Slot {
                     state,
+                    last,
                     refresh: None,
                     next_refresh: 0,
                 }),
@@ -343,9 +384,18 @@ impl<V: Evidence> Transport<V> {
     }
 
     /// The last successful verification, unchecked: it may have expired or
-    /// been invalidated.
+    /// been invalidated. For the tests of the state that the transport
+    /// keeps; the clients report [`last_verification`](Self::last_verification).
+    #[cfg(test)]
     pub(crate) fn current(&self) -> Arc<V> {
         Arc::clone(&self.inner.slot().state.evidence)
+    }
+
+    /// The outcome of the last attempt to verify the enclave, without I/O
+    /// and unchecked: a success may have expired or been invalidated since.
+    /// A failure is the error that the attempt was reported with.
+    pub(crate) fn last_verification(&self) -> Result<Arc<V>, Error> {
+        self.inner.slot().last.clone()
     }
 
     /// A verification that is valid now, verifying first only if the

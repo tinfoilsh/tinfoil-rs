@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 use super::*;
 use crate::error::ErrorKind;
 use crate::internal::BoxFuture;
-use crate::internal::testing::{Record, Script, Step, record, tokio_clock};
+use crate::internal::testing::{Record, Script, Step, observer, record, tokio_clock};
 use crate::internal::transport::{Failure, RoundTrip};
 use crate::options::TransportMode;
 use crate::request::{Execute, RequestBuilder, into_url};
@@ -1016,4 +1016,49 @@ mod options {
         })
         .await
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_router_that_discovery_tries_is_told_with_its_own_host() {
+    unstuck(async {
+        let world = World::new(vec![
+            (
+                "forged.example",
+                vec![bad(ErrorKind::Attestation, "rejected")],
+            ),
+            ("down.example", vec![bad(ErrorKind::Network, "refused")]),
+            (FALLBACK_ROUTER, vec![good("fallback")]),
+        ]);
+        let (notify, log) = observer();
+        let enclave_for = {
+            let enclave_for = world.enclave_for();
+            move |host: &str| enclave_for(host).map(|enclave| enclave.notifying(notify.clone()))
+        };
+        let transport = discover(
+            hosts(&["forged.example", "down.example"]),
+            enclave_for,
+            Arc::new(Recording::default()),
+        )
+        .await
+        .unwrap();
+        // The skipped routers and the fallback, each once and with its own
+        // host; the last verification is the chosen router's.
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                (
+                    "forged.example".to_owned(),
+                    Err("attestation error: rejected".to_owned())
+                ),
+                (
+                    "down.example".to_owned(),
+                    Err("network error: refused".to_owned())
+                ),
+                (FALLBACK_ROUTER.to_owned(), Ok("fallback")),
+            ]
+        );
+        assert_eq!(transport.enclave().host(), FALLBACK_ROUTER);
+        assert_eq!(transport.last_verification().unwrap().name, "fallback");
+    })
+    .await
 }

@@ -18,8 +18,7 @@ use crate::json;
 use crate::measurement::{Expected, Measurement, REGISTER_SIZE, Register};
 use crate::quote::{AssemblyError, QuoteError};
 use crate::verification::{
-    ArtifactVerification, ConfigVerification, ReferenceSource, SoftwareIdentity, Verification,
-    VerificationMetadata,
+    ArtifactVerification, ConfigVerification, ReferenceSource, VerifiedFacts,
 };
 use crate::verifier::freshness_expiration;
 use crate::{
@@ -207,7 +206,8 @@ fn the_default_verifier_loads_the_embedded_trust() {
 fn a_verifier_is_shared_between_threads() {
     fn assert_send_sync<T: Send + Sync + 'static>() {}
     assert_send_sync::<Verifier>();
-    assert_send_sync::<Verification>();
+    assert_send_sync::<VerifiedFacts>();
+    assert_send_sync::<crate::VerificationReport>();
     assert_send_sync::<ConfigTrust>();
     assert_send_sync::<Policy>();
 }
@@ -950,6 +950,11 @@ fn verify_v3_reads_the_clock_once_and_reports_it() {
         .verify_v3_at(&document, &Fixture::nonce(case), &pin(&fixture, case), at)
         .unwrap();
     assert_eq!(verified.metadata().verified_at, at);
+    // A rejection reports the same verifier identity.
+    assert_eq!(
+        rejected.report().metadata().verifier,
+        verified.metadata().verifier
+    );
     assert_eq!(verified.metadata().verifier.name, "tinfoil-rs");
     assert_eq!(
         verified.metadata().verifier.version,
@@ -1017,9 +1022,193 @@ fn an_internal_error_becomes_a_rejection_of_its_layer_with_the_cause_attached() 
             format!("verification error: {layer}: {cause}")
         );
         // The public error has the same text and the same cause.
-        let cause = cause.clone();
-        let error = Error::from(crate::VerificationError::new(Layer::Policy, cause.clone()));
+        let error = Error::from(crate::VerificationError::new(
+            Layer::Policy,
+            cause.clone(),
+            crate::VerificationReport::rejected_for_test(Layer::Policy, &cause),
+        ));
         assert_eq!(error.source().unwrap().to_string(), cause);
+    }
+}
+
+/// The statuses of a report's steps, in order.
+fn statuses(report: &crate::VerificationReport) -> Vec<crate::StepStatus> {
+    report.steps().iter().map(|step| step.status).collect()
+}
+
+#[test]
+fn a_rejection_reports_the_failed_step_and_what_the_steps_before_it_established() {
+    use crate::StepStatus::{Failed, NotRun, Passed};
+
+    let fixture = Fixture::load();
+    let check = |name: &str, layer: Layer, want: [crate::StepStatus; 4]| {
+        let rejected = rejection(&fixture, name);
+        assert_eq!(rejected.layer(), layer, "{name}");
+        let report = rejected.report();
+        assert_eq!(statuses(report), want, "{name}");
+        let layers: Vec<Layer> = report.steps().iter().map(|step| step.layer).collect();
+        assert_eq!(
+            layers,
+            [
+                Layer::Envelope,
+                Layer::Provenance,
+                Layer::Quote,
+                Layer::Policy
+            ]
+        );
+        let failed = report.failed_step().unwrap();
+        assert_eq!(failed.layer, layer, "{name}");
+        // The step's message is the error's cause, so the report adds no
+        // failure kinds of its own.
+        assert_eq!(
+            failed.message,
+            rejected.source().unwrap().to_string(),
+            "{name}"
+        );
+        assert!(report.verified_facts().is_none(), "{name}");
+        rejected
+    };
+
+    let envelope = check(
+        "legacy-sev/nonce-flipped",
+        Layer::Envelope,
+        [Failed, NotRun, NotRun, NotRun],
+    );
+    let partial = envelope.report().partial_facts().unwrap();
+    assert_eq!((&partial.expected, &partial.measured), (&None, &None));
+
+    // Provenance failed: the keys that the document claims, and nothing
+    // that a reference value would have set.
+    let provenance = check(
+        "legacy-sev/roots-embedded-sigstore",
+        Layer::Provenance,
+        [Passed, Failed, NotRun, NotRun],
+    );
+    let partial = provenance.report().partial_facts().unwrap();
+    assert_eq!(partial.expected, None);
+    let measured = partial.measured.as_ref().unwrap();
+    assert_eq!(measured.cpu, None);
+    assert_eq!(
+        measured.tls_public_key_fp.as_ref().map(String::len),
+        Some(64)
+    );
+    assert_eq!(
+        measured.hpke_public_key_fp.as_ref().map(String::len),
+        Some(64)
+    );
+
+    // The quote failed: the reference values, but no CPU measurement, which
+    // would have come from a quote that did not authenticate.
+    let quote = check(
+        "legacy-sev/roots-embedded-vendor",
+        Layer::Quote,
+        [Passed, Passed, Failed, NotRun],
+    );
+    let partial = quote.report().partial_facts().unwrap();
+    let expected = partial.expected.as_ref().unwrap();
+    assert!(!expected.artifact.digest.is_empty());
+    assert_eq!(expected.artifact.source, ReferenceSource::Endorsement);
+    assert_eq!(
+        expected.artifact.repo.as_deref(),
+        Some(expected.config_repo.as_str())
+    );
+    assert_eq!(expected.artifact.approval_time, None);
+    assert_eq!((&expected.config, &expected.platform), (&None, &None));
+    assert!(matches!(
+        expected.code_measurement,
+        Some(Expected::SevSnp { launch: Some(_) })
+    ));
+    assert_eq!(expected.measurement, None);
+    assert_eq!(partial.measured.as_ref().unwrap().cpu, None);
+
+    // A policy that fails after it resolved every register shows both sides
+    // of the comparison: here a pin on RTMR3 that the quote does not show.
+    // For a code release on TDX, the expectation holds the platform
+    // registers that the policy artifact supplies for the quote's machine.
+    let compared = check(
+        "legacy-tdx/pins-tdx-rtmr3-other",
+        Layer::Policy,
+        [Passed, Passed, Passed, Failed],
+    );
+    let partial = compared.report().partial_facts().unwrap();
+    let expected = partial.expected.as_ref().unwrap();
+    let Some(Expected::Tdx {
+        mrtd: None,
+        rtmr0: None,
+        rtmr1: Some(code_rtmr1),
+        ..
+    }) = expected.code_measurement
+    else {
+        panic!("the release fixes RTMR1 and RTMR2: {expected:?}");
+    };
+    let Some(Measurement::Tdx {
+        mrtd,
+        rtmr0,
+        rtmr1,
+        rtmr3,
+        ..
+    }) = expected.measurement
+    else {
+        panic!("the policy step resolved the expectation: {expected:?}");
+    };
+    let cpu = partial.measured.as_ref().unwrap().cpu.as_ref().unwrap();
+    let Measurement::Tdx {
+        mrtd: cpu_mrtd,
+        rtmr0: cpu_rtmr0,
+        rtmr3: cpu_rtmr3,
+        ..
+    } = cpu.measurement
+    else {
+        panic!("{cpu:?}");
+    };
+    assert_eq!((mrtd, rtmr0), (cpu_mrtd, cpu_rtmr0));
+    assert_eq!(rtmr1, code_rtmr1);
+    assert_ne!(rtmr3, cpu_rtmr3);
+
+    // One that fails before resolving them has no expected measurement.
+    let unresolved = check(
+        "legacy-sev/pins-tdx-empty",
+        Layer::Policy,
+        [Passed, Passed, Passed, Failed],
+    );
+    let partial = unresolved.report().partial_facts().unwrap();
+    assert_eq!(partial.expected.as_ref().unwrap().measurement, None);
+    assert!(partial.measured.as_ref().unwrap().cpu.is_some());
+}
+
+#[test]
+fn an_accepted_document_reports_every_step_and_the_verified_facts() {
+    use crate::StepStatus::{Passed, Skipped};
+
+    let fixture = Fixture::load();
+    for (name, provenance) in [
+        ("legacy-sev/default", Passed),
+        ("legacy-tdx/default", Passed),
+        ("config-sev/full-same", Passed),
+        // Nothing to authenticate when every reference value is embedded.
+        ("config-tdx/embedded-all", Skipped),
+    ] {
+        let case = fixture.case(name);
+        let verifier = fixture.verifier(case).unwrap();
+        let document = fixture.document(text(case, "doc")).unwrap();
+        let report = verifier
+            .verify_at(
+                &document,
+                &Fixture::nonce(case),
+                &pin(&fixture, case),
+                instant(case),
+            )
+            .unwrap();
+        assert_eq!(
+            statuses(&report),
+            [Passed, provenance, Passed, Passed],
+            "{name}"
+        );
+        assert_eq!(report.failed_step(), None);
+        assert!(report.partial_facts().is_none(), "{name}");
+        assert!(report.verified_facts().is_some(), "{name}");
+        let skipped = &report.steps()[1];
+        assert_eq!(skipped.message.is_empty(), provenance == Passed, "{name}");
     }
 }
 
@@ -1096,7 +1285,8 @@ fn a_config_authorizer_never_chooses_the_kind_of_error() {
     ));
 
     let accepting = artifacts(authorizer(accept));
-    let verified = verify(&accepting).unwrap();
+    let report = verify(&accepting).unwrap();
+    let verified = report.verified_facts().unwrap();
     let config = verified.config().unwrap();
     assert_eq!(config.source, ReferenceSource::Policy);
     assert_eq!(
@@ -1150,7 +1340,7 @@ fn a_config_authorizer_sees_the_material_of_the_document() {
         let endorsement = &seen[0];
         assert_eq!(
             encode_lower_hex(&Sha256::digest(endorsement.config())),
-            verified.config().unwrap().digest
+            verified.verified_facts().unwrap().config().unwrap().digest
         );
         assert_eq!(endorsement.issuer_certificate_der(), None);
         assert_eq!(endorsement.reference().is_some(), signed, "{name}");
@@ -1222,7 +1412,13 @@ fn the_accepted_registries_are_never_left_open_by_default() {
         match result {
             Ok(verified) => {
                 assert!(accepted, "{name}");
-                let registry = verified.config().unwrap().registry_id.as_deref();
+                let registry = verified
+                    .verified_facts()
+                    .unwrap()
+                    .config()
+                    .unwrap()
+                    .registry_id
+                    .as_deref();
                 assert_eq!(registry, Some(PRIVATE_REGISTRY));
             }
             Err(Error::Verification(rejected)) => {
@@ -1299,8 +1495,8 @@ fn item(id: &str, format: &str, data: &str) -> CryptoMaterialItem {
     }
 }
 
-fn verification(crypto_material: Vec<CryptoMaterialItem>) -> Verification {
-    Verification {
+fn verification(crypto_material: Vec<CryptoMaterialItem>) -> VerifiedFacts {
+    VerifiedFacts {
         config_repo: "org/repo".to_owned(),
         code_digest: "aa".repeat(32),
         code_tag: "v1.2.3".to_owned(),
@@ -1323,13 +1519,6 @@ fn verification(crypto_material: Vec<CryptoMaterialItem>) -> Verification {
         },
         crypto_material,
         freshness_expires_at: at("2026-08-13T12:00:00Z").to_system_time(),
-        metadata: VerificationMetadata {
-            verifier: SoftwareIdentity {
-                name: "tinfoil-rs".to_owned(),
-                version: "0.1.0".to_owned(),
-            },
-            verified_at: at("2026-08-06T12:00:00.5Z").to_system_time().unwrap(),
-        },
     }
 }
 
@@ -1416,8 +1605,7 @@ fn a_code_release_verification_serialises_its_facts() {
         r#"","rtmr3":""#,
         &"00".repeat(48),
         r#""},"crypto_material":[{"id":"tls","format":"https://tinfoil.sh/key/spki-fp-sha256/v1","data":"aabb"}],"#,
-        r#""freshness_expires_at":"2026-08-13T12:00:00Z","#,
-        r#""metadata":{"verifier":{"name":"tinfoil-rs","version":"0.1.0"},"verified_at":"2026-08-06T12:00:00.5Z"}}"#,
+        r#""freshness_expires_at":"2026-08-13T12:00:00Z"}"#,
     ]
     .concat();
     assert_eq!(verified.to_json(), want);
@@ -1483,8 +1671,7 @@ fn a_config_verification_serialises_what_was_established() {
         r#"","approval_time":"2026-08-06T10:00:00Z"},"#,
         r#""platform":{"source":"embedded","digest":""#,
         &"ff".repeat(32),
-        r#""},"#,
-        r#""metadata":{"verifier":{"name":"tinfoil-rs","version":"0.1.0"},"verified_at":"2026-08-06T12:00:00.5Z"}}"#,
+        r#""}}"#,
     ]
     .concat();
     assert_eq!(verified.to_json(), want);
@@ -1543,7 +1730,7 @@ fn the_record_of_a_real_verification_reads_back_as_json() {
         let case = fixture.case(name);
         let verifier = fixture.verifier(case).unwrap();
         let document = fixture.document(text(case, "doc")).unwrap();
-        let verified = verifier
+        let report = verifier
             .verify_at(
                 &document,
                 &Fixture::nonce(case),
@@ -1551,6 +1738,7 @@ fn the_record_of_a_real_verification_reads_back_as_json() {
                 instant(case),
             )
             .unwrap();
+        let verified = report.verified_facts().unwrap();
         let text = verified.to_json();
         let parsed = json::parse(text.as_bytes()).unwrap();
         let record = parsed.as_object().unwrap();
@@ -1588,8 +1776,15 @@ fn the_record_of_a_real_verification_reads_back_as_json() {
         if verified.freshness_expires_at().is_some() {
             want.push("freshness_expires_at");
         }
-        want.push("metadata");
         assert_eq!(names, want, "{name}");
+
+        // The report holds the facts and the metadata.
+        let text = report.to_json();
+        let parsed = json::parse(text.as_bytes()).unwrap();
+        let record = parsed.as_object().unwrap();
+        let names: Vec<&str> = record.iter().map(|(name, _)| name).collect();
+        assert_eq!(names, ["steps", "verified_facts", "metadata"], "{name}");
+        assert!(text.contains(&format!(r#""verified_facts":{}"#, verified.to_json())));
     }
 }
 
@@ -1633,7 +1828,7 @@ mod serde_feature {
             let case = fixture.case(name);
             let verifier = fixture.verifier(case).unwrap();
             let document = fixture.document(text(case, "doc")).unwrap();
-            let verified = verifier
+            let report = verifier
                 .verify_at(
                     &document,
                     &Fixture::nonce(case),
@@ -1641,15 +1836,54 @@ mod serde_feature {
                     instant(case),
                 )
                 .unwrap();
+            let verified = report.verified_facts().unwrap();
             assert_eq!(
-                serde_json::to_string(&verified).unwrap(),
+                serde_json::to_string(verified).unwrap(),
                 verified.to_json(),
                 "{name}"
             );
-            let value = serde_json::to_value(&verified).unwrap();
-            assert_eq!(value["code_digest"], verified.code_digest());
+            assert_eq!(
+                serde_json::to_string(&report).unwrap(),
+                report.to_json(),
+                "{name}"
+            );
+            let value = serde_json::to_value(&report).unwrap();
+            assert_eq!(
+                value["verified_facts"]["code_digest"],
+                verified.code_digest()
+            );
             assert_eq!(value["metadata"]["verifier"]["name"], "tinfoil-rs");
         }
+    }
+
+    #[test]
+    fn a_rejected_report_serialises_as_its_json_form() {
+        let fixture = Fixture::load();
+        for name in [
+            "legacy-sev/nonce-flipped",
+            "legacy-sev/roots-embedded-vendor",
+            "legacy-tdx/pins-tdx-rtmr3-other",
+        ] {
+            let rejected = rejection(&fixture, name);
+            let report = rejected.report();
+            assert_eq!(
+                serde_json::to_string(report).unwrap(),
+                report.to_json(),
+                "{name}"
+            );
+        }
+        let rejected = rejection(&fixture, "legacy-tdx/pins-tdx-rtmr3-other");
+        let value = serde_json::to_value(rejected.report()).unwrap();
+        assert_eq!(value["steps"][3]["status"], "failed");
+        assert_eq!(
+            value["partial_facts"]["expected"]["measurement"]["platform"],
+            "tdx"
+        );
+        assert_eq!(
+            value["partial_facts"]["measured"]["cpu"]["measurement"]["platform"],
+            "tdx"
+        );
+        assert!(value.get("verified_facts").is_none());
     }
 
     #[test]

@@ -47,7 +47,7 @@ impl fmt::Display for ReferenceSource {
 /// authorizer accepted has a digest only.
 ///
 /// A record is a plain value. It is evidence of a verification only while
-/// it is read from the [`Verification`] that holds it: a copy can be
+/// it is read from the [`VerifiedFacts`] that hold it: a copy can be
 /// changed, and carries no proof of where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -123,13 +123,17 @@ pub struct VerificationMetadata {
     pub verified_at: SystemTime,
 }
 
-/// The facts proven by the verification of an attestation document, and
-/// what the verifier adds about the verification itself.
+/// The facts proven by the verification of an attestation document,
+/// including the channel keys that a caller binds its traffic to.
 ///
-/// Only a [`Verifier`](crate::Verifier) creates one, and it cannot be
-/// changed afterwards.
+/// Only a [`Verifier`](crate::Verifier) creates them, as the
+/// [`verified_facts`](crate::VerificationReport::verified_facts) of a
+/// report on a document that it accepted, and they cannot be changed
+/// afterwards. They are the only part of a report that carries channel
+/// keys. What the verifier records about the verification itself is the
+/// report's [`metadata`](crate::VerificationReport::metadata).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Verification {
+pub struct VerifiedFacts {
     pub(crate) config_repo: String,
     pub(crate) code_digest: String,
     pub(crate) code_tag: String,
@@ -140,10 +144,9 @@ pub struct Verification {
     pub(crate) enclave_measurement: Measurement,
     pub(crate) crypto_material: Vec<CryptoMaterialItem>,
     pub(crate) freshness_expires_at: Option<SystemTime>,
-    pub(crate) metadata: VerificationMetadata,
 }
 
-impl Verification {
+impl VerifiedFacts {
     /// The repository of the verified code or runtime, without version
     /// pins.
     pub fn config_repo(&self) -> &str {
@@ -226,11 +229,6 @@ impl Verification {
         self.platform.as_ref()
     }
 
-    /// What the verifier records about the verification itself.
-    pub fn metadata(&self) -> &VerificationMetadata {
-        &self.metadata
-    }
-
     /// The facts as compact JSON, for logging or persisting.
     ///
     /// Registers are lowercase hex and times are RFC 3339 in UTC. A fact
@@ -248,17 +246,18 @@ impl Verification {
     ///   `signature_time`;
     /// - `runtime`, `platform`: `source`, `repo`, `tag`, `digest`, `name`,
     ///   `commit`, `approval_time`;
-    /// - `freshness_expires_at`;
-    /// - `metadata`: `verifier` with `name` and `version`, and
-    ///   `verified_at`.
+    /// - `freshness_expires_at`.
+    ///
+    /// [`VerificationReport::to_json`](crate::VerificationReport::to_json)
+    /// writes them as its `verified_facts` member, next to the metadata.
     pub fn to_json(&self) -> String {
         let mut out = String::new();
         self.record().write(&mut out);
         out
     }
 
-    /// The serialised form of the verification.
-    fn record(&self) -> Json {
+    /// The serialised form of the facts.
+    pub(crate) fn record(&self) -> Json {
         let mut members = vec![
             ("code_digest", Json::text(&self.code_digest)),
             ("code_tag", Json::text(&self.code_tag)),
@@ -296,20 +295,23 @@ impl Verification {
         if let Some(expires_at) = self.freshness_expires_at {
             members.push(("freshness_expires_at", time_record(expires_at)));
         }
-        members.push((
-            "metadata",
-            Json::Object(vec![
-                (
-                    "verifier",
-                    Json::Object(vec![
-                        ("name", Json::text(&self.metadata.verifier.name)),
-                        ("version", Json::text(&self.metadata.verifier.version)),
-                    ]),
-                ),
-                ("verified_at", time_record(self.metadata.verified_at)),
-            ]),
-        ));
         Json::Object(members)
+    }
+}
+
+impl VerificationMetadata {
+    /// The serialised form of the metadata.
+    pub(crate) fn record(&self) -> Json {
+        Json::Object(vec![
+            (
+                "verifier",
+                Json::Object(vec![
+                    ("name", Json::text(&self.verifier.name)),
+                    ("version", Json::text(&self.verifier.version)),
+                ]),
+            ),
+            ("verified_at", time_record(self.verified_at)),
+        ])
     }
 }
 
@@ -332,7 +334,7 @@ pub fn crypto_material_data<'a>(
 /// A JSON value of the serialised record: strings, arrays and objects with
 /// their members in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Json {
+pub(crate) enum Json {
     Null,
     String(String),
     Array(Vec<Json>),
@@ -340,12 +342,12 @@ enum Json {
 }
 
 impl Json {
-    fn text(value: &str) -> Self {
+    pub(crate) fn text(value: &str) -> Self {
         Json::String(value.to_owned())
     }
 
     /// Appends the compact JSON text of the value.
-    fn write(&self, out: &mut String) {
+    pub(crate) fn write(&self, out: &mut String) {
         match self {
             Json::Null => out.push_str("null"),
             Json::String(value) => write_string(value, out),
@@ -410,7 +412,11 @@ fn push_register(
 }
 
 /// Appends `name` with the text when there is one.
-fn push_text(members: &mut Vec<(&'static str, Json)>, name: &'static str, value: Option<&str>) {
+pub(crate) fn push_text(
+    members: &mut Vec<(&'static str, Json)>,
+    name: &'static str,
+    value: Option<&str>,
+) {
     if let Some(value) = value {
         members.push((name, Json::text(value)));
     }
@@ -429,7 +435,7 @@ fn push_time(
 
 /// A time as RFC 3339 in UTC. A time outside the years 0000 to 9999 has no
 /// such form and is written as `null`; a verification holds none.
-fn time_record(time: SystemTime) -> Json {
+pub(crate) fn time_record(time: SystemTime) -> Json {
     Instant::from_system_time(time).map_or(Json::Null, |instant| Json::String(instant.to_rfc3339()))
 }
 
@@ -453,7 +459,7 @@ pub(crate) fn expected_members(expected: &Expected) -> Vec<(&'static str, Option
     }
 }
 
-fn expected_record(expected: &Expected) -> Json {
+pub(crate) fn expected_record(expected: &Expected) -> Json {
     let platform = match expected {
         Expected::SevSnp { .. } => PLATFORM_SEV_SNP,
         Expected::Tdx { .. } => PLATFORM_TDX,
@@ -465,11 +471,11 @@ fn expected_record(expected: &Expected) -> Json {
     Json::Object(members)
 }
 
-fn measurement_record(measurement: &Measurement) -> Json {
+pub(crate) fn measurement_record(measurement: &Measurement) -> Json {
     expected_record(&measurement.expected())
 }
 
-fn config_record(config: &ConfigVerification) -> Json {
+pub(crate) fn config_record(config: &ConfigVerification) -> Json {
     let mut members = vec![("source", Json::text(config.source.as_str()))];
     push_text(&mut members, "name", config.name.as_deref());
     members.push(("digest", Json::text(&config.digest)));
@@ -485,7 +491,7 @@ fn config_record(config: &ConfigVerification) -> Json {
     Json::Object(members)
 }
 
-fn artifact_record(artifact: &ArtifactVerification) -> Json {
+pub(crate) fn artifact_record(artifact: &ArtifactVerification) -> Json {
     let mut members = vec![("source", Json::text(artifact.source.as_str()))];
     push_text(&mut members, "repo", artifact.repo.as_deref());
     push_text(&mut members, "tag", artifact.tag.as_deref());
@@ -497,13 +503,15 @@ fn artifact_record(artifact: &ArtifactVerification) -> Json {
 }
 
 /// `serde::Serialize` for the public record types, in the shape of
-/// [`Verification::to_json`].
+/// [`VerifiedFacts::to_json`] and
+/// [`VerificationReport::to_json`](crate::VerificationReport::to_json).
 #[cfg(feature = "serde")]
 mod serialize {
     use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 
-    use super::{Json, Verification, expected_record, measurement_record};
+    use super::{Json, VerifiedFacts, expected_record, measurement_record};
     use crate::measurement::{Expected, Measurement, Register};
+    use crate::report::VerificationReport;
 
     impl Serialize for Json {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -528,8 +536,15 @@ mod serialize {
         }
     }
 
-    /// The fields of [`Verification::to_json`], in the same order.
-    impl Serialize for Verification {
+    /// The fields of [`VerifiedFacts::to_json`], in the same order.
+    impl Serialize for VerifiedFacts {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            self.record().serialize(serializer)
+        }
+    }
+
+    /// The fields of [`VerificationReport::to_json`], in the same order.
+    impl Serialize for VerificationReport {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             self.record().serialize(serializer)
         }

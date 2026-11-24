@@ -23,8 +23,11 @@ differences.
   and clients are cheap to clone.
 - **The API key is yours to pass.** The SDK no longer reads `TINFOIL_API_KEY`.
 - **Errors have a kind** instead of seventeen variants.
-- **The verification document is gone.** A `Verification` carries the verified
-  facts, and a failure names the layer that rejected the document.
+- **The verification document is replaced by a report.** A
+  `VerificationReport` lists the outcome of each layer's step and carries the
+  verified facts; a failure names the layer that rejected the document and
+  carries a report of its own, with the facts that were established before
+  it.
 
 ## Dependency
 
@@ -175,9 +178,11 @@ let ground_truth = client.verify().await?;
 ```rust,no_run
 // 0.3
 async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
-    let verified = client.http_client().ensure_verified().await?; // valid now
+    let valid = client.http_client().ensure_verified().await?; // valid now
     let renewed = client.http_client().reverify().await?; // verify again regardless
-    println!("{} then {}", verified.code_digest(), renewed.code_digest());
+    if let (Some(valid), Some(renewed)) = (valid.verified_facts(), renewed.verified_facts()) {
+        println!("{} then {}", valid.code_digest(), renewed.code_digest());
+    }
     Ok(())
 }
 ```
@@ -206,10 +211,10 @@ async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
 | `SecureClient::new_with_proxy(host, repo, api_key, proxy_url)` + `verify()` | `EnclaveHttpClient::builder(host, Trust::repo(repo)).transport(Transport::Ehbp { proxy_url: Some(proxy_url.to_owned()) }).connect()` |
 | `SecureClient::new_default_client(api_key)` | `RouterHttpClient::connect()` |
 | `SecureClient::with_measurement(host, api_key, measurement)` | a `Policy` with `pinned_registers`; see below |
-| `is_verified()` | removed: a client is always verified. `current()` returns the last verification |
+| `is_verified()` | removed: `connect` verifies before it returns a client, and a request verifies first when the client holds no valid verification. `last_verification()` returns the most recent attempt, which may be a failure |
 | `verify(&mut self)` | `ensure_verified()` / `reverify()` on `&self` |
-| `ground_truth()`, `ground_truth_json()` | `current()`, `current().to_json()` |
-| `verification_document()`, `verification_document_json()` | removed; see [Verification results](#verification-results) |
+| `ground_truth()`, `ground_truth_json()` | `last_verification()?.verified_facts()`, and its `to_json()` |
+| `verification_document()`, `verification_document_json()` | `last_verification()`, and the report's `to_json()`; see [Verification results](#verification-results) |
 | `http_client()` | the request methods are on the client itself: `client.get(url)`, `client.post(url)`, `client.execute(request)` |
 | `host()` | `enclave()` |
 | `base_url()` → `String`, `request_base_url()` | `base_url()` → `&Url`: where requests are sent (the proxy, when one is set). Its path ends in `/` |
@@ -294,18 +299,22 @@ see `Trust::EmbeddedConfig` and `Trust::AuthorizedBy`.
 
 | 0.2 | 0.3 |
 |---|---|
-| `GroundTruth` | `tinfoil::verifier::Verification`, from `current()`, `ensure_verified()` or `reverify()` |
+| `GroundTruth` | `tinfoil::verifier::VerifiedFacts`, the `verified_facts()` of the `VerificationReport` that `last_verification()`, `ensure_verified()` or `reverify()` returns |
 | its TLS fingerprint and HPKE key fields | `tls_public_key_fp()`, `hpke_public_key()` |
 | its digest and measurement fields | `code_digest()`, `code_tag()`, `code_measurement()`, `enclave_measurement()` |
 | `ground_truth_json()` | `to_json()` (a new shape), or `serde::Serialize` with the verifier's `serde` feature |
 | `Measurement` with string registers | `Measurement::SevSnp { launch }` / `Measurement::Tdx { mrtd, rtmr0, .. }` with `Register` values; `Expected` for pins |
 | `PredicateType` | removed; the platform is the variant of `Measurement` |
-| `SoftwareIdentity` | `verification.metadata().verifier` |
-| `VerificationDocument`, `VerificationSteps`, `VerificationStepState`, `VerificationStepStatus`, `DocumentEnclaveMeasurement`, `VERIFICATION_DOCUMENT_SCHEMA_VERSION` | **removed, without a replacement type.** On success, every fact is on `Verification`. On failure, the error's source is a `tinfoil::verifier::Error` whose `VerificationError::layer()` is `envelope`, `provenance`, `quote` or `policy`. An application that showed step states derives them from those two |
+| `SoftwareIdentity` | `report.metadata().verifier` |
+| `VerificationDocument`, `VerificationSteps`, `VerificationStepState`, `VerificationStepStatus` | `VerificationReport`, with one `Step` for each layer (`envelope`, `provenance`, `quote`, `policy`) and a `StepStatus` of `Passed`, `Failed`, `Skipped` or `NotRun`. On failure, the error's source is a `tinfoil::verifier::Error` whose `VerificationError` has the `layer()` and the `report()`, with `PartialFacts`: the facts established up to the rejection, such as the expected measurement that a failed policy step resolved |
+| `DocumentEnclaveMeasurement` | `MeasuredFacts::cpu` of a failed report, or `VerifiedFacts::enclave_measurement()` |
+| `VERIFICATION_DOCUMENT_SCHEMA_VERSION` | removed |
 
-A `Verification` also has `freshness_expires_at()`, which is when the client
+`VerifiedFacts` also has `freshness_expires_at()`, which is when the client
 will verify again, and `config()`, `runtime()` and `platform()`, which describe
-what vouched for the enclave.
+what vouched for the enclave. `last_verification()` returns the most recent
+attempt, a failure included, and the `on_verification` option is called with
+every attempt.
 
 ## Errors
 
@@ -315,7 +324,7 @@ what vouched for the enclave.
 |---|---|
 | `Error::Configuration`, `is_configuration()` | `error.kind() == ErrorKind::Configuration` |
 | `Error::AttestationFetch`, `Network`, `Http`, `GitHub`, `Io`; `is_fetch()` | `ErrorKind::Network` |
-| `Error::AttestationVerification`, `CertificateMismatch`, `SigstoreVerification`, `MeasurementMismatch`, `Tls`, `Ehbp`, `UnsupportedFormat`, `Json`, `Base64`; `is_attestation()` | `ErrorKind::Attestation`. The source is the verifier's error, with the layer that rejected the document |
+| `Error::AttestationVerification`, `CertificateMismatch`, `SigstoreVerification`, `MeasurementMismatch`, `Tls`, `Ehbp`, `UnsupportedFormat`, `Json`, `Base64`; `is_attestation()` | `ErrorKind::Attestation`. For a rejected document, the source is the verifier's error, with the layer that rejected the document and the report |
 | `Error::EhbpKeyMismatch`, `is_ehbp_key_mismatch()` | handled inside the client, which verifies again and sends the request once more. If that fails too, the error has `earlier_attempt()` |
 | `Error::Api(OpenAIError)`, `is_api()` | API errors are not wrapped: OpenAI calls return `OpenAIError` itself |
 | `is_retryable()` | `ErrorKind::Network` means "retry later"; `is_timeout()` tells a deadline apart |
@@ -481,8 +490,10 @@ the `tinfoil-verifier` crate:
 - `RouterHttpClient` and `EnclaveHttpClient` as first-class HTTP clients, with
   `Transport::Tls` and `Transport::Ehbp` on both.
 - Intel TDX enclaves, in addition to AMD SEV-SNP.
-- `verification_check`, a veto over every verification that a client relies
-  on.
+- `verification_check`, a veto over the verified facts of every verification
+  that a client relies on.
+- `on_verification`, an observer of every attempt to verify, with its report
+  or error, and `last_verification()`.
 - `tinfoil-verifier` as a crate of its own, usable without an async runtime.
 - Cargo features `openai-<family>` for the other API families of
   async-openai.

@@ -16,10 +16,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // What the client verified, and where it sends.
     let router = client.http_client();
+    let report = router.last_verification()?;
+    let verified = report
+        .verified_facts()
+        .ok_or("a verification that passed holds verified facts")?;
     println!(
         "router {} runs {}",
         router.enclave(),
-        router.current().code_digest()
+        verified.code_digest()
     );
     println!("API base: {}", client.base_url());
 

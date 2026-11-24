@@ -2,11 +2,14 @@
 //! verification of a recorded document and of a running enclave report the
 //! same facts through these functions.
 
-use tinfoil_verifier::{Expected, Layer, Measurement as Registers, Register, Verification};
+use tinfoil_verifier::{
+    Expected, Layer, Measurement as Registers, Register, VerificationReport, VerifiedFacts,
+};
 
 use crate::{
     AcceptOutputs, CODE_ENVELOPE_REJECTED, CODE_POLICY_REJECTED, CODE_PROVENANCE_REJECTED,
-    CODE_QUOTE_REJECTED, Measurement,
+    CODE_QUOTE_REJECTED, Measurement, Report, ReportExpectedFacts, ReportMeasuredFacts,
+    ReportPartialFacts, ReportStep,
 };
 
 /// The measurement type of an SEV-SNP quote on the wire.
@@ -86,7 +89,7 @@ pub(crate) fn layer_code(layer: Layer) -> Option<&'static str> {
 /// The facts of a verification. `None` when it endorses no usable TLS or
 /// HPKE key: such a document is of no use to a client, which binds its
 /// traffic to those keys.
-pub(crate) fn verified(verification: &Verification) -> Option<AcceptOutputs> {
+pub(crate) fn verified(verification: &VerifiedFacts) -> Option<AcceptOutputs> {
     let (Some(tls_public_key_fp), Some(hpke_public_key)) = (
         verification.tls_public_key_fp(),
         verification.hpke_public_key(),
@@ -101,4 +104,41 @@ pub(crate) fn verified(verification: &Verification) -> Option<AcceptOutputs> {
         hpke_public_key: hpke_public_key.to_owned(),
         ..AcceptOutputs::default()
     })
+}
+
+/// Lays out a verifier's report for the wire.
+// The live command reports no report; only the stages use it.
+#[cfg_attr(not(tinfoil_conformance), allow(dead_code))]
+pub(crate) fn report(report: &VerificationReport) -> Report {
+    Report {
+        steps: report
+            .steps()
+            .iter()
+            .map(|step| ReportStep {
+                layer: step.layer.as_str().to_owned(),
+                status: step.status.as_str().to_owned(),
+            })
+            .collect(),
+        partial_facts: report.partial_facts().map(|partial| ReportPartialFacts {
+            expected: partial
+                .expected
+                .as_ref()
+                .map(|expected| ReportExpectedFacts {
+                    code_digest: expected.artifact.digest.clone(),
+                    code_measurement: expected.code_measurement.as_ref().and_then(self::expected),
+                    measurement: expected.measurement.as_ref().and_then(measurement),
+                }),
+            measured: partial
+                .measured
+                .as_ref()
+                .map(|measured| ReportMeasuredFacts {
+                    cpu_measurement: measured
+                        .cpu
+                        .as_ref()
+                        .and_then(|cpu| measurement(&cpu.measurement)),
+                    tls_public_key_fp: measured.tls_public_key_fp.clone().unwrap_or_default(),
+                    hpke_public_key_fp: measured.hpke_public_key_fp.clone().unwrap_or_default(),
+                }),
+        }),
+    }
 }

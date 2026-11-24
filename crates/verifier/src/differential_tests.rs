@@ -37,7 +37,8 @@ use crate::error::{BoxError, Error, UsageError};
 use crate::instant::Instant;
 use crate::json::{self, Object, Value};
 use crate::measurement::{Expected, Measurement, Register};
-use crate::verification::{ArtifactVerification, ConfigVerification, Verification};
+use crate::report::{StepStatus, VerificationReport};
+use crate::verification::{ArtifactVerification, ConfigVerification};
 use crate::{
     ArtifactTrust, ConfigAuthorizer, ConfigEndorsement, ConfigTrust, EmbeddedConfig, Pin, Policy,
     PublicKey, RuntimeReference, Verifier, x509,
@@ -385,7 +386,7 @@ fn recorded_list(object: &Object, name: &str) -> Vec<String> {
 
 /// The differences between a verification and the recorded facts.
 fn compare_facts(
-    verified: &Verification,
+    report: &VerificationReport,
     facts: &Object,
     hardware_expiry: Option<Instant>,
 ) -> Vec<String> {
@@ -394,6 +395,18 @@ fn compare_facts(
         if !same {
             differences.push(name.to_owned());
         }
+    };
+    check(
+        "steps",
+        report.partial_facts().is_none()
+            && report
+                .steps()
+                .iter()
+                .all(|step| matches!(step.status, StepStatus::Passed | StepStatus::Skipped)),
+    );
+    let Some(verified) = report.verified_facts() else {
+        differences.push("verified_facts".to_owned());
+        return differences;
     };
     check(
         "code_digest",
@@ -454,7 +467,7 @@ fn compare_facts(
     );
     check(
         "verified_at",
-        system_time(Some(verified.metadata().verified_at))
+        system_time(Some(report.metadata().verified_at))
             == recorded_time(text(facts, "verified_at")),
     );
     check(
@@ -599,7 +612,21 @@ fn replay(fixture: &Fixture, case: &Object) -> Outcome {
     let got = match &result {
         Ok(_) => "accept".to_owned(),
         Err(Error::Usage(_)) => "usage".to_owned(),
-        Err(Error::Verification(rejected)) => format!("reject/{}", rejected.layer()),
+        Err(Error::Verification(rejected)) => {
+            // The report agrees with the error: its failed step is the
+            // error's layer, and it holds partial facts only.
+            let report = rejected.report();
+            match report.failed_step() {
+                Some(step)
+                    if step.layer == rejected.layer()
+                        && report.verified_facts().is_none()
+                        && report.partial_facts().is_some() =>
+                {
+                    format!("reject/{}", rejected.layer())
+                }
+                _ => format!("reject/{} with an inconsistent report", rejected.layer()),
+            }
+        }
     };
     let want = match verdict {
         "reject" => format!("reject/{}", text(recorded, "layer")),

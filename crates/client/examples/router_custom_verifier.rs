@@ -58,7 +58,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The verification is renewed by the client when it expires. To renew
     // it now, for example after a deployment:
     let renewed = client.reverify().await?;
-    println!("valid until {:?}", renewed.freshness_expires_at());
+    let verified = renewed
+        .verified_facts()
+        .ok_or("a verification that passed holds verified facts")?;
+    println!("valid until {:?}", verified.freshness_expires_at());
 
     Ok(())
 }

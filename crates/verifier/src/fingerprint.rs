@@ -6,7 +6,7 @@ use crate::x509::Certificate;
 
 /// The SHA-256 of the SubjectPublicKeyInfo of a DER certificate, as
 /// lowercase hex: the form in which
-/// [`Verification::tls_public_key_fp`](crate::Verification::tls_public_key_fp)
+/// [`VerifiedFacts::tls_public_key_fp`](crate::VerifiedFacts::tls_public_key_fp)
 /// reports the endorsed TLS key.
 ///
 /// The certificate is read strictly, and its key must be one that this

@@ -162,7 +162,7 @@ impl Input {
 ///
 /// A run without a verdict ([`EXIT_UNSUPPORTED`], [`EXIT_INTERNAL`]) carries
 /// neither `outputs` nor `rejection`.
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Output {
     /// The stage that ran.
     pub stage: String,
@@ -174,10 +174,15 @@ pub struct Output {
     /// The reason for a rejected run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejection: Option<Rejection>,
+    /// The verifier's report, for the full-verification stage only. A
+    /// malformed input has none, and neither does the adapter's own
+    /// rejection of an accepted document that endorses no channel keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<Report>,
 }
 
 /// The verified facts, in the shape that the suite compares across SDKs.
-#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct AcceptOutputs {
     /// The digest of the verified code or runtime artifact.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -207,7 +212,7 @@ pub struct AcceptOutputs {
 
 /// A measurement on the wire: its type and its registers as lowercase hex,
 /// with an empty string for a register that is left unconstrained.
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Measurement {
     /// The measurement type identifier.
     #[serde(rename = "type")]
@@ -216,8 +221,224 @@ pub struct Measurement {
     pub registers: Vec<String>,
 }
 
+/// A verification report on the wire, for the full-verification stage: the
+/// outcome of each step and, for a rejection, the facts that the steps
+/// before it established. Step messages are each SDK's own error text, so
+/// the wire carries only the layer and the status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Report {
+    /// The steps, one for each layer in layer order.
+    pub steps: Vec<ReportStep>,
+    /// What a rejected verification established.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial_facts: Option<ReportPartialFacts>,
+}
+
+/// One step: a layer (`envelope`, `provenance`, `quote` or `policy`) and a
+/// status (`passed`, `failed`, `skipped` or `not_run`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReportStep {
+    /// The layer that the step covers.
+    pub layer: String,
+    /// The step's outcome.
+    pub status: String,
+}
+
+/// What a rejected verification established. `expected` is absent unless
+/// the provenance step passed or was skipped, and `measured` unless the
+/// envelope step passed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ReportPartialFacts {
+    /// The accepted reference values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<ReportExpectedFacts>,
+    /// What the document and its hardware claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measured: Option<ReportMeasuredFacts>,
+}
+
+/// The accepted reference values. The code measurement is for the platform
+/// that the document's evidence names, and the full expected measurement is
+/// present only once the policy step resolved it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ReportExpectedFacts {
+    /// The digest of the code or runtime artifact.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub code_digest: String,
+    /// The registers that the release fixes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_measurement: Option<Measurement>,
+    /// Every register that the quote must attest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measurement: Option<Measurement>,
+}
+
+/// What the document and its hardware claim. The CPU measurement is present
+/// only once the quote step passed. The key fingerprints are unverified in
+/// a rejection; the HPKE one is the lowercase-hex SHA-256 of the key's
+/// bytes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ReportMeasuredFacts {
+    /// The registers of the authenticated quote.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_measurement: Option<Measurement>,
+    /// The TLS key fingerprint that the document endorses.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tls_public_key_fp: String,
+    /// The fingerprint of the HPKE key that the document endorses.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub hpke_public_key_fp: String,
+}
+
+impl Report {
+    /// The layer of the step that failed, or `None` when none did.
+    pub fn failed_step(&self) -> Option<&str> {
+        self.steps
+            .iter()
+            .find(|step| step.status == STATUS_FAILED)
+            .map(|step| step.layer.as_str())
+    }
+}
+
+const STATUS_PASSED: &str = "passed";
+const STATUS_FAILED: &str = "failed";
+const STATUS_SKIPPED: &str = "skipped";
+const STATUS_NOT_RUN: &str = "not_run";
+
+/// The layers in the order that a report lists their steps, each with the
+/// rejection code that names it.
+const REPORT_LAYERS: [(&str, &str); 4] = [
+    ("envelope", CODE_ENVELOPE_REJECTED),
+    ("provenance", CODE_PROVENANCE_REJECTED),
+    ("quote", CODE_QUOTE_REJECTED),
+    ("policy", CODE_POLICY_REJECTED),
+];
+
+/// Checks that an output's report agrees with its verdict and keeps the
+/// rules of a report:
+///
+/// - only the full-verification stage carries one, and it does unless the
+///   input was malformed or the adapter itself rejected an accepted
+///   document for its channel keys (an envelope rejection);
+/// - the four layers, in order, with known statuses;
+/// - on an accept, every step passed or was skipped, and there are no
+///   partial facts;
+/// - on a rejection, the failed step is the layer that the rejection code
+///   names, no step after it ran, and each partial fact is present only
+///   once the step that establishes it passed or was skipped. A step before
+///   the failed one may be `not_run`, since checks do not always run in
+///   layer order.
+pub fn check_report(output: &Output) -> Result<(), String> {
+    if output.accepted && output.rejection.is_some() {
+        return Err("an accepted verdict carries a rejection".to_owned());
+    }
+    let report = match (&output.report, output.stage.as_str()) {
+        (Some(_), stage) if stage != STAGE_VERIFY => {
+            return Err(format!("stage {stage} carries a report"));
+        }
+        (Some(report), _) => report,
+        (None, STAGE_VERIFY) => {
+            let code = output.rejection.as_ref().map(|r| r.code.as_str());
+            return match code {
+                Some(CODE_ENVELOPE_REJECTED | CODE_MALFORMED_INPUT) => Ok(()),
+                // A run without a verdict says nothing.
+                None if !output.accepted => Ok(()),
+                _ => Err(format!("verdict {code:?} has no report")),
+            };
+        }
+        (None, _) => return Ok(()),
+    };
+    if report.steps.len() != REPORT_LAYERS.len() {
+        return Err(format!(
+            "the report has {} steps, want {}",
+            report.steps.len(),
+            REPORT_LAYERS.len()
+        ));
+    }
+    let mut failed_at = None;
+    for (index, (step, (layer, _))) in report.steps.iter().zip(REPORT_LAYERS).enumerate() {
+        if step.layer != layer {
+            return Err(format!("step {index} is {:?}, want {layer:?}", step.layer));
+        }
+        let status = step.status.as_str();
+        if failed_at.is_some() {
+            if status != STATUS_NOT_RUN {
+                return Err(format!(
+                    "step {layer} after the failure is {status:?}, want not_run"
+                ));
+            }
+        } else if status == STATUS_FAILED {
+            failed_at = Some(index);
+        } else if ![STATUS_PASSED, STATUS_SKIPPED, STATUS_NOT_RUN].contains(&status) {
+            return Err(format!("step {layer} has the unknown status {status:?}"));
+        }
+    }
+    let ran = |layer: &str| {
+        report.steps.iter().any(|step| {
+            step.layer == layer && [STATUS_PASSED, STATUS_SKIPPED].contains(&step.status.as_str())
+        })
+    };
+    if output.accepted {
+        if let Some(step) = report.steps.iter().find(|step| !ran(&step.layer)) {
+            return Err(format!(
+                "an accepted report has step {} {}",
+                step.layer, step.status
+            ));
+        }
+        if report.partial_facts.is_some() {
+            return Err("an accepted report has partial facts".to_owned());
+        }
+        return Ok(());
+    }
+    let (Some(rejection), Some(failed_at)) = (&output.rejection, failed_at) else {
+        return Err("a rejection's report has no failed step".to_owned());
+    };
+    let (failed_layer, failed_code) = REPORT_LAYERS.get(failed_at).copied().unwrap_or_default();
+    if rejection.code != failed_code {
+        return Err(format!(
+            "the failed step {failed_layer} does not match the rejection code {}",
+            rejection.code
+        ));
+    }
+    let Some(partial) = &report.partial_facts else {
+        return Err("a rejection's report has no partial facts".to_owned());
+    };
+    if partial.measured.is_some() != ran("envelope") {
+        return Err(format!(
+            "measured facts present={}, but the envelope step passed={}",
+            partial.measured.is_some(),
+            ran("envelope")
+        ));
+    }
+    if partial.expected.is_some() != ran("provenance") {
+        return Err(format!(
+            "expected facts present={}, but the provenance step passed={}",
+            partial.expected.is_some(),
+            ran("provenance")
+        ));
+    }
+    if let Some(measured) = &partial.measured
+        && measured.cpu_measurement.is_some() != ran("quote")
+    {
+        return Err(format!(
+            "the CPU measurement is present={}, but the quote step passed={}",
+            measured.cpu_measurement.is_some(),
+            ran("quote")
+        ));
+    }
+    if let Some(expected) = &partial.expected
+        && expected.measurement.is_some()
+        && failed_layer != "policy"
+    {
+        return Err(
+            "the full expected measurement is present before the policy step ran".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 /// The layer-tagged reason for a rejection.
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Rejection {
     /// One of the closed set of rejection codes.
     pub code: String,
@@ -278,6 +499,7 @@ pub fn capabilities() -> serde_json::Value {
             "freshness_enforced": cfg!(tinfoil_conformance),
             "live_verify": true,
             "channel_binding": live::CHANNEL_BINDING,
+            "verification_report": cfg!(tinfoil_conformance),
         },
     })
 }
@@ -296,6 +518,7 @@ pub fn unsupported(stage: &str) -> (Output, i32) {
         accepted: false,
         outputs: None,
         rejection: None,
+        report: None,
     };
     (output, EXIT_UNSUPPORTED)
 }
@@ -345,6 +568,7 @@ fn malformed(stage: &str) -> (Output, i32) {
         rejection: Some(Rejection {
             code: CODE_MALFORMED_INPUT.to_owned(),
         }),
+        report: None,
     };
     (output, EXIT_MALFORMED)
 }
@@ -521,6 +745,133 @@ mod tests {
         for stage in stages {
             assert!(STAGES.contains(&stage.as_str().unwrap()));
         }
+    }
+
+    fn steps(statuses: [&str; 4]) -> Vec<ReportStep> {
+        REPORT_LAYERS
+            .iter()
+            .zip(statuses)
+            .map(|((layer, _), status)| ReportStep {
+                layer: (*layer).to_owned(),
+                status: status.to_owned(),
+            })
+            .collect()
+    }
+
+    /// A consistent rejection at the provenance step.
+    fn provenance_rejection() -> Output {
+        Output {
+            stage: STAGE_VERIFY.to_owned(),
+            accepted: false,
+            outputs: None,
+            rejection: Some(Rejection {
+                code: CODE_PROVENANCE_REJECTED.to_owned(),
+            }),
+            report: Some(Report {
+                steps: steps(["passed", "failed", "not_run", "not_run"]),
+                partial_facts: Some(ReportPartialFacts {
+                    expected: None,
+                    measured: Some(ReportMeasuredFacts {
+                        tls_public_key_fp: "a".repeat(64),
+                        ..ReportMeasuredFacts::default()
+                    }),
+                }),
+            }),
+        }
+    }
+
+    fn measurement() -> Measurement {
+        Measurement {
+            kind: "m".to_owned(),
+            registers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_consistent_report_passes_its_check() {
+        let rejected = provenance_rejection();
+        assert_eq!(check_report(&rejected), Ok(()));
+        assert_eq!(
+            rejected.report.as_ref().and_then(Report::failed_step),
+            Some("provenance")
+        );
+        let accepted = Output {
+            accepted: true,
+            rejection: None,
+            report: Some(Report {
+                steps: steps(["passed", "skipped", "passed", "passed"]),
+                partial_facts: None,
+            }),
+            ..rejected
+        };
+        assert_eq!(check_report(&accepted), Ok(()));
+    }
+
+    #[test]
+    fn a_report_that_disagrees_with_its_verdict_or_its_rules_fails_its_check() {
+        type Mutation = fn(&mut Output);
+        let cases: [(&str, Mutation); 9] = [
+            ("wrong layer", |o| {
+                o.rejection.as_mut().unwrap().code = CODE_QUOTE_REJECTED.to_owned();
+            }),
+            ("ran after", |o| {
+                o.report.as_mut().unwrap().steps[2].status = "passed".to_owned();
+            }),
+            ("expected early", |o| {
+                let partial = o.report.as_mut().unwrap().partial_facts.as_mut().unwrap();
+                partial.expected = Some(ReportExpectedFacts::default());
+            }),
+            ("no measured", |o| {
+                let partial = o.report.as_mut().unwrap().partial_facts.as_mut().unwrap();
+                partial.measured = None;
+            }),
+            ("cpu early", |o| {
+                let partial = o.report.as_mut().unwrap().partial_facts.as_mut().unwrap();
+                partial.measured.as_mut().unwrap().cpu_measurement = Some(measurement());
+            }),
+            ("three steps", |o| {
+                o.report.as_mut().unwrap().steps.truncate(3);
+            }),
+            ("no partial facts", |o| {
+                o.report.as_mut().unwrap().partial_facts = None;
+            }),
+            ("accepted", |o| o.accepted = true),
+            ("another stage", |o| {
+                o.stage = STAGE_CHECK_ENVELOPE.to_owned()
+            }),
+        ];
+        for (name, mutate) in cases {
+            let mut output = provenance_rejection();
+            mutate(&mut output);
+            assert!(check_report(&output).is_err(), "{name}");
+        }
+
+        // A full expected measurement belongs to a failed policy step only.
+        let mut output = provenance_rejection();
+        output.rejection.as_mut().unwrap().code = CODE_QUOTE_REJECTED.to_owned();
+        let report = output.report.as_mut().unwrap();
+        report.steps = steps(["passed", "passed", "failed", "not_run"]);
+        report.partial_facts.as_mut().unwrap().expected = Some(ReportExpectedFacts {
+            measurement: Some(measurement()),
+            ..ReportExpectedFacts::default()
+        });
+        assert!(check_report(&output).is_err());
+    }
+
+    #[test]
+    fn only_a_rejection_of_the_adapter_or_of_the_input_has_no_report() {
+        let mut output = provenance_rejection();
+        output.report = None;
+        assert!(check_report(&output).is_err());
+        for code in [CODE_ENVELOPE_REJECTED, CODE_MALFORMED_INPUT] {
+            output.rejection = Some(Rejection {
+                code: code.to_owned(),
+            });
+            assert_eq!(check_report(&output), Ok(()), "{code}");
+        }
+        output.accepted = true;
+        output.rejection = None;
+        assert!(check_report(&output).is_err());
     }
 
     #[test]

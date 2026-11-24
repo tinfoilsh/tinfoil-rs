@@ -22,7 +22,7 @@ use crate::internal::transport::{Mode, RoundTrip, Transport};
 use crate::internal::{Clock, fetch};
 use crate::options::{Secret, TransportMode};
 use crate::request::{Execute, ResponseFuture};
-use crate::verifier::Verification;
+use crate::verifier::VerificationReport;
 
 #[cfg(test)]
 #[path = "attested_tests.rs"]
@@ -30,10 +30,10 @@ mod tests;
 
 /// The state behind an `EnclaveHttpClient` or a `RouterHttpClient`.
 ///
-/// The clients hold verifications of the type [`Verification`]. The type
-/// parameter exists so that the tests can run the whole client on evidence
-/// that they can build.
-pub(crate) struct AttestedClient<V = Verification> {
+/// The clients hold verifications of the type [`VerificationReport`]. The
+/// type parameter exists so that the tests can run the whole client on
+/// evidence that they can build.
+pub(crate) struct AttestedClient<V: Evidence = VerificationReport> {
     /// The verified enclave and the transport bound to its keys.
     transport: Transport<V>,
     /// The request chain, from the origin restriction inward.
@@ -60,14 +60,14 @@ pub(crate) struct Settings {
 }
 
 /// The implementation of a transport mode.
-pub(crate) fn mode_for(mode: TransportMode) -> Result<Arc<dyn Mode<Verification>>, Error> {
+pub(crate) fn mode_for(mode: TransportMode) -> Result<Arc<dyn Mode<VerificationReport>>, Error> {
     Ok(match mode {
         TransportMode::Tls => Arc::new(TlsMode::new()),
         TransportMode::Ehbp => Arc::new(EhbpMode::new()?),
     })
 }
 
-impl AttestedClient<Verification> {
+impl AttestedClient<VerificationReport> {
     /// Verifies the enclave of `checked` and returns the client for it:
     /// the transport in the mode of `settings`, with the verification's
     /// one retry, within the `timeout` of `settings`.
@@ -166,23 +166,38 @@ impl<V: Evidence> AttestedClient<V> {
         self.mode
     }
 
+    /// As [`Transport::current`], for the tests.
+    #[cfg(test)]
     pub(crate) fn current(&self) -> Arc<V> {
         self.transport.current()
     }
 
-    /// As [`Transport::ensure_verified`], within the `timeout` option.
+    /// As [`Transport::last_verification`], with a copy of the evidence
+    /// for the caller to keep.
+    pub(crate) fn last_verification(&self) -> Result<V, Error> {
+        self.transport
+            .last_verification()
+            .map(|evidence| V::clone(&evidence))
+    }
+
+    /// As [`Transport::ensure_verified`], within the `timeout` option, with
+    /// a copy of the evidence for the caller to keep.
     ///
     /// The deadline ends this caller's wait, also for a verification that
     /// another caller started. The verification itself goes on for the
     /// callers that still wait for it, and is dropped with the last one.
-    pub(crate) async fn ensure_verified(&self) -> Result<Arc<V>, Error> {
-        within(self.timeout, self.transport.ensure_verified()).await
+    pub(crate) async fn ensure_verified(&self) -> Result<V, Error> {
+        within(self.timeout, self.transport.ensure_verified())
+            .await
+            .map(|evidence| V::clone(&evidence))
     }
 
     /// As [`Transport::reverify`], within the `timeout` option, as
     /// [`ensure_verified`](Self::ensure_verified) applies it.
-    pub(crate) async fn reverify(&self) -> Result<Arc<V>, Error> {
-        within(self.timeout, self.transport.reverify()).await
+    pub(crate) async fn reverify(&self) -> Result<V, Error> {
+        within(self.timeout, self.transport.reverify())
+            .await
+            .map(|evidence| V::clone(&evidence))
     }
 }
 

@@ -319,6 +319,7 @@ async fn a_verification_after_the_first_uses_the_fetcher_too() {
             pin: crate::verifier::Pin::repo("o/n"),
             verifier: None,
             verification_check: None,
+            on_verification: None,
         }
         .check()
         .unwrap();
@@ -328,7 +329,7 @@ async fn a_verification_after_the_first_uses_the_fetcher_too() {
             attestation_fetch(Some(Arc::new(calls.fetcher(b"{}")))),
         );
         for _ in 0..2 {
-            let error = enclave.verify().await.expect_err("rejected");
+            let error = enclave.verify(|_| ()).await.expect_err("rejected");
             assert_eq!(error.kind(), ErrorKind::Attestation);
         }
         assert_eq!(calls.hosts().len(), 4);
@@ -503,4 +504,144 @@ fn the_relays_print_their_url_and_the_builders_print_no_fetcher() {
         .fetch_router_list(RouterListRelay::new("https://app.example/").unwrap());
     let printed = format!("{builder:?}");
     assert!(printed.contains("router_list_fetcher: true"), "{printed}");
+}
+
+/// What an observer of the public options was told: the host, and for a
+/// failure the error with the layer of the report that it carries.
+type Seen = Arc<
+    Mutex<
+        Vec<(
+            String,
+            Result<(), (ErrorKind, Option<crate::verifier::Layer>)>,
+        )>,
+    >,
+>;
+
+fn seeing() -> (
+    Seen,
+    impl Fn(&str, Result<&crate::verifier::VerificationReport, &Error>) + Send + Sync + 'static,
+) {
+    let seen: Seen = Arc::default();
+    let log = Arc::clone(&seen);
+    let observe =
+        move |host: &str, outcome: Result<&crate::verifier::VerificationReport, &Error>| {
+            let outcome = outcome.map(|_| ()).map_err(|error| {
+                let layer = crate::internal::testing::rejected_report(error)
+                    .and_then(|report| report.failed_step())
+                    .map(|step| step.layer);
+                (error.kind(), layer)
+            });
+            log.lock().unwrap().push((host.to_owned(), outcome));
+        };
+    (seen, observe)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rejected_document_reaches_the_caller_and_the_observer_with_its_report() {
+    unstuck(async {
+        let calls = Calls::default();
+        let checked = Arc::new(Mutex::new(0));
+        let (seen, observe) = seeing();
+        let count = Arc::clone(&checked);
+        let error = EnclaveHttpClient::builder("enclave.example.com", Trust::repo("o/n"))
+            .fetch_attestation(calls.fetcher(b"{}"))
+            .verification_check(move |_| {
+                *count.lock().unwrap() += 1;
+                Ok(())
+            })
+            .on_verification(observe)
+            .connect()
+            .await
+            .expect_err("the document fails verification");
+        assert_eq!(error.kind(), ErrorKind::Attestation);
+        // The verifier's error and its report are reachable from the
+        // client's error, through its source.
+        let report = crate::internal::testing::rejected_report(&error).expect("a report");
+        assert_eq!(
+            report.failed_step().map(|step| step.layer),
+            Some(crate::verifier::Layer::Envelope)
+        );
+        assert!(report.verified_facts().is_none());
+        // Both attempts are told, each with its own report; the check sees
+        // no verification that failed.
+        let rejected = Err((
+            ErrorKind::Attestation,
+            Some(crate::verifier::Layer::Envelope),
+        ));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                ("enclave.example.com".to_owned(), rejected),
+                ("enclave.example.com".to_owned(), rejected),
+            ]
+        );
+        assert_eq!(*checked.lock().unwrap(), 0);
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_fetch_is_told_without_a_report() {
+    unstuck(async {
+        let (seen, observe) = seeing();
+        let failing = |_: String, _: [u8; NONCE_SIZE]| async {
+            Err::<Vec<u8>, BoxError>("unreachable".into())
+        };
+        let error = EnclaveHttpClient::builder("enclave.example.com", Trust::repo("o/n"))
+            .fetch_attestation(failing)
+            .on_verification(observe)
+            .connect()
+            .await
+            .expect_err("the fetch fails");
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert!(crate::internal::testing::rejected_report(&error).is_none());
+        let failed = Err((ErrorKind::Network, None));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                ("enclave.example.com".to_owned(), failed),
+                ("enclave.example.com".to_owned(), failed),
+            ]
+        );
+    })
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn discovery_tells_each_router_that_it_tries_with_its_own_host() {
+    unstuck(async {
+        let calls = Calls::default();
+        let (seen, observe) = seeing();
+        let list =
+            || async { Ok::<_, BoxError>(vec!["a.example".to_owned(), "b.example".to_owned()]) };
+        let _ = RouterHttpClient::builder()
+            .fetch_attestation(calls.fetcher(b"{}"))
+            .fetch_router_list(list)
+            .on_verification(observe)
+            .connect()
+            .await
+            .expect_err("no router passes");
+        let hosts: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(host, _)| host.clone())
+            .collect();
+        let mut tried = hosts[..2].to_vec();
+        tried.sort();
+        assert_eq!(tried, ["a.example", "b.example"]);
+        // The fallback, with its retry.
+        assert_eq!(
+            hosts[2..],
+            [discovery::FALLBACK_ROUTER, discovery::FALLBACK_ROUTER]
+        );
+        assert!(seen.lock().unwrap().iter().all(|(_, outcome)| {
+            *outcome
+                == Err((
+                    ErrorKind::Attestation,
+                    Some(crate::verifier::Layer::Envelope),
+                ))
+        }));
+    })
+    .await
 }
