@@ -20,7 +20,8 @@
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
 
 use serde::{Deserialize, Serialize};
-use tinfoil_verifier::Pin;
+use serde_json::Value;
+use tinfoil_verifier::{Pin, VerificationReport};
 
 /// The document was accepted; [`Output::outputs`] carries the verified facts.
 pub const EXIT_ACCEPTED: i32 = 0;
@@ -174,11 +175,13 @@ pub struct Output {
     /// The reason for a rejected run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejection: Option<Rejection>,
-    /// The verifier's report, for the full-verification stage only. A
-    /// malformed input has none, and neither does the adapter's own
-    /// rejection of an accepted document that endorses no channel keys.
+    /// The verifier's report, for the full-verification stage only, in the
+    /// JSON form that every Tinfoil SDK writes. A malformed input has none,
+    /// and neither does the adapter's own rejection of an accepted document
+    /// that endorses no channel keys. Its step messages and its metadata
+    /// are each SDK's own, so a comparison across SDKs leaves them out.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub report: Option<Report>,
+    pub report: Option<VerificationReport>,
 }
 
 /// The verified facts, in the shape that the suite compares across SDKs.
@@ -221,85 +224,6 @@ pub struct Measurement {
     pub registers: Vec<String>,
 }
 
-/// A verification report on the wire, for the full-verification stage: the
-/// outcome of each step and, for a rejection, the facts that the steps
-/// before it established. Step messages are each SDK's own error text, so
-/// the wire carries only the layer and the status.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Report {
-    /// The steps, one for each layer in layer order.
-    pub steps: Vec<ReportStep>,
-    /// What a rejected verification established.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub partial_facts: Option<ReportPartialFacts>,
-}
-
-/// One step: a layer (`envelope`, `provenance`, `quote` or `policy`) and a
-/// status (`passed`, `failed`, `skipped` or `not_run`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ReportStep {
-    /// The layer that the step covers.
-    pub layer: String,
-    /// The step's outcome.
-    pub status: String,
-}
-
-/// What a rejected verification established. `expected` is absent unless
-/// the provenance step passed or was skipped, and `measured` unless the
-/// envelope step passed.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct ReportPartialFacts {
-    /// The accepted reference values.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expected: Option<ReportExpectedFacts>,
-    /// What the document and its hardware claim.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub measured: Option<ReportMeasuredFacts>,
-}
-
-/// The accepted reference values. The code measurement is for the platform
-/// that the document's evidence names, and the full expected measurement is
-/// present only once the policy step resolved it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct ReportExpectedFacts {
-    /// The digest of the code or runtime artifact.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub code_digest: String,
-    /// The registers that the release fixes.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code_measurement: Option<Measurement>,
-    /// Every register that the quote must attest.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub measurement: Option<Measurement>,
-}
-
-/// What the document and its hardware claim. The CPU measurement is present
-/// only once the quote step passed. The key fingerprints are unverified in
-/// a rejection; the HPKE one is the lowercase-hex SHA-256 of the key's
-/// bytes.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct ReportMeasuredFacts {
-    /// The registers of the authenticated quote.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cpu_measurement: Option<Measurement>,
-    /// The TLS key fingerprint that the document endorses.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub tls_public_key_fp: String,
-    /// The fingerprint of the HPKE key that the document endorses.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub hpke_public_key_fp: String,
-}
-
-impl Report {
-    /// The layer of the step that failed, or `None` when none did.
-    pub fn failed_step(&self) -> Option<&str> {
-        self.steps
-            .iter()
-            .find(|step| step.status == STATUS_FAILED)
-            .map(|step| step.layer.as_str())
-    }
-}
-
 const STATUS_PASSED: &str = "passed";
 const STATUS_FAILED: &str = "failed";
 const STATUS_SKIPPED: &str = "skipped";
@@ -315,52 +239,86 @@ const REPORT_LAYERS: [(&str, &str); 4] = [
 ];
 
 /// Checks that an output's report agrees with its verdict and keeps the
-/// rules of a report:
+/// rules of a report, as [`check_report_json`] describes.
+pub fn check_report(output: &Output) -> Result<(), String> {
+    let output = serde_json::to_value(output).map_err(|error| error.to_string())?;
+    check_report_json(&output)
+}
+
+/// Checks that the report of `output`, an adapter's output as JSON, agrees
+/// with its verdict and keeps the rules of a report:
 ///
 /// - only the full-verification stage carries one, and it does unless the
 ///   input was malformed or the adapter itself rejected an accepted
 ///   document for its channel keys (an envelope rejection);
-/// - the four layers, in order, with known statuses;
-/// - on an accept, every step passed or was skipped, and there are no
-///   partial facts;
+/// - it is the JSON form of `schema_version` 1, with the four layers, in
+///   order, and known statuses;
+/// - on an accept, every step passed or was skipped, and there are
+///   verified facts and no partial facts;
 /// - on a rejection, the failed step is the layer that the rejection code
-///   names, no step after it ran, and each partial fact is present only
-///   once the step that establishes it passed or was skipped. A step before
-///   the failed one may be `not_run`, since checks do not always run in
-///   layer order.
-pub fn check_report(output: &Output) -> Result<(), String> {
-    if output.accepted && output.rejection.is_some() {
+///   names, no step after it ran, there are partial facts and no verified
+///   facts, and each partial fact is present only once the step that
+///   establishes it passed or was skipped. A step before the failed one may
+///   be `not_run`, since checks do not always run in layer order.
+pub fn check_report_json(output: &Value) -> Result<(), String> {
+    let text =
+        |value: &Value, name: &str| value.get(name).and_then(Value::as_str).map(str::to_owned);
+    let stage = text(output, "stage").unwrap_or_default();
+    let accepted = output
+        .get("accepted")
+        .and_then(Value::as_bool)
+        .unwrap_or_default();
+    let code = output
+        .get("rejection")
+        .and_then(|rejection| text(rejection, "code"));
+    let code = code.as_deref();
+    if accepted && code.is_some() {
         return Err("an accepted verdict carries a rejection".to_owned());
     }
-    let report = match (&output.report, output.stage.as_str()) {
+    let report = match (output.get("report"), stage.as_str()) {
         (Some(_), stage) if stage != STAGE_VERIFY => {
             return Err(format!("stage {stage} carries a report"));
         }
         (Some(report), _) => report,
         (None, STAGE_VERIFY) => {
-            let code = output.rejection.as_ref().map(|r| r.code.as_str());
             return match code {
                 Some(CODE_ENVELOPE_REJECTED | CODE_MALFORMED_INPUT) => Ok(()),
                 // A run without a verdict says nothing.
-                None if !output.accepted => Ok(()),
+                None if !accepted => Ok(()),
                 _ => Err(format!("verdict {code:?} has no report")),
             };
         }
         (None, _) => return Ok(()),
     };
-    if report.steps.len() != REPORT_LAYERS.len() {
+    let schema_version = report.get("schema_version");
+    if schema_version.and_then(Value::as_u64) != Some(1) {
+        return Err(format!(
+            "the report has schema_version {schema_version:?}, want 1"
+        ));
+    }
+    let steps = report
+        .get("steps")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if steps.len() != REPORT_LAYERS.len() {
         return Err(format!(
             "the report has {} steps, want {}",
-            report.steps.len(),
+            steps.len(),
             REPORT_LAYERS.len()
         ));
     }
+    let status = |step: &Value| text(step, "status").unwrap_or_default();
+    let layer_of = |step: &Value| text(step, "layer").unwrap_or_default();
     let mut failed_at = None;
-    for (index, (step, (layer, _))) in report.steps.iter().zip(REPORT_LAYERS).enumerate() {
-        if step.layer != layer {
-            return Err(format!("step {index} is {:?}, want {layer:?}", step.layer));
+    for (index, (step, (layer, _))) in steps.iter().zip(REPORT_LAYERS).enumerate() {
+        if layer_of(step) != layer {
+            return Err(format!(
+                "step {index} is {:?}, want {layer:?}",
+                layer_of(step)
+            ));
         }
-        let status = step.status.as_str();
+        let status = status(step);
         if failed_at.is_some() {
             if status != STATUS_NOT_RUN {
                 return Err(format!(
@@ -369,65 +327,75 @@ pub fn check_report(output: &Output) -> Result<(), String> {
             }
         } else if status == STATUS_FAILED {
             failed_at = Some(index);
-        } else if ![STATUS_PASSED, STATUS_SKIPPED, STATUS_NOT_RUN].contains(&status) {
+        } else if ![STATUS_PASSED, STATUS_SKIPPED, STATUS_NOT_RUN].contains(&status.as_str()) {
             return Err(format!("step {layer} has the unknown status {status:?}"));
         }
     }
     let ran = |layer: &str| {
-        report.steps.iter().any(|step| {
-            step.layer == layer && [STATUS_PASSED, STATUS_SKIPPED].contains(&step.status.as_str())
+        steps.iter().any(|step| {
+            layer_of(step) == layer
+                && [STATUS_PASSED, STATUS_SKIPPED].contains(&status(step).as_str())
         })
     };
-    if output.accepted {
-        if let Some(step) = report.steps.iter().find(|step| !ran(&step.layer)) {
+    let partial = report.get("partial_facts");
+    if accepted {
+        if let Some(step) = steps.iter().find(|step| !ran(&layer_of(step))) {
             return Err(format!(
                 "an accepted report has step {} {}",
-                step.layer, step.status
+                layer_of(step),
+                status(step)
             ));
         }
-        if report.partial_facts.is_some() {
+        if partial.is_some() {
             return Err("an accepted report has partial facts".to_owned());
+        }
+        if report.get("verified_facts").is_none() {
+            return Err("an accepted report has no verified facts".to_owned());
         }
         return Ok(());
     }
-    let (Some(rejection), Some(failed_at)) = (&output.rejection, failed_at) else {
+    let (Some(code), Some(failed_at)) = (code, failed_at) else {
         return Err("a rejection's report has no failed step".to_owned());
     };
     let (failed_layer, failed_code) = REPORT_LAYERS.get(failed_at).copied().unwrap_or_default();
-    if rejection.code != failed_code {
+    if code != failed_code {
         return Err(format!(
-            "the failed step {failed_layer} does not match the rejection code {}",
-            rejection.code
+            "the failed step {failed_layer} does not match the rejection code {code}"
         ));
     }
-    let Some(partial) = &report.partial_facts else {
+    if report.get("verified_facts").is_some() {
+        return Err("a rejection's report has verified facts".to_owned());
+    }
+    let Some(partial) = partial else {
         return Err("a rejection's report has no partial facts".to_owned());
     };
-    if partial.measured.is_some() != ran("envelope") {
+    let measured = partial.get("measured");
+    let expected = partial.get("expected");
+    if measured.is_some() != ran("envelope") {
         return Err(format!(
             "measured facts present={}, but the envelope step passed={}",
-            partial.measured.is_some(),
+            measured.is_some(),
             ran("envelope")
         ));
     }
-    if partial.expected.is_some() != ran("provenance") {
+    if expected.is_some() != ran("provenance") {
         return Err(format!(
             "expected facts present={}, but the provenance step passed={}",
-            partial.expected.is_some(),
+            expected.is_some(),
             ran("provenance")
         ));
     }
-    if let Some(measured) = &partial.measured
-        && measured.cpu_measurement.is_some() != ran("quote")
+    if let Some(measured) = measured
+        && measured.get("cpu_measurement").is_some() != ran("quote")
     {
         return Err(format!(
             "the CPU measurement is present={}, but the quote step passed={}",
-            measured.cpu_measurement.is_some(),
+            measured.get("cpu_measurement").is_some(),
             ran("quote")
         ));
     }
-    if let Some(expected) = &partial.expected
-        && expected.measurement.is_some()
+    if let Some(expected) = expected
+        && expected.get("measurement").is_some()
         && failed_layer != "policy"
     {
         return Err(
@@ -580,6 +548,8 @@ mod stages;
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     const MINIMAL: &str = r#"{"schema_version":"1"}"#;
@@ -747,131 +717,110 @@ mod tests {
         }
     }
 
-    fn steps(statuses: [&str; 4]) -> Vec<ReportStep> {
+    fn steps(statuses: [&str; 4]) -> Value {
         REPORT_LAYERS
             .iter()
             .zip(statuses)
-            .map(|((layer, _), status)| ReportStep {
-                layer: (*layer).to_owned(),
-                status: status.to_owned(),
-            })
+            .map(|((layer, _), status)| json!({"layer": layer, "status": status}))
             .collect()
     }
 
-    /// A consistent rejection at the provenance step.
-    fn provenance_rejection() -> Output {
-        Output {
-            stage: STAGE_VERIFY.to_owned(),
-            accepted: false,
-            outputs: None,
-            rejection: Some(Rejection {
-                code: CODE_PROVENANCE_REJECTED.to_owned(),
-            }),
-            report: Some(Report {
-                steps: steps(["passed", "failed", "not_run", "not_run"]),
-                partial_facts: Some(ReportPartialFacts {
-                    expected: None,
-                    measured: Some(ReportMeasuredFacts {
-                        tls_public_key_fp: "a".repeat(64),
-                        ..ReportMeasuredFacts::default()
-                    }),
-                }),
-            }),
-        }
-    }
-
-    fn measurement() -> Measurement {
-        Measurement {
-            kind: "m".to_owned(),
-            registers: Vec::new(),
-        }
+    /// The output of a consistent rejection at the provenance step, as
+    /// JSON.
+    fn provenance_rejection() -> Value {
+        json!({
+            "stage": STAGE_VERIFY,
+            "accepted": false,
+            "rejection": {"code": CODE_PROVENANCE_REJECTED},
+            "report": {
+                "schema_version": 1,
+                "steps": steps(["passed", "failed", "not_run", "not_run"]),
+                "partial_facts": {"measured": {"tls_public_key_fp": "a".repeat(64)}},
+                "metadata": {}
+            }
+        })
     }
 
     #[test]
     fn a_consistent_report_passes_its_check() {
         let rejected = provenance_rejection();
-        assert_eq!(check_report(&rejected), Ok(()));
-        assert_eq!(
-            rejected.report.as_ref().and_then(Report::failed_step),
-            Some("provenance")
-        );
-        let accepted = Output {
-            accepted: true,
-            rejection: None,
-            report: Some(Report {
-                steps: steps(["passed", "skipped", "passed", "passed"]),
-                partial_facts: None,
-            }),
-            ..rejected
-        };
-        assert_eq!(check_report(&accepted), Ok(()));
+        assert_eq!(check_report_json(&rejected), Ok(()));
+        let mut accepted = rejected;
+        accepted["accepted"] = json!(true);
+        let members = accepted.as_object_mut().unwrap();
+        members.remove("rejection");
+        let report = members["report"].as_object_mut().unwrap();
+        report.remove("partial_facts");
+        report.insert("verified_facts".to_owned(), json!({}));
+        report["steps"] = steps(["passed", "skipped", "passed", "passed"]);
+        assert_eq!(check_report_json(&accepted), Ok(()));
     }
 
     #[test]
     fn a_report_that_disagrees_with_its_verdict_or_its_rules_fails_its_check() {
-        type Mutation = fn(&mut Output);
-        let cases: [(&str, Mutation); 9] = [
+        type Mutation = fn(&mut Value);
+        let cases: [(&str, Mutation); 11] = [
             ("wrong layer", |o| {
-                o.rejection.as_mut().unwrap().code = CODE_QUOTE_REJECTED.to_owned();
+                o["rejection"]["code"] = json!(CODE_QUOTE_REJECTED);
             }),
             ("ran after", |o| {
-                o.report.as_mut().unwrap().steps[2].status = "passed".to_owned();
+                o["report"]["steps"][2]["status"] = json!("passed");
             }),
             ("expected early", |o| {
-                let partial = o.report.as_mut().unwrap().partial_facts.as_mut().unwrap();
-                partial.expected = Some(ReportExpectedFacts::default());
+                o["report"]["partial_facts"]["expected"] = json!({});
             }),
             ("no measured", |o| {
-                let partial = o.report.as_mut().unwrap().partial_facts.as_mut().unwrap();
-                partial.measured = None;
+                o["report"]["partial_facts"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("measured");
             }),
             ("cpu early", |o| {
-                let partial = o.report.as_mut().unwrap().partial_facts.as_mut().unwrap();
-                partial.measured.as_mut().unwrap().cpu_measurement = Some(measurement());
+                o["report"]["partial_facts"]["measured"]["cpu_measurement"] = json!({});
             }),
             ("three steps", |o| {
-                o.report.as_mut().unwrap().steps.truncate(3);
+                o["report"]["steps"].as_array_mut().unwrap().truncate(3);
             }),
             ("no partial facts", |o| {
-                o.report.as_mut().unwrap().partial_facts = None;
+                o["report"].as_object_mut().unwrap().remove("partial_facts");
             }),
-            ("accepted", |o| o.accepted = true),
+            ("verified facts", |o| {
+                o["report"]["verified_facts"] = json!({});
+            }),
+            ("another schema version", |o| {
+                o["report"]["schema_version"] = json!(2);
+            }),
+            ("accepted", |o| o["accepted"] = json!(true)),
             ("another stage", |o| {
-                o.stage = STAGE_CHECK_ENVELOPE.to_owned()
+                o["stage"] = json!(STAGE_CHECK_ENVELOPE);
             }),
         ];
         for (name, mutate) in cases {
             let mut output = provenance_rejection();
             mutate(&mut output);
-            assert!(check_report(&output).is_err(), "{name}");
+            assert!(check_report_json(&output).is_err(), "{name}");
         }
 
         // A full expected measurement belongs to a failed policy step only.
         let mut output = provenance_rejection();
-        output.rejection.as_mut().unwrap().code = CODE_QUOTE_REJECTED.to_owned();
-        let report = output.report.as_mut().unwrap();
-        report.steps = steps(["passed", "passed", "failed", "not_run"]);
-        report.partial_facts.as_mut().unwrap().expected = Some(ReportExpectedFacts {
-            measurement: Some(measurement()),
-            ..ReportExpectedFacts::default()
-        });
-        assert!(check_report(&output).is_err());
+        output["rejection"]["code"] = json!(CODE_QUOTE_REJECTED);
+        output["report"]["steps"] = steps(["passed", "passed", "failed", "not_run"]);
+        output["report"]["partial_facts"]["expected"] = json!({"measurement": {}});
+        assert!(check_report_json(&output).is_err());
     }
 
     #[test]
     fn only_a_rejection_of_the_adapter_or_of_the_input_has_no_report() {
         let mut output = provenance_rejection();
-        output.report = None;
-        assert!(check_report(&output).is_err());
+        output.as_object_mut().unwrap().remove("report");
+        assert!(check_report_json(&output).is_err());
         for code in [CODE_ENVELOPE_REJECTED, CODE_MALFORMED_INPUT] {
-            output.rejection = Some(Rejection {
-                code: code.to_owned(),
-            });
-            assert_eq!(check_report(&output), Ok(()), "{code}");
+            output["rejection"] = json!({"code": code});
+            assert_eq!(check_report_json(&output), Ok(()), "{code}");
         }
-        output.accepted = true;
-        output.rejection = None;
-        assert!(check_report(&output).is_err());
+        output["accepted"] = json!(true);
+        output.as_object_mut().unwrap().remove("rejection");
+        assert!(check_report_json(&output).is_err());
     }
 
     #[test]

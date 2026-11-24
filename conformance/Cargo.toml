@@ -16,7 +16,9 @@ serde_json = "1"
 # The client that `live-verify` connects to an enclave with. Without the
 # OpenAI clients, which the command does not use.
 tinfoil = { path = "../crates/client", default-features = false }
-tinfoil-verifier = { workspace = true }
+# With `serde`, so that the output carries the verifier's report in the
+# JSON form that every SDK writes.
+tinfoil-verifier = { workspace = true, features = ["serde"] }
 # The runtime that the client needs.
 tokio = { version = "1", default-features = false, features = ["rt"] }
 
