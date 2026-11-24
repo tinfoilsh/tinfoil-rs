@@ -30,10 +30,9 @@ pub enum EmbeddedConfig {
     /// The exact config bytes. Their digest and the runtime that they pin
     /// are derived from them.
     ///
-    /// The bytes are a JSON config, as cvm-version 0.15.5-rc.1 and later
-    /// releases measure. The YAML config of an earlier release is not read
-    /// and is a usage error: give that config as a
-    /// [`Reference`](Self::Reference).
+    /// The bytes are a JSON config. The YAML config that earlier enclave
+    /// versions take is not read and is a usage error: give that config as
+    /// a [`Reference`](Self::Reference).
     Bytes {
         /// The config, 1 byte to 1 MiB.
         bytes: Vec<u8>,

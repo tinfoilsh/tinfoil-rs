@@ -69,7 +69,7 @@ pub enum Trust {
     /// still apply. An authorized config has no authenticated registry
     /// name or approval time, so this variant has no pin. The authorized
     /// bytes must be a JSON config; any other bytes are rejected, such as
-    /// the YAML config of a cvm-version before 0.15.5-rc.1.
+    /// the YAML config that earlier enclave versions take.
     AuthorizedBy(ConfigAuthorizer),
     /// `attestation-collaterals/v3` collateral for exactly the config bytes
     /// that the caller supplies, which must come from trusted client
@@ -80,7 +80,7 @@ pub enum Trust {
         /// with the config.
         name: Option<String>,
         /// The config, 1 byte to 1 MiB. It is a JSON config; the YAML
-        /// config of a cvm-version before 0.15.5-rc.1 is a configuration
+        /// config that earlier enclave versions take is a configuration
         /// error.
         bytes: Vec<u8>,
     },

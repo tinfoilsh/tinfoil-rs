@@ -180,7 +180,7 @@ fn to_json_text(value: &Value) -> Vec<u8> {
 ///
 /// The runtime pin is read from the bytes that the function authorizes,
 /// which must be a JSON config. Any other bytes are rejected, such as the
-/// YAML config of a cvm-version before 0.15.5-rc.1.
+/// YAML config that earlier enclave versions take.
 #[derive(Clone)]
 pub struct ConfigAuthorizer(pub(crate) Arc<AuthorizeFn>);
 

@@ -303,7 +303,7 @@ fn a_manifest_version_is_a_full_semantic_version() {
 
 const DIGEST: &str = "abababababababababababababababababababababababababababababababab";
 
-/// A JSON config in its one byte form that pins `version`.
+/// A JSON config that pins `version`.
 fn json_config(version: &str) -> String {
     format!(
         r#"{{"containers":[],"cpus":2,"cvm-version":"{version}@sha256:{DIGEST}","shim":{{"upstream-port":8080}}}}"#
@@ -320,14 +320,9 @@ fn config_error(config: &str) -> String {
         .to_string()
 }
 
-/// A JSON escape of a UTF-16 code unit, given as four hex digits.
-fn unicode_escape(hex: &str) -> String {
-    format!("{}u{hex}", '\\')
-}
-
 const NOT_JSON_HEAD: &str =
     "parsing config runtime pin: not a JSON config that states cvm-version (";
-const NOT_JSON_TAIL: &str = "); the YAML configs of versions before v0.15.5-rc.1 are not read";
+const NOT_JSON_TAIL: &str = "); YAML configs are not read";
 
 /// The error for JSON that is not an object with a string `cvm-version`.
 fn no_pin_member() -> String {
@@ -343,28 +338,18 @@ fn is_invalid_json(message: &str, fault: &str) -> bool {
         .is_some_and(|cause| cause.starts_with(&format!("invalid JSON: {fault} at offset ")))
 }
 
-const NOT_CANONICAL: &str =
-    "parsing config runtime pin: JSON config is not in canonical form (RFC 8785)";
-const BEFORE_JSON: &str = "a JSON config pins cvm-version v0.15.5-rc.1 or later";
-
-fn not_an_integer(literal: &str) -> String {
-    format!(
-        "parsing config runtime pin: number {literal} in a JSON config is not an integer between -(2^53-1) and 2^53-1"
-    )
-}
-
 #[test]
 fn reads_the_runtime_pin_of_a_config() {
     for (version, tag) in [
-        ("0.15.5", "v0.15.5"),
-        ("v0.15.5", "v0.15.5"),
-        ("0.15.5-rc.1", "v0.15.5-rc.1"),
-        ("0.15.5+gpu", "v0.15.5+gpu"),
-        ("v0.15.5+gpu", "v0.15.5+gpu"),
-        ("0.15.5-rc.1+gpu", "v0.15.5-rc.1+gpu"),
-        ("0.15.5+mini", "v0.15.5+mini"),
-        ("0.15.5+containers.initrd-1", "v0.15.5+containers.initrd-1"),
-        ("0.15.5+GPU", "v0.15.5+GPU"),
+        ("0.15.0", "v0.15.0"),
+        ("v0.15.0", "v0.15.0"),
+        ("0.15.0-rc.1", "v0.15.0-rc.1"),
+        ("0.15.0+gpu", "v0.15.0+gpu"),
+        ("v0.15.0+gpu", "v0.15.0+gpu"),
+        ("0.15.0-rc.1+gpu", "v0.15.0-rc.1+gpu"),
+        ("0.15.0+mini", "v0.15.0+mini"),
+        ("0.15.0+containers.initrd-1", "v0.15.0+containers.initrd-1"),
+        ("0.15.0+GPU", "v0.15.0+GPU"),
     ] {
         assert_eq!(
             runtime_from_config(json_config(version).as_bytes()),
@@ -373,7 +358,7 @@ fn reads_the_runtime_pin_of_a_config() {
         );
     }
 
-    let good = json_config("0.15.5");
+    let good = json_config("0.15.0");
     let pin = "cvm-version must pin a runtime manifest SHA-256 digest";
     let tag = "runtime tag must be a full semantic version";
     let no_member = no_pin_member();
@@ -390,14 +375,14 @@ fn reads_the_runtime_pin_of_a_config() {
         ),
         (
             "path metadata",
-            good.replace("0.15.5", "0.15.5+mini/other"),
+            good.replace("0.15.0", "0.15.0+mini/other"),
             tag,
         ),
-        ("partial version", good.replace("0.15.5", "0.15+gpu"), tag),
-        ("empty metadata", good.replace("0.15.5", "0.15.5+"), tag),
+        ("partial version", good.replace("0.15.0", "0.15+gpu"), tag),
+        ("empty metadata", good.replace("0.15.0", "0.15.0+"), tag),
         (
             "double metadata",
-            good.replace("0.15.5", "0.15.5+gpu+gpu"),
+            good.replace("0.15.0", "0.15.0+gpu+gpu"),
             tag,
         ),
         (
@@ -421,25 +406,40 @@ fn reads_the_runtime_pin_of_a_config() {
     }
 }
 
+/// A config is read only as JSON, for its `cvm-version` member alone.
+/// Neither the release that it pins nor the spelling of the JSON decides
+/// the outcome, and YAML is refused.
 #[test]
-fn only_a_json_config_of_a_json_version_is_read() {
+fn a_config_is_read_only_as_json() {
+    let config = json_config("0.15.5-rc.1");
+    let replace = |from: &str, to: &str| replace_once(&config, from, to);
     for (name, config, tag) in [
+        ("release candidate", config.clone(), "v0.15.5-rc.1"),
+        ("earlier version", json_config("0.15.4"), "v0.15.4"),
+        ("later version", json_config("0.16.0"), "v0.16.0"),
         (
-            "JSON at the first JSON version",
-            json_config("0.15.5-rc.1"),
+            "whitespace",
+            replace(r#""cpus":2"#, r#""cpus": 2"#) + "\n",
             "v0.15.5-rc.1",
         ),
         (
-            "JSON with a v prefix",
-            json_config("v0.15.5-rc.1"),
+            "members in any order",
+            replace(
+                r#""containers":[],"cpus":2,"#,
+                r#""cpus":2,"containers":[],"#,
+            ),
             "v0.15.5-rc.1",
         ),
         (
-            "JSON with build metadata",
-            json_config("0.15.5-rc.1+gpu"),
-            "v0.15.5-rc.1+gpu",
+            "other member is null",
+            replace(r#""cpus":2"#, r#""cpus":null"#),
+            "v0.15.5-rc.1",
         ),
-        ("JSON for a later version", json_config("0.16.0"), "v0.16.0"),
+        (
+            "other member fraction",
+            replace(r#""cpus":2"#, r#""cpus":2.5"#),
+            "v0.15.5-rc.1",
+        ),
     ] {
         assert_eq!(
             runtime_from_config(config.as_bytes()),
@@ -448,39 +448,17 @@ fn only_a_json_config_of_a_json_version_is_read() {
         );
     }
 
-    let canonical = json_config("0.15.5-rc.1");
-    let replace = |from: &str, to: &str| replace_once(&canonical, from, to);
-    let escaped_name = format!("\"{}pus\"", unicode_escape("0063"));
-    // YAML is not read, whatever it pins, and neither is anything else that
-    // is not JSON. The error names the fault.
+    // What is not JSON is not read, whatever it pins. The error names the
+    // fault.
     for (name, config, fault) in [
+        ("YAML", yaml_config("0.15.5-rc.1"), "unexpected character"),
         (
-            "YAML at the first JSON version",
-            yaml_config("0.15.5-rc.1"),
-            "unexpected character",
-        ),
-        (
-            "YAML with build metadata",
-            yaml_config("0.15.5-rc.1+gpu"),
-            "unexpected character",
-        ),
-        (
-            "YAML for a later version",
-            yaml_config("1.0.0"),
-            "unexpected character",
-        ),
-        (
-            "YAML before the first JSON version",
-            yaml_config("0.15.5-rc.0"),
-            "unexpected character",
-        ),
-        (
-            "YAML for an earlier release",
+            "YAML, earlier version",
             yaml_config("0.15.4"),
             "unexpected character",
         ),
         (
-            "flow-style YAML for an earlier release",
+            "flow-style YAML",
             format!("{{cvm-version: 0.15.4@sha256:{DIGEST}}}\n"),
             "unexpected character",
         ),
@@ -490,9 +468,19 @@ fn only_a_json_config_of_a_json_version_is_read() {
             "duplicate object member name",
         ),
         (
+            "repeated cvm-version",
+            replace(r#""shim""#, r#""cvm-version":"x","shim""#),
+            "duplicate object member name",
+        ),
+        (
             "second value",
-            format!("{canonical}{canonical}"),
+            format!("{config}{config}"),
             "data after the top-level value",
+        ),
+        (
+            "byte order mark",
+            format!("\u{feff}{config}"),
+            "unexpected character",
         ),
         ("empty", String::new(), "unexpected end of input"),
     ] {
@@ -500,231 +488,37 @@ fn only_a_json_config_of_a_json_version_is_read() {
         assert!(is_invalid_json(&message, fault), "{name}: {message}");
     }
 
-    for (name, config, want) in [
+    // Any other JSON is not a config: one without the pin, with a pin that
+    // is not a string or is below the top level, and a value that is not an
+    // object.
+    let pin = format!("0.15.5-rc.1@sha256:{DIGEST}");
+    for (name, config) in [
         (
-            "JSON before the first JSON version",
-            json_config("0.15.5-rc.0"),
-            BEFORE_JSON.to_owned(),
+            "no cvm-version",
+            replace(r#""cvm-version""#, r#""cvm-versions""#),
         ),
         (
-            "JSON for an earlier release",
-            json_config("0.15.4"),
-            BEFORE_JSON.to_owned(),
+            "cvm-version in another case",
+            replace(r#""cvm-version""#, r#""CVM-VERSION""#),
         ),
         (
-            "whitespace",
-            replace(r#""cpus":2"#, r#""cpus": 2"#),
-            NOT_CANONICAL.to_owned(),
+            "cvm-version not a string",
+            r#"{"cvm-version":2}"#.to_owned(),
+        ),
+        ("cvm-version null", r#"{"cvm-version":null}"#.to_owned()),
+        (
+            "cvm-version in an array",
+            format!(r#"{{"cvm-version":["{pin}"]}}"#),
         ),
         (
-            "trailing newline",
-            format!("{canonical}\n"),
-            NOT_CANONICAL.to_owned(),
+            "cvm-version below the top level",
+            format!(r#"{{"a":{config}}}"#),
         ),
-        (
-            "members out of order",
-            replace(
-                r#""containers":[],"cpus":2,"#,
-                r#""cpus":2,"containers":[],"#,
-            ),
-            NOT_CANONICAL.to_owned(),
-        ),
-        (
-            "escaped character",
-            replace(r#""cpus""#, &escaped_name),
-            NOT_CANONICAL.to_owned(),
-        ),
-        (
-            "null",
-            replace(r#""cpus":2"#, r#""cpus":null"#),
-            "parsing config runtime pin: null is not allowed in a JSON config".to_owned(),
-        ),
-        (
-            "fraction",
-            replace(r#""cpus":2"#, r#""cpus":2.5"#),
-            not_an_integer("2.5"),
-        ),
-        (
-            "exponent",
-            replace(r#""cpus":2"#, r#""cpus":2e0"#),
-            not_an_integer("2e0"),
-        ),
-        (
-            "integer too large",
-            replace(r#""cpus":2"#, r#""cpus":9007199254740992"#),
-            not_an_integer("9007199254740992"),
-        ),
+        ("not an object", format!("[{config}]")),
+        ("a string", format!(r#""{pin}""#)),
     ] {
-        assert_eq!(config_error(&config), want, "{name}");
+        assert_eq!(config_error(&config), no_pin_member(), "{name}");
     }
-}
-
-#[test]
-fn the_first_json_version_is_found_by_precedence() {
-    assert!(crate::semver::is_full(JSON_CONFIG_MIN_VERSION));
-    for (version, below) in [
-        ("0.15.4", true),
-        ("0.15.5-0", true),
-        ("0.15.5-alpha", true),
-        ("0.15.5-rc", true),
-        ("0.15.5-rc.0", true),
-        ("0.15.5-rc.0+gpu", true),
-        ("0.15.5-rc.0.9", true),
-        ("0.9.0", true),
-        ("0.15.5-rc.1", false),
-        ("v0.15.5-rc.1", false),
-        ("0.15.5-rc.1+gpu", false),
-        ("0.15.5-rc.1.0", false),
-        ("0.15.5-rc.2", false),
-        ("0.15.5-rc.10", false),
-        ("0.15.5-rc.x", false),
-        ("0.15.5-rd", false),
-        ("0.15.5", false),
-        ("0.15.5+gpu", false),
-        ("0.15.10", false),
-        ("0.16.0-rc.0", false),
-        ("1.0.0", false),
-        ("10.0.0", false),
-    ] {
-        let json = runtime_from_config(json_config(version).as_bytes());
-        let tag = format!("v{}", version.trim_start_matches('v'));
-        if below {
-            assert_eq!(json.unwrap_err().to_string(), BEFORE_JSON, "{version}");
-        } else {
-            assert_eq!(json, Ok(reference(&tag, DIGEST)), "{version}");
-        }
-        // YAML is read at no version.
-        let yaml = config_error(&yaml_config(version));
-        assert!(is_invalid_json(&yaml, "unexpected character"), "{yaml}");
-    }
-    // A JSON config of an earlier version is refused in any spelling.
-    let spaced = replace_once(&json_config("0.15.4"), r#""cpus":2"#, r#""cpus": null"#);
-    assert_eq!(config_error(&spaced), BEFORE_JSON);
-    // A release that is not a full version fails as a pin: a shorthand,
-    // which is above the first JSON version, and what is not a version,
-    // which is below it.
-    let tag = "runtime tag must be a full semantic version";
-    for version in ["1", "0.16", "0.15.5-rc.01", "0.15.5.1", "vv0.16.0", "x"] {
-        assert_eq!(config_error(&json_config(version)), tag, "{version}");
-    }
-}
-
-#[test]
-fn a_json_config_has_one_byte_form() {
-    let pin = format!("0.15.5@sha256:{DIGEST}");
-    let read =
-        |config: &str| runtime_from_config(config.as_bytes()).map_err(|error| error.to_string());
-    let expected = Ok(reference("v0.15.5", DIGEST));
-
-    // Member names sort by their UTF-16 code units. U+FF5E is one unit above
-    // the surrogates that encode U+1F600, and a lower code point.
-    let by_code_unit =
-        format!("{{\"cvm-version\":\"{pin}\",\"\u{e9}\":1,\"\u{1f600}\":2,\"\u{ff5e}\":3}}");
-    let by_code_point =
-        format!("{{\"cvm-version\":\"{pin}\",\"\u{e9}\":1,\"\u{ff5e}\":3,\"\u{1f600}\":2}}");
-    assert_eq!(read(&by_code_unit), expected);
-    assert_eq!(read(&by_code_point), Err(NOT_CANONICAL.to_owned()));
-    // The same holds below the top level.
-    let nested = |members: &str| format!("{{\"a\":[{{{members}}}],\"cvm-version\":\"{pin}\"}}");
-    assert_eq!(
-        read(&nested("\"\u{1f600}\":true,\"\u{ff5e}\":false")),
-        expected
-    );
-    assert_eq!(
-        read(&nested("\"\u{ff5e}\":false,\"\u{1f600}\":true")),
-        Err(NOT_CANONICAL.to_owned())
-    );
-
-    // Numbers are integers that every implementation reads exactly.
-    let with_number = |number: &str| format!("{{\"cpus\":{number},\"cvm-version\":\"{pin}\"}}");
-    for number in ["0", "-1", "9007199254740991", "-9007199254740991"] {
-        assert_eq!(read(&with_number(number)), expected, "{number}");
-    }
-    for number in [
-        "9007199254740992",
-        "-9007199254740992",
-        "18446744073709551616",
-        "2.0",
-        "1e3",
-        "1E3",
-        "-0.0",
-    ] {
-        assert_eq!(
-            read(&with_number(number)),
-            Err(not_an_integer(number)),
-            "{number}"
-        );
-    }
-    // Negative zero is an integer, and its canonical form is `0`.
-    assert_eq!(read(&with_number("-0")), Err(NOT_CANONICAL.to_owned()));
-    // The rule holds at any depth.
-    for (value, want) in [
-        ("[{\"a\":[1.5]}]", not_an_integer("1.5")),
-        (
-            "[{\"a\":[null]}]",
-            "parsing config runtime pin: null is not allowed in a JSON config".to_owned(),
-        ),
-        ("[{\"a\":[-0]}]", NOT_CANONICAL.to_owned()),
-        ("[{\"a\": []}]", NOT_CANONICAL.to_owned()),
-    ] {
-        assert_eq!(read(&with_number(value)), Err(want), "{value}");
-    }
-
-    // A string has one spelling: an escape only where one is required, in
-    // its short form where there is one.
-    let with_text = |text: &str| format!("{{\"cvm-version\":\"{pin}\",\"text\":\"{text}\"}}");
-    let backslash = '\\';
-    for text in [
-        format!("{backslash}n{backslash}t{backslash}b{backslash}f{backslash}r"),
-        format!("{backslash}\"{backslash}{backslash}"),
-        format!("{}{}", unicode_escape("0000"), unicode_escape("001f")),
-        "/ \u{7f} \u{e9} \u{2028} \u{2029} \u{85} \u{ffff} \u{1f600}".to_owned(),
-    ] {
-        assert_eq!(read(&with_text(&text)), expected, "{text}");
-    }
-    for text in [
-        unicode_escape("000a"),
-        unicode_escape("001F"),
-        unicode_escape("0041"),
-        unicode_escape("00e9"),
-        unicode_escape("007f"),
-        format!("{}{}", unicode_escape("d83d"), unicode_escape("de00")),
-        format!("{backslash}/"),
-    ] {
-        assert_eq!(
-            read(&with_text(&text)),
-            Err(NOT_CANONICAL.to_owned()),
-            "{text}"
-        );
-    }
-    // The name of the pin itself is no exception.
-    let escaped_pin_name = format!("{{\"cvm{}version\":\"{pin}\"}}", unicode_escape("002d"));
-    assert_eq!(read(&escaped_pin_name), Err(NOT_CANONICAL.to_owned()));
-}
-
-#[test]
-fn a_json_config_states_its_pin_as_a_string_member() {
-    let pin = format!("0.15.5@sha256:{DIGEST}");
-    assert_eq!(
-        runtime_from_config(format!("{{\"cvm-version\":\"{pin}\"}}").as_bytes()),
-        Ok(reference("v0.15.5", DIGEST))
-    );
-    // Any other JSON is not a config: a pin that is not a string, a pin
-    // below the top level, and a value that is not an object.
-    for config in [
-        "{\"cvm-version\":1}".to_owned(),
-        "{\"cvm-version\":null}".to_owned(),
-        format!("{{\"cvm-version\":[\"{pin}\"]}}"),
-        format!("{{\"a\":{{\"cvm-version\":\"{pin}\"}}}}"),
-        format!("{{\"CVM-VERSION\":\"{pin}\"}}"),
-        format!("[{{\"cvm-version\":\"{pin}\"}}]"),
-        format!("\"{pin}\""),
-    ] {
-        assert_eq!(config_error(&config), no_pin_member(), "{config}");
-    }
-    // A byte order mark before the object is not JSON.
-    let marked = config_error(&format!("\u{feff}{{\"cvm-version\":\"{pin}\"}}"));
-    assert!(is_invalid_json(&marked, "unexpected character"), "{marked}");
 }
 
 #[test]

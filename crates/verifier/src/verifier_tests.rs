@@ -52,13 +52,13 @@ impl Inputs {
     fn new() -> Self {
         let zero = "00".repeat(REGISTER_SIZE);
         let runtime = format!(
-            r#"{{"version":"v0.15.5","igvm":{{"format_version":1,"snp_launch":{{"measurement":"{}"}},"tdx_launch":{{"mrtd":"{}","rtmr0":"{zero}","rtmr1":"{zero}","rtmr2":"{zero}","rtmr3":"{zero}"}}}}}}"#,
+            r#"{{"version":"v0.15.0","igvm":{{"format_version":1,"snp_launch":{{"measurement":"{}"}},"tdx_launch":{{"mrtd":"{}","rtmr0":"{zero}","rtmr1":"{zero}","rtmr2":"{zero}","rtmr3":"{zero}"}}}}}}"#,
             "ab".repeat(REGISTER_SIZE),
             "cd".repeat(REGISTER_SIZE),
         )
         .into_bytes();
         let config = format!(
-            "{{\"cvm-version\":\"0.15.5@sha256:{}\"}}",
+            "{{\"cvm-version\":\"0.15.0@sha256:{}\"}}",
             encode_lower_hex(&Sha256::digest(&runtime))
         )
         .into_bytes();
@@ -78,7 +78,7 @@ impl Inputs {
     fn runtime_reference(&self) -> RuntimeReference {
         RuntimeReference {
             repo: "tinfoilsh/cvmimage".to_owned(),
-            tag: "v0.15.5".to_owned(),
+            tag: "v0.15.0".to_owned(),
             digest: encode_lower_hex(&Sha256::digest(&self.runtime)),
         }
     }
@@ -440,7 +440,7 @@ fn embedded_references_are_checked_when_the_verifier_is_built() {
     newline.push(b'\n');
     let short_version = String::from_utf8(inputs.runtime.clone())
         .unwrap()
-        .replace("v0.15.5", "v0.15");
+        .replace("v0.15.0", "v0.15");
     let refused: Vec<(Options, &str)> = vec![
         (only(bytes(b"", None), None, None), "outside allowed bounds"),
         (
@@ -571,7 +571,7 @@ fn embedded_references_are_checked_when_the_verifier_is_built() {
 fn an_embedded_config_in_yaml_is_refused_when_the_verifier_is_built() {
     let inputs = Inputs::new();
     let runtime = inputs.runtime_reference();
-    let yaml = format!("cvm-version: 0.15.5@sha256:{}\n", runtime.digest).into_bytes();
+    let yaml = format!("cvm-version: 0.15.0@sha256:{}\n", runtime.digest).into_bytes();
     let embedded = |config: EmbeddedConfig| (ConfigTrust::Embedded(config), inputs.artifacts());
 
     let message = usage(

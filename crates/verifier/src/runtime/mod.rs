@@ -5,9 +5,7 @@ mod config;
 mod manifest;
 
 pub use crate::document::collateral::RuntimeReference;
-pub use config::{
-    JSON_CONFIG_MIN_VERSION, MAX_CONFIG_SIZE, RuntimeConfigError, runtime_from_config,
-};
+pub use config::{MAX_CONFIG_SIZE, RuntimeConfigError, runtime_from_config};
 pub use manifest::{
     FORMAT_VERSION, MAX_MANIFEST_SIZE, MEASUREMENT_SIZE, Manifest, ManifestError, Measurements,
     SnpLaunch, TdxLaunch, decode_manifest, parse_manifest,

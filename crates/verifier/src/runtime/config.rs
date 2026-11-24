@@ -1,32 +1,20 @@
 //! The runtime pin of a workload config.
 //!
-//! The `cvm-version` member of a config names a runtime release and the
-//! SHA-256 of its manifest, as `VERSION@sha256:DIGEST`. This module reads
-//! that one member and nothing else: the publisher and the guest own the
-//! validation of every other field.
+//! A config is a JSON object whose `cvm-version` member names a runtime
+//! release and the SHA-256 of its manifest, as `VERSION@sha256:DIGEST`. This
+//! module reads that one member and nothing else: the publisher and the
+//! guest own the validation of every other field.
 //!
-//! A config is JSON in one byte form: RFC 8785 canonical JSON without
-//! `null`, whose numbers are integers of at most 2^53-1 in absolute value.
-//! Any other spelling of the same JSON is refused. It pins
-//! [`JSON_CONFIG_MIN_VERSION`] or a later release. Earlier releases measure
-//! a YAML config, which this module does not read.
+//! The YAML config that earlier enclave versions take is not read.
 
-use std::cmp::Ordering;
 use std::fmt;
 
 use super::RuntimeReference;
 use crate::document::collateral::RUNTIME_REPO;
 use crate::json::{self, Value};
-use crate::semver;
-use crate::sigstore::statement::canonical_json;
 
 /// The largest config that is read, in bytes.
 pub const MAX_CONFIG_SIZE: usize = 1 << 20;
-
-/// The first release whose config is JSON. A config that pins it or a later
-/// release is canonical JSON. Earlier releases measure YAML, which is not
-/// read.
-pub const JSON_CONFIG_MIN_VERSION: &str = "v0.15.5-rc.1";
 
 /// The key that holds the runtime pin.
 const VERSION_KEY: &str = "cvm-version";
@@ -67,9 +55,9 @@ impl std::error::Error for RuntimeConfigError {}
 /// returned tag always has one. The reference is validated before it is
 /// returned: a full semantic version and a lowercase SHA-256 digest.
 ///
-/// The config is JSON in its one byte form and pins
-/// [`JSON_CONFIG_MIN_VERSION`] or a later release. Anything else is an
-/// error, the YAML config of an earlier release included.
+/// The config is read as JSON, whatever release it pins and however the
+/// JSON is spelled. Bytes that are not JSON are an error, the YAML config
+/// that earlier enclave versions take included.
 pub fn runtime_from_config(data: &[u8]) -> Result<RuntimeReference, RuntimeConfigError> {
     if data.len() > MAX_CONFIG_SIZE {
         return Err(RuntimeConfigError::parsing(format_args!(
@@ -78,7 +66,7 @@ pub fn runtime_from_config(data: &[u8]) -> Result<RuntimeReference, RuntimeConfi
     }
     let not_json = |cause: &dyn fmt::Display| {
         RuntimeConfigError::parsing(format_args!(
-            "not a JSON config that states cvm-version ({cause}); the YAML configs of versions before {JSON_CONFIG_MIN_VERSION} are not read"
+            "not a JSON config that states cvm-version ({cause}); YAML configs are not read"
         ))
     };
     let config = json::parse(data).map_err(|cause| not_json(&cause))?;
@@ -87,14 +75,7 @@ pub fn runtime_from_config(data: &[u8]) -> Result<RuntimeReference, RuntimeConfi
         .and_then(|members| members.get(VERSION_KEY))
         .and_then(Value::as_str)
         .ok_or_else(|| not_json(&"no cvm-version string member"))?;
-    let reference = reference_from_pin(pin)?;
-    if !requires_json(pin) {
-        return Err(RuntimeConfigError::new(format!(
-            "a JSON config pins cvm-version {JSON_CONFIG_MIN_VERSION} or later"
-        )));
-    }
-    check_json_form(&config, data)?;
-    Ok(reference)
+    reference_from_pin(pin)
 }
 
 /// The reference that a pin states, validated.
@@ -106,63 +87,11 @@ fn reference_from_pin(pin: &str) -> Result<RuntimeReference, RuntimeConfigError>
     };
     let reference = RuntimeReference {
         repo: RUNTIME_REPO.to_owned(),
-        tag: release_tag(version),
+        tag: format!("v{}", version.strip_prefix('v').unwrap_or(version)),
         digest: digest.to_owned(),
     };
     reference
         .validate()
         .map_err(|error| RuntimeConfigError::new(error.to_string()))?;
     Ok(reference)
-}
-
-/// The tag of the release that a pin names with or without a leading `v`.
-fn release_tag(version: &str) -> String {
-    format!("v{}", version.strip_prefix('v').unwrap_or(version))
-}
-
-/// Whether a config with this pin must be JSON: the release is
-/// [`JSON_CONFIG_MIN_VERSION`] or a later one by semantic version
-/// precedence, in which a prerelease counts and build metadata does not. A
-/// release that is not a valid version is below every valid one.
-fn requires_json(pin: &str) -> bool {
-    let version = pin
-        .split_once(DIGEST_SEPARATOR)
-        .map_or(pin, |(version, _)| version);
-    let tag = release_tag(version);
-    match (semver::parse(&tag), semver::parse(JSON_CONFIG_MIN_VERSION)) {
-        (Some(release), Some(first)) => release.precedence(&first) != Ordering::Less,
-        _ => false,
-    }
-}
-
-/// Requires the one byte form of a JSON config: RFC 8785 canonical JSON
-/// without `null`, whose numbers are integers that every implementation
-/// reads exactly. No two parsers can then read the bytes differently, and a
-/// config has one digest. The walk uses no recursion.
-fn check_json_form(config: &Value, data: &[u8]) -> Result<(), RuntimeConfigError> {
-    let mut pending = vec![config];
-    while let Some(value) = pending.pop() {
-        match value {
-            Value::Null => {
-                return Err(RuntimeConfigError::parsing(
-                    "null is not allowed in a JSON config",
-                ));
-            }
-            Value::Number(number) if number.to_safe_integer().is_none() => {
-                return Err(RuntimeConfigError::parsing(format_args!(
-                    "number {} in a JSON config is not an integer between -(2^53-1) and 2^53-1",
-                    number.as_str()
-                )));
-            }
-            Value::Array(items) => pending.extend(items),
-            Value::Object(members) => pending.extend(members.iter().map(|(_, member)| member)),
-            Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-        }
-    }
-    if canonical_json(config).as_deref() != Some(data) {
-        return Err(RuntimeConfigError::parsing(
-            "JSON config is not in canonical form (RFC 8785)",
-        ));
-    }
-    Ok(())
 }
