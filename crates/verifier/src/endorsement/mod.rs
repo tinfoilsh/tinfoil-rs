@@ -18,6 +18,7 @@
 pub mod approval;
 #[cfg(test)]
 mod approval_tests;
+pub mod container;
 pub mod freshness;
 #[cfg(test)]
 mod probe_tests;
