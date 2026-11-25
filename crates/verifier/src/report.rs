@@ -46,7 +46,7 @@ pub struct VerificationReport {
     steps: Vec<Step>,
     verified_facts: Option<VerifiedFacts>,
     partial_facts: Option<PartialFacts>,
-    pub(crate) metadata: VerificationMetadata,
+    metadata: VerificationMetadata,
 }
 
 impl VerificationReport {
@@ -80,11 +80,18 @@ impl VerificationReport {
     /// [`host`](VerificationMetadata::host): the host that the document was
     /// fetched from, which the verifier does not know. The clients of the
     /// `tinfoil` crate set it on every report that they hand out. It is
-    /// not attested and changes nothing else in the report.
+    /// not attested and changes nothing else in the report. An empty
+    /// `host` names no host: it leaves the host `None`, since the JSON form
+    /// has no empty member.
     #[must_use]
     pub fn with_host(mut self, host: impl Into<String>) -> Self {
-        self.metadata.host = Some(host.into());
+        self.set_host(host.into());
         self
+    }
+
+    /// Names `host` in the metadata, or no host when it is empty.
+    pub(crate) fn set_host(&mut self, host: String) {
+        self.metadata.host = Some(host).filter(|host| !host.is_empty());
     }
 
     /// The step that failed, or `None` when none did. At most one step

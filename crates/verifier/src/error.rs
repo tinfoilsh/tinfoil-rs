@@ -155,7 +155,7 @@ impl VerificationError {
     /// [`VerificationReport::with_host`] names it.
     #[must_use]
     pub fn with_host(mut self, host: impl Into<String>) -> Self {
-        self.report.metadata.host = Some(host.into());
+        self.report.set_host(host.into());
         self
     }
 }

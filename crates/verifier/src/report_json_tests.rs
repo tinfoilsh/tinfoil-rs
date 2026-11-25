@@ -368,6 +368,11 @@ fn the_host_is_written_only_when_a_report_names_one() {
         serde_json::from_str::<Value>(&report.to_json()).unwrap()
     );
 
+    // An empty host names none, so the report's host and its JSON agree.
+    let unnamed = report.clone().with_host("");
+    assert_eq!(unnamed.metadata().host, None);
+    assert_eq!(unnamed, report);
+
     let rejected = crate::VerificationError::new(Layer::Envelope, "bad", report)
         .with_host("enclave.example:8443");
     assert_eq!(rejected.report(), &named);
