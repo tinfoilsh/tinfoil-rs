@@ -1211,6 +1211,68 @@ fn config_and_runtime_accessors() {
     assert_eq!(document.sigstore_platform().unwrap().repo, "o/p");
 }
 
+#[test]
+fn container_provenance_is_keyed_by_image_digest() {
+    let (first, second) = ("ab".repeat(32), "cd".repeat(32));
+    let entry = |id: &str, data: &str| {
+        format!(
+            r#"{{"id":"{id}","role":"reference-values","format":"{}","data":{data}}}"#,
+            collateral::CONTAINER_PROVENANCE_V1_FORMAT
+        )
+    };
+    let data = |digest: &str, bundle: &str| {
+        format!(r#"{{"digest":"{digest}","sigstore_bundle":{bundle}}}"#)
+    };
+    let entries = format!(
+        "[{},{},{}]",
+        entry("one", &data(&first, r#"{"a":1}"#)),
+        entry("two", &data(&second, r#"{"b":2}"#)),
+        entry("again", &data(&first, r#"{"c":3}"#)),
+    );
+    let document = document_with_collateral(SEV_SNP_REPORT_V1_FORMAT, &entries);
+    let bundle = |text: &str| json::parse(text.as_bytes()).unwrap();
+    // The first entry for a digest is the one used.
+    assert_eq!(
+        document.container_provenance(&first).unwrap(),
+        &bundle(r#"{"a":1}"#)
+    );
+    assert_eq!(
+        document.container_provenance(&second).unwrap(),
+        &bundle(r#"{"b":2}"#)
+    );
+    let missing = document.container_provenance(&"ef".repeat(32));
+    assert!(missing.unwrap_err().is_not_found());
+
+    for (name, data, want) in [
+        (
+            "uppercase digest",
+            data(&first.to_uppercase(), "{}"),
+            "container digest is not lowercase hex",
+        ),
+        (
+            "prefixed digest",
+            data(&format!("sha256:{first}"), "{}"),
+            "container digest is not lowercase hex",
+        ),
+        (
+            "missing bundle",
+            format!(r#"{{"digest":"{first}"}}"#),
+            "is missing sigstore_bundle",
+        ),
+        (
+            "unknown member",
+            format!(r#"{{"digest":"{first}","sigstore_bundle":{{}},"repo":"o/r"}}"#),
+            r#"unknown member "repo""#,
+        ),
+    ] {
+        let text = TestDocument::new(&test_nonce())
+            .with_collateral(Some(FORMAT_V3), &format!("[{}]", entry("one", &data)))
+            .render();
+        let error = rejection(&text);
+        assert!(error.contains(want), "{name}: {error}");
+    }
+}
+
 // ---- recorded documents
 
 /// Assembles a recorded case into the document bytes that it stands for.

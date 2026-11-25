@@ -28,6 +28,9 @@ pub const OID_FULCIO_ISSUER_V1: ObjectIdentifier =
 /// The Fulcio extension for the runner environment.
 pub const OID_FULCIO_RUNNER_ENVIRONMENT: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.11");
+/// The Fulcio extension for the source repository URI.
+pub const OID_FULCIO_SOURCE_REPOSITORY_URI: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.12");
 /// The Fulcio extension for the source repository digest.
 pub const OID_FULCIO_SOURCE_REPOSITORY_DIGEST: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.13");
@@ -42,13 +45,12 @@ pub const OID_FULCIO_SOURCE_REPOSITORY_OWNER_IDENTIFIER: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.17");
 
 /// The Fulcio extensions that are read for their form only: the build
-/// signer URI and digest, the source repository URI, the source repository
-/// owner URI, the build config URI and digest, the build trigger, the run
-/// invocation URI and the source repository visibility.
-const OID_FULCIO_OTHER_CLAIMS: [ObjectIdentifier; 9] = [
+/// signer URI and digest, the source repository owner URI, the build
+/// config URI and digest, the build trigger, the run invocation URI and the
+/// source repository visibility.
+const OID_FULCIO_OTHER_CLAIMS: [ObjectIdentifier; 8] = [
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.9"),
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.10"),
-    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.12"),
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.16"),
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.18"),
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.57264.1.19"),
@@ -65,6 +67,8 @@ pub struct FulcioExtensions {
     pub issuer: String,
     /// Where the workflow ran, such as `github-hosted`.
     pub runner_environment: String,
+    /// The repository that the workflow ran for, as a URI.
+    pub source_repository_uri: String,
     /// The commit that the workflow ran at.
     pub source_repository_digest: String,
     /// The ref that the workflow ran at, such as `refs/tags/v1.2.3`.
@@ -119,8 +123,8 @@ fn error(message: impl Into<String>) -> SigstoreError {
 /// Reads the identity of a signing certificate.
 ///
 /// The subject alternative name holds exactly one name, a URI. Each Fulcio
-/// claim that is present is a DER UTF8String with nothing after it: the six
-/// claims that are returned, and the nine further ones that a certificate
+/// claim that is present is a DER UTF8String with nothing after it: the seven
+/// claims that are returned, and the eight further ones that a certificate
 /// may carry (build signer, build config, run invocation and the like),
 /// which are read only so that a certificate with a malformed claim is
 /// refused as a whole. The issuer is read from the newer extension, and
@@ -169,6 +173,7 @@ pub fn signing_identity(certificate: &Certificate) -> Result<SigningIdentity, Si
         extensions: FulcioExtensions {
             issuer,
             runner_environment: claim(OID_FULCIO_RUNNER_ENVIRONMENT)?,
+            source_repository_uri: claim(OID_FULCIO_SOURCE_REPOSITORY_URI)?,
             source_repository_digest: claim(OID_FULCIO_SOURCE_REPOSITORY_DIGEST)?,
             source_repository_ref: claim(OID_FULCIO_SOURCE_REPOSITORY_REF)?,
             source_repository_identifier: claim(OID_FULCIO_SOURCE_REPOSITORY_IDENTIFIER)?,

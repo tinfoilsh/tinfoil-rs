@@ -956,6 +956,7 @@ impl Verifier {
         let hash: [u8; SHA256_SIZE] = digest
             .try_into()
             .map_err(|_| Refused::rejected("config digest is not a SHA-256"))?;
+        self.authenticate_containers(trust, document, &hash)?;
         let (measurements, runtime) =
             self.resolve_runtime(trust, document, &expected_runtime, now)?;
         let (endorsements, platform) = self.resolve_platform(trust, document, now)?;
@@ -1069,6 +1070,30 @@ impl Verifier {
             signature_time: approved.signature_time.map(system_time).transpose()?,
         };
         Ok((expected, record, Some(approved.approval_time)))
+    }
+
+    /// Authenticates the container builds that the config with the
+    /// verified `digest` requires. It reads them from config bytes that
+    /// have that digest: the caller's, or else the document's. Without such
+    /// bytes there is nothing to check.
+    fn authenticate_containers(
+        &self,
+        trust: &Trust,
+        document: &Document,
+        digest: &[u8; SHA256_SIZE],
+    ) -> Result<(), EndorsementError> {
+        let embedded = self.embedded.config.as_ref();
+        let carried = || {
+            let config = document.config_endorsement().ok()?.config()?;
+            (Sha256::digest(config)[..] == digest[..]).then_some(config)
+        };
+        let Some(config) = embedded
+            .and_then(|embedded| embedded.bytes.as_deref())
+            .or_else(carried)
+        else {
+            return Ok(());
+        };
+        trust.endorsements.authenticate_containers(config, document)
     }
 
     /// Resolves the runtime that a config pins: its launch measurements

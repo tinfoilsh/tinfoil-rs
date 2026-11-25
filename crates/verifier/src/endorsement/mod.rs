@@ -5,7 +5,8 @@
 //! [`sigstore`](crate::sigstore):
 //!
 //! - build provenance: a bundle signed by a pinned GitHub Actions workflow
-//!   identity ([`provenance`], [`runtime`]);
+//!   identity ([`provenance`], [`runtime`]), or by the workflow that a
+//!   config requires for a container image ([`container`]);
 //! - freshness witnesses of the repository-release flow: a bundle signed by
 //!   the witness workflow, dated by the transparency log ([`freshness`]);
 //! - approvals: config endorsements and artifact freshness statements
@@ -18,6 +19,7 @@
 pub mod approval;
 #[cfg(test)]
 mod approval_tests;
+pub mod container;
 pub mod freshness;
 #[cfg(test)]
 mod probe_tests;

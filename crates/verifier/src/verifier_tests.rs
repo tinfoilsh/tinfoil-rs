@@ -1400,6 +1400,149 @@ fn a_config_authorizer_sees_the_material_of_the_document() {
     }
 }
 
+/// The published build attestation of the image with
+/// [`CONTAINER_DIGEST`], which meets [`CONTAINER_PROVENANCE`].
+const CONTAINER_BUNDLE: &str =
+    include_str!("../tests/data/endorsement/container_provenance_bundle.json");
+const CONTAINER_DIGEST: &str = "85306e3ab312a2d80466e901081e855cc53f21c4802c638f861e6ef31ba4f5d1";
+const CONTAINER_PROVENANCE: &str = r#"{"github":{"repository":"tinfoilsh/measure-image-action","repository_id":"924941172","workflow":"build.yml","ref":"refs/tags/build-v0.14.2","commit":"01a05df207140a8e8e1d2cd26028ab7c51dad9d1"}}"#;
+
+/// A document here has no authentic quote, so one whose container builds
+/// pass is rejected at the quote layer.
+#[test]
+fn a_config_is_held_to_the_container_builds_that_it_requires() {
+    use crate::document::collateral::{
+        CONFIG_ID, CONFIG_V1_FORMAT, CONTAINER_PROVENANCE_V1_FORMAT, FORMAT_V3,
+    };
+    use crate::document::tests::TestDocument;
+
+    let inputs = Inputs::new();
+    // The config of the inputs with a container that runs the recorded
+    // image under the given provenance member.
+    let requiring = |provenance: &str| {
+        let plain = std::str::from_utf8(&inputs.config).unwrap();
+        format!(
+            r#"{},"containers":[{{"name":"app","image":"ghcr.io/tinfoilsh/measure-image-action@sha256:{CONTAINER_DIGEST}","provenance":{provenance}}}]}}"#,
+            plain.strip_suffix('}').unwrap()
+        )
+        .into_bytes()
+    };
+    let carried = |config: &[u8]| {
+        format!(
+            r#"{{"id":"{CONFIG_ID}","role":"reference-values","format":"{CONFIG_V1_FORMAT}","data":{{"config_base64":"{}"}}}}"#,
+            STANDARD.encode(config)
+        )
+    };
+    let proof = format!(
+        r#"{{"id":"container:sha256:{CONTAINER_DIGEST}","role":"reference-values","format":"{CONTAINER_PROVENANCE_V1_FORMAT}","data":{{"digest":"{CONTAINER_DIGEST}","sigstore_bundle":{CONTAINER_BUNDLE}}}}}"#
+    );
+    let required = requiring(CONTAINER_PROVENANCE);
+    let other_workflow = requiring(&CONTAINER_PROVENANCE.replace("build.yml", "release.yml"));
+    let unreadable = requiring(r#"{"gitlab":{}}"#);
+    let authorized = || ConfigTrust::Authorizer(ConfigAuthorizer::new(accept));
+    let embedded = |config: &[u8]| {
+        ConfigTrust::Embedded(EmbeddedConfig::Bytes {
+            bytes: config.to_vec(),
+            name: None,
+        })
+    };
+    let reference = |config: &[u8]| {
+        ConfigTrust::Embedded(EmbeddedConfig::Reference {
+            digest: encode_lower_hex(&Sha256::digest(config)),
+            runtime: inputs.runtime_reference(),
+            name: None,
+        })
+    };
+
+    let cases: [(&str, ConfigTrust, Vec<String>, Layer); 12] = [
+        (
+            "authorized, proven",
+            authorized(),
+            vec![carried(&required), proof.clone()],
+            Layer::Quote,
+        ),
+        (
+            "authorized, no entry",
+            authorized(),
+            vec![carried(&required)],
+            Layer::Provenance,
+        ),
+        (
+            "authorized, another workflow",
+            authorized(),
+            vec![carried(&other_workflow), proof.clone()],
+            Layer::Provenance,
+        ),
+        (
+            "authorized, unknown kind",
+            authorized(),
+            vec![carried(&unreadable), proof.clone()],
+            Layer::Provenance,
+        ),
+        (
+            "embedded, proven",
+            embedded(&required),
+            vec![proof.clone()],
+            Layer::Quote,
+        ),
+        (
+            "embedded, no entry",
+            embedded(&required),
+            vec![],
+            Layer::Provenance,
+        ),
+        (
+            "embedded, unknown kind",
+            embedded(&unreadable),
+            vec![proof.clone()],
+            Layer::Provenance,
+        ),
+        (
+            "reference, document's bytes, proven",
+            reference(&required),
+            vec![carried(&required), proof.clone()],
+            Layer::Quote,
+        ),
+        (
+            "reference, document's bytes, no entry",
+            reference(&required),
+            vec![carried(&required)],
+            Layer::Provenance,
+        ),
+        (
+            "reference, document's bytes, not JSON",
+            reference(b"containers: []\n"),
+            vec![carried(b"containers: []\n")],
+            Layer::Provenance,
+        ),
+        (
+            "reference, no bytes",
+            reference(&required),
+            vec![],
+            Layer::Quote,
+        ),
+        (
+            "reference, bytes of another config",
+            reference(&required),
+            vec![carried(&unreadable)],
+            Layer::Quote,
+        ),
+    ];
+    for (name, config, entries, want) in cases {
+        let verifier = Verifier::new(config, inputs.artifacts()).unwrap();
+        let nonce = crate::document::random_nonce().unwrap();
+        let document = TestDocument::new(&nonce)
+            .with_collateral(Some(FORMAT_V3), &format!("[{}]", entries.join(",")))
+            .render();
+        let Err(Error::Verification(rejected)) =
+            verifier.verify_v3(document.as_bytes(), &nonce, &Pin::none())
+        else {
+            panic!("{name}: want a rejection");
+        };
+        assert_eq!(rejected.layer(), want, "{name}: {rejected}");
+    }
+}
+
 #[test]
 fn the_accepted_registries_are_never_left_open_by_default() {
     // Without a list, a config endorsement of any registry would pass. Only

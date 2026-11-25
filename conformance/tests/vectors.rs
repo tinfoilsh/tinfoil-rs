@@ -40,6 +40,7 @@ const FACTS: [&str; 7] = [
 #[cfg(tinfoil_conformance)]
 const MUST_PASS: &[&str] = &[
     "approval-bundle",
+    "container-provenance",
     "embedded-roots",
     "envelope",
     "freshness",

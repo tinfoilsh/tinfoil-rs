@@ -29,7 +29,7 @@ pub struct Freshness {
     pub bundle: Value,
 }
 
-fn missing_bundle(format: &str, id: &str) -> CollateralError {
+pub(super) fn missing_bundle(format: &str, id: &str) -> CollateralError {
     CollateralError::invalid(format!(
         "{format} collateral entry {id:?} is missing sigstore_bundle"
     ))
