@@ -54,9 +54,11 @@ pub const STAGE_AUTHENTICATE_QUOTE: &str = "v3-authenticate-quote";
 pub const STAGE_AUTHENTICATE_APPROVAL: &str = "v3-authenticate-approval";
 /// An RFC 3161 timestamp response against the trusted timestamp authorities.
 pub const STAGE_VERIFY_TIMESTAMP: &str = "v3-verify-timestamp";
+/// The container builds that the document's config requires.
+pub const STAGE_AUTHENTICATE_CONTAINERS: &str = "v3-authenticate-containers";
 
 /// Every stage name of the wire contract.
-pub const STAGES: [&str; 7] = [
+pub const STAGES: [&str; 8] = [
     STAGE_VERIFY,
     STAGE_CHECK_ENVELOPE,
     STAGE_AUTHENTICATE_PROVENANCE,
@@ -64,6 +66,7 @@ pub const STAGES: [&str; 7] = [
     STAGE_AUTHENTICATE_QUOTE,
     STAGE_AUTHENTICATE_APPROVAL,
     STAGE_VERIFY_TIMESTAMP,
+    STAGE_AUTHENTICATE_CONTAINERS,
 ];
 
 /// The stages that this build of the adapter implements, in the order of
@@ -967,6 +970,109 @@ mod stage_tests {
                 }),
                 "{name}"
             );
+        }
+    }
+
+    /// The published build attestation of the image with
+    /// [`CONTAINER_DIGEST`], which meets [`CONTAINER_PROVENANCE`] under the
+    /// embedded Sigstore root.
+    const CONTAINER_BUNDLE: &str = include_str!(
+        "../../crates/verifier/tests/data/endorsement/container_provenance_bundle.json"
+    );
+    const CONTAINER_DIGEST: &str =
+        "85306e3ab312a2d80466e901081e855cc53f21c4802c638f861e6ef31ba4f5d1";
+    const CONTAINER_PROVENANCE: &str = r#","provenance":{"github":{"repository":"tinfoilsh/measure-image-action","repository_id":"924941172","workflow":"build.yml","ref":"refs/tags/build-v*"}}"#;
+    /// A trusted root that does not authenticate the recorded bundle.
+    const OTHER_TRUSTED_ROOT: &[u8] = include_bytes!(
+        "../../crates/verifier/tests/data/sigstore/rekor_v2_staging_trusted_root.json"
+    );
+
+    #[test]
+    fn the_container_stage_answers_for_the_builds_that_the_config_requires() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+        use tinfoil_verifier::conformance::document::collateral::{
+            CONFIG_ID, CONFIG_V1_FORMAT, CONTAINER_PROVENANCE_V1_FORMAT, FORMAT_V3,
+            ROLE_REFERENCE_VALUES,
+        };
+
+        // The entry of a config whose container runs the recorded image and
+        // has the given members besides.
+        let config = |members: &str| {
+            let config = format!(
+                r#"{{"containers":[{{"image":"ghcr.io/tinfoilsh/measure-image-action@sha256:{CONTAINER_DIGEST}"{members}}}]}}"#
+            );
+            format!(
+                r#"{{"id":"{CONFIG_ID}","role":"{ROLE_REFERENCE_VALUES}","format":"{CONFIG_V1_FORMAT}","data":{{"config_base64":"{}"}}}}"#,
+                STANDARD.encode(config)
+            )
+        };
+        let proof = format!(
+            r#"{{"id":"container:sha256:{CONTAINER_DIGEST}","role":"{ROLE_REFERENCE_VALUES}","format":"{CONTAINER_PROVENANCE_V1_FORMAT}","data":{{"digest":"{CONTAINER_DIGEST}","sigstore_bundle":{CONTAINER_BUNDLE}}}}}"#
+        );
+        // [`DOCUMENT_B64`] with the given collateral entries, which go
+        // before the brace that closes the document.
+        let document = |entries: &[&str]| {
+            let document = String::from_utf8(decode_base64(DOCUMENT_B64).unwrap()).unwrap();
+            format!(
+                r#"{},"collateral":[{}],"collateral_format":"{FORMAT_V3}"}}"#,
+                document.strip_suffix('}').unwrap(),
+                entries.join(",")
+            )
+        };
+        let required = config(CONTAINER_PROVENANCE);
+        let other_workflow = config(&CONTAINER_PROVENANCE.replace("build.yml", "release.yml"));
+        let unknown_kind = config(r#","provenance":{"gitlab":{}}"#);
+        let proven = document(&[&required, &proof]);
+        let cases = [
+            ("proven", proven.clone(), &b""[..], EXIT_ACCEPTED),
+            (
+                "no requirement",
+                document(&[&config("")]),
+                b"",
+                EXIT_ACCEPTED,
+            ),
+            ("no entry", document(&[&required]), b"", EXIT_REJECTED),
+            (
+                "another workflow",
+                document(&[&other_workflow, &proof]),
+                b"",
+                EXIT_REJECTED,
+            ),
+            (
+                "unknown kind",
+                document(&[&unknown_kind, &proof]),
+                b"",
+                EXIT_REJECTED,
+            ),
+            ("no config", document(&[&proof]), b"", EXIT_REJECTED),
+            (
+                "another trusted root",
+                proven,
+                OTHER_TRUSTED_ROOT,
+                EXIT_REJECTED,
+            ),
+            ("undecodable document", "{}".to_owned(), b"", EXIT_MALFORMED),
+        ];
+        for (name, document, trusted_root, want) in cases {
+            let input = serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "document_b64": STANDARD.encode(document),
+                "sigstore_trusted_root_json_b64": STANDARD.encode(trusted_root),
+            });
+            let (output, exit) = run(STAGE_AUTHENTICATE_CONTAINERS, input.to_string().as_bytes());
+            assert_eq!(exit, want, "{name}");
+            let code = match want {
+                EXIT_ACCEPTED => None,
+                EXIT_REJECTED => Some(CODE_PROVENANCE_REJECTED),
+                _ => Some(CODE_MALFORMED_INPUT),
+            };
+            let rejection = code.map(|code| Rejection {
+                code: code.to_owned(),
+            });
+            assert_eq!(output.rejection, rejection, "{name}");
+            assert_eq!(output.accepted, want == EXIT_ACCEPTED, "{name}");
+            assert_eq!(output.outputs, None, "{name}");
         }
     }
 
