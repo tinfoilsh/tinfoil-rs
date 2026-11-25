@@ -434,6 +434,17 @@ impl Document {
         self.collateral.config_platform()
     }
 
+    /// The unauthenticated build attestation, a Sigstore bundle, of the
+    /// container image with the given SHA-256 digest, lowercase hex.
+    pub fn container_provenance(&self, digest: &str) -> Result<&Value, CollateralError> {
+        self.collateral.containers.get(digest).ok_or_else(|| {
+            not_found(format!(
+                "document carries no {} reference-values entry for sha256:{digest}",
+                collateral::CONTAINER_PROVENANCE_V1_FORMAT
+            ))
+        })
+    }
+
     /// The report data that the document's CPU quote must bind, recomputed
     /// from the caller's nonce and the endorsed sections. `None` for a
     /// document whose challenge was never checked against a nonce.

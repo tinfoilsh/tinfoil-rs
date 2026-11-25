@@ -6,6 +6,7 @@
 //! and a tampered one can only cause a rejection.
 
 mod config;
+mod container;
 mod runtime;
 mod sev;
 mod sigstore;
@@ -19,6 +20,7 @@ use crate::json::decode::{self, DecodeError};
 use crate::json::{Object, Value};
 
 pub use config::ConfigEndorsement;
+pub use container::CONTAINER_PROVENANCE_V1_FORMAT;
 pub use runtime::{
     PLATFORM_ID, RUNTIME_ID, RUNTIME_REPO, RUNTIME_V1_FORMAT, Runtime, RuntimeReference,
 };
@@ -206,6 +208,9 @@ pub struct Set {
     pub runtime: Option<Runtime>,
     /// The freshness witnesses by entry id.
     pub freshness: BTreeMap<String, Freshness>,
+    /// The container build attestations, as Sigstore bundles, by image
+    /// digest.
+    pub containers: BTreeMap<String, Value>,
     /// How many entries claim the platform id or the platform format.
     platform_count: usize,
     /// Whether a platform reference carries the reserved platform id.
@@ -310,6 +315,9 @@ pub fn decode(entries: Vec<Entry>) -> Result<Set, CollateralError> {
             if set.sigstore_platform.is_none() {
                 set.sigstore_platform = Some(reference);
             }
+        } else if role == ROLE_REFERENCE_VALUES && format == CONTAINER_PROVENANCE_V1_FORMAT {
+            let (digest, bundle) = container::decode(entry)?;
+            set.containers.entry(digest).or_insert(bundle);
         } else if role == ROLE_REFERENCE_VALUES && format == SIGSTORE_FRESHNESS_V1_FORMAT {
             // Entry ids are unique, so no witness is replaced.
             let (id, witness) = sigstore::decode_freshness(entry)?;
