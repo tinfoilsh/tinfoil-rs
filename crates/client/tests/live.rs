@@ -26,7 +26,7 @@ async fn the_router_is_discovered_verified_and_reached_over_a_pinned_connection(
         .await
         .unwrap();
 
-    let report = client.last_verification().unwrap();
+    let report = client.last_verification_attempt().unwrap();
     let verified = report.verified_facts().unwrap();
     assert_eq!(
         verified.config_repo(),
@@ -34,6 +34,24 @@ async fn the_router_is_discovered_verified_and_reached_over_a_pinned_connection(
     );
     assert!(verified.tls_public_key_fp().is_some());
     assert!(verified.freshness_expires_at().is_some());
+
+    // Every report that the client hands out names the router that it
+    // chose, in its metadata and in its JSON form.
+    let host = Some(client.enclave().to_owned());
+    let current = client.current_verification().unwrap();
+    assert_eq!(current, report);
+    let ensured = client.ensure_verified().await.unwrap();
+    let reverified = client.reverify().await.unwrap();
+    for report in [&report, &ensured, &reverified] {
+        assert_eq!(report.metadata().host, host);
+        assert!(
+            report
+                .to_json()
+                .contains(&format!("\"host\":\"{}\"", client.enclave())),
+            "{}",
+            report.to_json()
+        );
+    }
 
     let models = client
         .get(client.base_url().join("v1/models").unwrap())
@@ -103,7 +121,7 @@ mod openai {
             .await
             .unwrap();
         let client = OpenAIClient::new(http, OpenAIOptions::default(), openai_config()).unwrap();
-        let report = client.http_client().last_verification().unwrap();
+        let report = client.http_client().last_verification_attempt().unwrap();
         assert!(report.verified_facts().unwrap().hpke_public_key().is_some());
         let response = client.chat().create(chat_request()).await.unwrap();
         assert!(!response.choices.is_empty());

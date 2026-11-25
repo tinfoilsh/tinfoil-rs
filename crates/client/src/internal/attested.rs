@@ -166,17 +166,25 @@ impl<V: Evidence> AttestedClient<V> {
         self.mode
     }
 
-    /// As [`Transport::current`], for the tests.
+    /// As [`Transport::last_success`], for the tests.
     #[cfg(test)]
-    pub(crate) fn current(&self) -> Arc<V> {
-        self.transport.current()
+    pub(crate) fn last_success(&self) -> Arc<V> {
+        self.transport.last_success()
     }
 
-    /// As [`Transport::last_verification`], with a copy of the evidence
+    /// As [`Transport::current_verification`], with a copy of the evidence
     /// for the caller to keep.
-    pub(crate) fn last_verification(&self) -> Result<V, Error> {
+    pub(crate) fn current_verification(&self) -> Option<V> {
         self.transport
-            .last_verification()
+            .current_verification()
+            .map(|evidence| V::clone(&evidence))
+    }
+
+    /// As [`Transport::last_verification_attempt`], with a copy of the evidence
+    /// for the caller to keep.
+    pub(crate) fn last_verification_attempt(&self) -> Result<V, Error> {
+        self.transport
+            .last_verification_attempt()
             .map(|evidence| V::clone(&evidence))
     }
 

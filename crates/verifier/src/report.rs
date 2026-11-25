@@ -38,7 +38,9 @@ const LAYERS: [Layer; 4] = [
 ///
 /// A report authorizes nothing by itself: only the endorsed keys in its
 /// verified facts may be bound to a channel. Only the verifier creates a
-/// report, and it cannot be changed afterwards.
+/// report, and it cannot be changed afterwards, except for the host that
+/// its metadata names ([`with_host`](Self::with_host)), which is not
+/// attested.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationReport {
     steps: Vec<Step>,
@@ -74,6 +76,24 @@ impl VerificationReport {
         &self.metadata
     }
 
+    /// The report with `host` as its metadata's
+    /// [`host`](VerificationMetadata::host): the host that the document was
+    /// fetched from, which the verifier does not know. The clients of the
+    /// `tinfoil` crate set it on every report that they hand out. It is
+    /// not attested and changes nothing else in the report. An empty
+    /// `host` names no host: it leaves the host `None`, since the JSON form
+    /// has no empty member.
+    #[must_use]
+    pub fn with_host(mut self, host: impl Into<String>) -> Self {
+        self.set_host(host.into());
+        self
+    }
+
+    /// Names `host` in the metadata, or no host when it is empty.
+    pub(crate) fn set_host(&mut self, host: String) {
+        self.metadata.host = Some(host).filter(|host| !host.is_empty());
+    }
+
     /// The step that failed, or `None` when none did. At most one step
     /// fails: the step of the layer that rejected the document.
     pub fn failed_step(&self) -> Option<&Step> {
@@ -107,7 +127,8 @@ impl VerificationReport {
     ///   },
     ///   "metadata": {
     ///     "verified_at": "<RFC 3339, UTC>",
-    ///     "verifier": {"name": "tinfoil-rs", "version": "<version>"}
+    ///     "verifier": {"name": "tinfoil-rs", "version": "<version>"},
+    ///     "host": "<host[:port]>"
     ///   }
     /// }
     /// ```
@@ -130,8 +151,11 @@ impl VerificationReport {
     ///   `measurement`; and `measured`, once the envelope step passed, with
     ///   `cpu_measurement`, `tls_public_key_fp` and `hpke_public_key_fp`.
     ///   The key fingerprints are the document's claim, never verified;
-    /// - `metadata`: `verified_at` and, when its name and version are
-    ///   known, `verifier`, with `name` and `version`.
+    /// - `metadata`: `verified_at`; when its name and version are known,
+    ///   `verifier`, with `name` and `version`; and `host`, only in a report
+    ///   that names the host that a client contacted
+    ///   ([`VerificationMetadata::host`]). The host is not attested, so it
+    ///   proves nothing about the enclave.
     ///
     /// Exactly one of `verified_facts` and `partial_facts` is present. A
     /// measurement names its `platform`, `sev-snp` with `launch` or `tdx`
@@ -183,6 +207,7 @@ impl VerificationReport {
                     version: "0".to_owned(),
                 },
                 verified_at: std::time::SystemTime::UNIX_EPOCH,
+                host: None,
             },
         )
     }
@@ -534,6 +559,7 @@ mod tests {
                 version: "1.0.0".to_owned(),
             },
             verified_at: std::time::SystemTime::UNIX_EPOCH,
+            host: None,
         }
     }
 

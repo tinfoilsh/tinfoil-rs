@@ -385,16 +385,32 @@ impl<V: Evidence> Transport<V> {
 
     /// The last successful verification, unchecked: it may have expired or
     /// been invalidated. For the tests of the state that the transport
-    /// keeps; the clients report [`last_verification`](Self::last_verification).
+    /// keeps; the clients report
+    /// [`current_verification`](Self::current_verification) and
+    /// [`last_verification_attempt`](Self::last_verification_attempt).
     #[cfg(test)]
-    pub(crate) fn current(&self) -> Arc<V> {
+    pub(crate) fn last_success(&self) -> Arc<V> {
         Arc::clone(&self.inner.slot().state.evidence)
+    }
+
+    /// The verification that requests are bound to now, without I/O: the
+    /// last successful verification while it authorizes a request, as the
+    /// transport judges it before sending one. `None` once its freshness
+    /// deadline has passed, and once something has invalidated it: a
+    /// verification that failed with an attestation error, or a key
+    /// rejection. Any other failure, and a verification that every caller
+    /// dropped, leave it as it was. It never starts a verification.
+    pub(crate) fn current_verification(&self) -> Option<Arc<V>> {
+        let slot = self.inner.slot();
+        self.inner
+            .valid(&slot.state)
+            .map(|_| Arc::clone(&slot.state.evidence))
     }
 
     /// The outcome of the last attempt to verify the enclave, without I/O
     /// and unchecked: a success may have expired or been invalidated since.
     /// A failure is the error that the attempt was reported with.
-    pub(crate) fn last_verification(&self) -> Result<Arc<V>, Error> {
+    pub(crate) fn last_verification_attempt(&self) -> Result<Arc<V>, Error> {
         self.inner.slot().last.clone()
     }
 

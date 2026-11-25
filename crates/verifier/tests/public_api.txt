@@ -67,6 +67,7 @@ field SoftwareIdentity.version
 field Step.layer
 field Step.message
 field Step.status
+field VerificationMetadata.host
 field VerificationMetadata.verified_at
 field VerificationMetadata.verifier
 fn ConfigAuthorizer::new
@@ -92,12 +93,14 @@ fn Register::new
 fn StepStatus::as_str
 fn VerificationError::layer
 fn VerificationError::report
+fn VerificationError::with_host
 fn VerificationReport::failed_step
 fn VerificationReport::metadata
 fn VerificationReport::partial_facts
 fn VerificationReport::steps
 fn VerificationReport::to_json
 fn VerificationReport::verified_facts
+fn VerificationReport::with_host
 fn VerifiedFacts::code_digest
 fn VerifiedFacts::code_measurement
 fn VerifiedFacts::code_tag

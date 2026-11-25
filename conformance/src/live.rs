@@ -249,7 +249,7 @@ async fn verify(request: &Request) -> Outcome {
     }
     // The verification that the connection was pinned to: the last
     // attempt, which passed, or the request would have failed.
-    let report = match client.last_verification() {
+    let report = match client.last_verification_attempt() {
         Ok(report) => report,
         Err(error) => {
             let verdict = verification_verdict(error.kind(), rejecting_layer(&error));

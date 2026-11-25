@@ -211,10 +211,10 @@ async fn verify(client: &tinfoil::Client) -> Result<(), tinfoil::Error> {
 | `SecureClient::new_with_proxy(host, repo, api_key, proxy_url)` + `verify()` | `EnclaveHttpClient::builder(host, Trust::repo(repo)).transport(Transport::Ehbp { proxy_url: Some(proxy_url.to_owned()) }).connect()` |
 | `SecureClient::new_default_client(api_key)` | `RouterHttpClient::connect()` |
 | `SecureClient::with_measurement(host, api_key, measurement)` | a `Policy` with `pinned_registers`; see below |
-| `is_verified()` | removed: `connect` verifies before it returns a client, and a request verifies first when the client holds no valid verification. `last_verification()` returns the most recent attempt, which may be a failure |
+| `is_verified()` | removed: `connect` verifies before it returns a client, and a request verifies first when the client holds no valid verification. `current_verification()` returns the verification that requests are bound to now, or `None` once it has expired or been discarded; `last_verification_attempt()` returns the most recent attempt, which may be a failure |
 | `verify(&mut self)` | `ensure_verified()` / `reverify()` on `&self` |
-| `ground_truth()`, `ground_truth_json()` | `last_verification()?.verified_facts()`, and its `to_json()` |
-| `verification_document()`, `verification_document_json()` | `last_verification()`, and the report's `to_json()`; see [Verification results](#verification-results) |
+| `ground_truth()`, `ground_truth_json()` | the `verified_facts()` of `current_verification()`, and its `to_json()` |
+| `verification_document()`, `verification_document_json()` | `last_verification_attempt()`, and the report's `to_json()`; see [Verification results](#verification-results) |
 | `http_client()` | the request methods are on the client itself: `client.get(url)`, `client.post(url)`, `client.execute(request)` |
 | `host()` | `enclave()` |
 | `base_url()` → `String`, `request_base_url()` | `base_url()` → `&Url`: where requests are sent (the proxy, when one is set). Its path ends in `/` |
@@ -299,7 +299,7 @@ see `Trust::EmbeddedConfig` and `Trust::AuthorizedBy`.
 
 | 0.2 | 0.3 |
 |---|---|
-| `GroundTruth` | `tinfoil::verifier::VerifiedFacts`, the `verified_facts()` of the `VerificationReport` that `last_verification()`, `ensure_verified()` or `reverify()` returns |
+| `GroundTruth` | `tinfoil::verifier::VerifiedFacts`, the `verified_facts()` of the `VerificationReport` that `current_verification()`, `last_verification_attempt()`, `ensure_verified()` or `reverify()` returns |
 | its TLS fingerprint and HPKE key fields | `tls_public_key_fp()`, `hpke_public_key()` |
 | its digest and measurement fields | `code_digest()`, `code_tag()`, `code_measurement()`, `enclave_measurement()` |
 | `ground_truth_json()` | `to_json()` (a new shape: the JSON form that every Tinfoil SDK writes), or `serde::Serialize` with the verifier's `serde` feature |
@@ -316,15 +316,22 @@ release candidates, to the form that every Tinfoil SDK writes. Compared with
 registers of a rejection are `partial_facts.measured.cpu_measurement`, not
 `cpu.measurement`; a code measurement that fixes no register, an empty
 `code_tag` and an unrepresentable time are left out rather than written as
-`{"platform": ..}`, `""` or `null`; and `metadata.verifier` is left out when
-its name or version is empty. No API reads the JSON back: it authorizes
-nothing.
+`{"platform": ..}`, `""` or `null`; `metadata.verifier` is left out when
+its name or version is empty; and a report that a client hands out names the
+host that the client contacted in `metadata.host`, which
+`VerificationMetadata::host` holds too. No API reads the JSON back: it
+authorizes nothing.
 
 `VerifiedFacts` also has `freshness_expires_at()`, which is when the client
 will verify again, and `config()`, `runtime()` and `platform()`, which describe
-what vouched for the enclave. `last_verification()` returns the most recent
-attempt, a failure included, and the `on_verification` option is called with
-every attempt.
+what vouched for the enclave. `current_verification()` returns the
+verification that requests are bound to now, `last_verification_attempt()`
+returns the most recent attempt, a failure included, and the
+`on_verification_attempt` option is called with every attempt.
+
+Since 0.3.0-rc.3, `last_verification()` is named `last_verification_attempt()`
+and the builders' `on_verification` option is named `on_verification_attempt`,
+each with the same signature and behaviour; `current_verification()` is new.
 
 ## Errors
 
@@ -502,8 +509,9 @@ the `tinfoil-verifier` crate:
 - Intel TDX enclaves, in addition to AMD SEV-SNP.
 - `verification_check`, a veto over the verified facts of every verification
   that a client relies on.
-- `on_verification`, an observer of every attempt to verify, with its report
-  or error, and `last_verification()`.
+- `on_verification_attempt`, an observer of every attempt to verify, with its
+  report or error, `last_verification_attempt()`, and
+  `current_verification()`, the verification that requests are bound to now.
 - `tinfoil-verifier` as a crate of its own, usable without an async runtime.
 - Cargo features `openai-<family>` for the other API families of
   async-openai.

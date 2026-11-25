@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = EnclaveHttpClient::connect(ENCLAVE, trust()).await?;
 
     // What the last verification established, step by step.
-    let report = client.last_verification()?;
+    let report = client.last_verification_attempt()?;
     for step in report.steps() {
         println!("{:<11}  {}", step.layer, step.status);
     }

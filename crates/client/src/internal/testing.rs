@@ -148,3 +148,14 @@ pub(crate) fn rejected_by_verifier() -> Error {
         .expect_err("an empty document is rejected");
     crate::internal::enclave::from_verifier(rejection)
 }
+
+/// The `metadata.host` of a report, read from its JSON form, after
+/// checking that the metadata names the same host.
+pub(crate) fn json_host(report: &crate::verifier::VerificationReport) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
+    let host = value["metadata"]
+        .get("host")
+        .map(|host| host.as_str().expect("a string").to_owned());
+    assert_eq!(host, report.metadata().host, "{value}");
+    host
+}

@@ -203,7 +203,7 @@ async fn connecting_verifies_once_and_binds_to_that_verification() {
     let f = connected(|_| vec![]).await;
     assert_eq!(f.script.calls(), 1);
     assert_eq!(f.mode.bound(), ["a"]);
-    assert_eq!(f.transport.current().name, "a");
+    assert_eq!(f.transport.last_success().name, "a");
     assert_eq!(served_by(&f.transport).await, "a");
     assert_eq!(f.script.calls(), 1);
 }
@@ -262,14 +262,14 @@ async fn a_valid_verification_is_returned_without_verifying() {
 async fn a_verification_is_expired_at_its_deadline_and_the_enclave_is_verified_again() {
     let f = connected(|clock| vec![ok("b", clock, 3 * HOUR)]).await;
     tokio::time::advance(HOUR).await;
-    assert_eq!(f.transport.current().name, "a");
+    assert_eq!(f.transport.last_success().name, "a");
     assert_eq!(
         f.transport.ensure_verified().await.expect("verified").name,
         "b"
     );
     assert_eq!(f.script.calls(), 2);
     assert_eq!(f.mode.bound(), ["a", "b"]);
-    assert_eq!(f.transport.current().name, "b");
+    assert_eq!(f.transport.last_success().name, "b");
     assert_eq!(served_by(&f.transport).await, "b");
 }
 
@@ -299,7 +299,7 @@ async fn a_request_is_not_sent_when_the_verification_it_needs_fails() {
     );
     assert_eq!(failure.key, KeyFailure::None);
     assert!(f.mode.sent().is_empty());
-    assert_eq!(f.transport.current().name, "a");
+    assert_eq!(f.transport.last_success().name, "a");
 }
 
 #[tokio::test(start_paused = true)]
@@ -370,7 +370,7 @@ async fn evidence_that_expires_while_the_mode_binds_is_not_published() {
             .contains("freshness witnesses have expired"),
         "{error}"
     );
-    assert_eq!(transport.current().name, "a");
+    assert_eq!(transport.last_success().name, "a");
     // The binding that was never published is retired, and so is the one
     // that it was to replace: the failure is an attestation error.
     assert_eq!(mode.retired(), ["b", "a"]);
@@ -383,7 +383,7 @@ async fn reverify_verifies_even_when_the_current_verification_is_valid() {
     let f = connected(|clock| vec![ok("b", clock, HOUR)]).await;
     assert_eq!(f.transport.reverify().await.expect("verified").name, "b");
     assert_eq!(f.script.calls(), 2);
-    assert_eq!(f.transport.current().name, "b");
+    assert_eq!(f.transport.last_success().name, "b");
     assert_eq!(served_by(&f.transport).await, "b");
 }
 
@@ -398,7 +398,7 @@ async fn a_reverify_that_fails_with_a_network_error_keeps_the_previous_binding_i
     .await;
     let error = f.transport.reverify().await.expect_err("fails");
     assert_eq!(error.to_string(), "network error: still down");
-    assert_eq!(f.transport.current().name, "a");
+    assert_eq!(f.transport.last_success().name, "a");
     assert_eq!(
         f.transport
             .ensure_verified()
@@ -444,14 +444,14 @@ async fn a_reverify_that_fails_attestation_discards_a_fresh_verification() {
     assert_eq!(f.script.calls(), 3);
     // The last successful verification is still reported, but its binding
     // is gone, although it had an hour left.
-    assert_eq!(f.transport.current().name, "a");
+    assert_eq!(f.transport.last_success().name, "a");
     assert_eq!(f.mode.retired(), ["a"]);
 
     // The next request verifies first, and goes out under the new keys.
     assert_eq!(served_by(&f.transport).await, "b");
     assert_eq!(f.script.calls(), 4);
     assert_eq!(f.mode.sent(), ["b"]);
-    assert_eq!(f.transport.current().name, "b");
+    assert_eq!(f.transport.last_success().name, "b");
 }
 
 #[tokio::test(start_paused = true)]
@@ -486,7 +486,7 @@ async fn a_failed_bind_discards_the_previous_binding() {
         error.to_string(),
         "attestation error: the evidence endorses no key"
     );
-    assert_eq!(f.transport.current().name, "a");
+    assert_eq!(f.transport.last_success().name, "a");
     assert_eq!(f.mode.retired(), ["a"]);
     assert_eq!(served_by(&f.transport).await, "b");
 }
@@ -579,7 +579,7 @@ async fn every_waiter_receives_the_failure_of_the_shared_verification() {
     }
     // One verification: its first attempt and its one retry.
     assert_eq!(f.script.calls(), 3);
-    assert_eq!(f.transport.current().name, "a");
+    assert_eq!(f.transport.last_success().name, "a");
 }
 
 #[tokio::test(start_paused = true)]
@@ -627,7 +627,7 @@ async fn a_check_that_panics_fails_the_shared_verification_for_every_waiter_and_
     }
     // A rejection is not tried again, and nothing was bound to it.
     assert_eq!(script.calls(), 2);
-    assert_eq!(transport.current().name, "a");
+    assert_eq!(transport.last_success().name, "a");
     assert_eq!(mode.bound(), ["a"]);
 
     // The transport is as usable as after any failed verification.
@@ -715,7 +715,7 @@ async fn dropping_one_waiter_leaves_the_verification_to_the_others() {
             assert_eq!(waiter.await.expect("joined").expect("verified").name, "b");
         }
         assert_eq!(f.script.calls(), 2, "waiter {dropped} dropped");
-        assert_eq!(f.transport.current().name, "b");
+        assert_eq!(f.transport.last_success().name, "b");
     }
 }
 
@@ -745,7 +745,7 @@ async fn dropping_every_waiter_abandons_the_verification_and_the_next_caller_sta
     }
 
     // Nothing was published, and the transport is not waiting on anything.
-    assert_eq!(f.transport.current().name, "a");
+    assert_eq!(f.transport.last_success().name, "a");
     assert_eq!(
         f.transport.ensure_verified().await.expect("verified").name,
         "b"
@@ -754,7 +754,7 @@ async fn dropping_every_waiter_abandons_the_verification_and_the_next_caller_sta
     // The abandoned attempt is gone: releasing it publishes nothing.
     gate.notify_one();
     settle().await;
-    assert_eq!(f.transport.current().name, "b");
+    assert_eq!(f.transport.last_success().name, "b");
     assert_eq!(f.mode.bound(), ["a", "b"]);
 }
 
@@ -786,7 +786,7 @@ async fn a_dropped_reverify_leaves_the_previous_binding_in_place() {
         connected(|clock| vec![Step::Gated(Arc::clone(&gate), Ok(record("b", clock, HOUR)))]).await;
     let abandoned = tokio::time::timeout(Duration::from_secs(5), f.transport.reverify()).await;
     assert!(abandoned.is_err());
-    assert_eq!(f.transport.current().name, "a");
+    assert_eq!(f.transport.last_success().name, "a");
     assert_eq!(
         f.transport
             .ensure_verified()
@@ -849,14 +849,14 @@ async fn a_key_rejection_invalidates_the_verification_and_the_next_request_verif
     assert_eq!(failure.error.kind(), ErrorKind::Attestation);
     // The last successful verification is still reported, and nothing has
     // been verified yet, but the rejected binding is gone.
-    assert_eq!(f.transport.current().name, "a");
+    assert_eq!(f.transport.last_success().name, "a");
     assert_eq!(f.script.calls(), 1);
     assert_eq!(f.mode.retired(), ["a"]);
 
     assert_eq!(served_by(&f.transport).await, "b");
     assert_eq!(f.script.calls(), 2);
     assert_eq!(f.mode.sent(), ["a", "b"]);
-    assert_eq!(f.transport.current().name, "b");
+    assert_eq!(f.transport.last_success().name, "b");
 }
 
 #[tokio::test(start_paused = true)]
@@ -999,7 +999,7 @@ async fn observed(
 /// The name of the last verification's evidence, or its error's message.
 fn last(transport: &Transport<Record>) -> Result<&'static str, String> {
     transport
-        .last_verification()
+        .last_verification_attempt()
         .map(|evidence| evidence.name)
         .map_err(|error| error.to_string())
 }
@@ -1046,7 +1046,10 @@ async fn a_rejection_by_the_verifier_reaches_the_caller_and_the_observer_with_it
         Some(crate::verifier::Layer::Envelope)
     );
     // The last verification is the same error, report and all.
-    let last = f.transport.last_verification().expect_err("a failure");
+    let last = f
+        .transport
+        .last_verification_attempt()
+        .expect_err("a failure");
     assert_eq!(last.to_string(), error.to_string());
     assert!(rejected_report(&last).is_some());
     assert_eq!(
@@ -1096,7 +1099,7 @@ async fn a_failed_reverification_replaces_the_earlier_success() {
     );
     // The state that admits requests is another matter: a configuration
     // error keeps it.
-    assert_eq!(f.transport.current().name, "a");
+    assert_eq!(f.transport.last_success().name, "a");
     assert_eq!(told(&log).len(), 2);
 }
 
@@ -1331,7 +1334,7 @@ async fn an_abandoned_attempt_is_neither_kept_nor_told() {
 #[tokio::test(start_paused = true)]
 async fn a_returned_verification_is_a_copy_for_the_caller() {
     let (f, _) = observed(|clock| vec![ok("a", clock, HOUR)], |_| vec![]).await;
-    let mut copy = Record::clone(&f.transport.last_verification().unwrap());
+    let mut copy = Record::clone(&f.transport.last_verification_attempt().unwrap());
     copy.name = "changed";
     copy.tls = None;
     assert_eq!(last(&f.transport), Ok("a"));

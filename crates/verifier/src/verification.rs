@@ -107,9 +107,9 @@ pub struct SoftwareIdentity {
     pub version: String,
 }
 
-/// How a verification was performed. The verifier fills this in from its
-/// own state; none of it is attested by the document or checked against
-/// it.
+/// How a verification was performed. The verifier and the client that
+/// called it fill this in from their own state; none of it is attested by
+/// the document or checked against it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct VerificationMetadata {
@@ -121,6 +121,15 @@ pub struct VerificationMetadata {
     /// [`Verifier::verify_v3_at`](crate::Verifier::verify_v3_at). It is not
     /// a freshness guarantee.
     pub verified_at: SystemTime,
+    /// The enclave that the client contacted for the document, a host with
+    /// an optional port: for a router client the router that it chose. It
+    /// is what the client connected to, not an attested fact, so it proves
+    /// nothing about the enclave. The verifier does not know the host and
+    /// leaves it `None`; the clients of the `tinfoil` crate set it on every
+    /// report that they hand out, and a caller that calls the verifier
+    /// itself can set it with
+    /// [`VerificationReport::with_host`](crate::VerificationReport::with_host).
+    pub host: Option<String>,
 }
 
 /// The facts proven by the verification of an attestation document,
@@ -311,8 +320,8 @@ impl VerifiedFacts {
 }
 
 impl VerificationMetadata {
-    /// The serialised form of the metadata: `verified_at` and, when its
-    /// name and version are known, `verifier`.
+    /// The serialised form of the metadata: `verified_at`, when its name
+    /// and version are known, `verifier`, and, when it is set, `host`.
     pub(crate) fn record(&self) -> Json {
         let mut members = Vec::new();
         push_time(&mut members, "verified_at", Some(self.verified_at));
@@ -325,6 +334,7 @@ impl VerificationMetadata {
                 ]),
             ));
         }
+        push_text(&mut members, "host", self.host.as_deref());
         Json::Object(members)
     }
 }

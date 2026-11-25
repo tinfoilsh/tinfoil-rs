@@ -182,6 +182,7 @@ fn golden_metadata() -> VerificationMetadata {
             version: env!("CARGO_PKG_VERSION").to_owned(),
         },
         verified_at: golden_at(),
+        host: None,
     }
 }
 
@@ -338,4 +339,41 @@ fn a_rejection_keeps_empty_facts_and_leaves_out_absent_ones() {
             serde_json::json!({"verified_at": "2026-01-02T02:04:05Z"})
         );
     }
+}
+
+/// `metadata.host` is written only for a report that names a host, and a
+/// rejection's error names it in its report.
+#[test]
+fn the_host_is_written_only_when_a_report_names_one() {
+    let report = ReportBuilder::new().failed(Layer::Envelope, "bad".to_owned(), golden_metadata());
+    assert_eq!(report.metadata().host, None);
+    let value: Value = serde_json::from_str(&report.to_json()).unwrap();
+    assert!(value["metadata"].get("host").is_none(), "{value}");
+
+    let named = report.clone().with_host("enclave.example:8443");
+    assert_eq!(
+        named.metadata().host.as_deref(),
+        Some("enclave.example:8443")
+    );
+    let value: Value = serde_json::from_str(&named.to_json()).unwrap();
+    assert_eq!(value["metadata"]["host"], "enclave.example:8443");
+    assert_eq!(value["schema_version"], 1);
+    #[cfg(feature = "serde")]
+    assert_eq!(serde_json::to_value(&named).unwrap(), value);
+    // Nothing else changed.
+    let mut without: Value = value;
+    without["metadata"].as_object_mut().unwrap().remove("host");
+    assert_eq!(
+        without,
+        serde_json::from_str::<Value>(&report.to_json()).unwrap()
+    );
+
+    // An empty host names none, so the report's host and its JSON agree.
+    let unnamed = report.clone().with_host("");
+    assert_eq!(unnamed.metadata().host, None);
+    assert_eq!(unnamed, report);
+
+    let rejected = crate::VerificationError::new(Layer::Envelope, "bad", report)
+        .with_host("enclave.example:8443");
+    assert_eq!(rejected.report(), &named);
 }

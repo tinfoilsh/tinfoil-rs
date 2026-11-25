@@ -98,7 +98,7 @@ pub(crate) type VerificationCheck = Check<VerifiedFacts>;
 pub(crate) type Notify<V> = Arc<dyn Fn(&str, Result<&V, &Error>) + Send + Sync + 'static>;
 
 /// A caller's observer of each attempt to verify an enclave.
-pub(crate) type OnVerification = Notify<VerificationReport>;
+pub(crate) type OnVerificationAttempt = Notify<VerificationReport>;
 
 /// A string that must not be printed: the user cache secret.
 #[derive(Clone, PartialEq, Eq)]
@@ -127,7 +127,7 @@ impl fmt::Debug for Secret {
 pub(crate) struct CommonOptions {
     pub(crate) policy: Policy,
     pub(crate) verification_check: Option<VerificationCheck>,
-    pub(crate) on_verification: Option<OnVerification>,
+    pub(crate) on_verification_attempt: Option<OnVerificationAttempt>,
     pub(crate) user_cache_secret: Option<Secret>,
     pub(crate) timeout: Option<Duration>,
     pub(crate) attestation_fetcher: Option<Arc<dyn AttestationFetcher>>,
@@ -181,7 +181,10 @@ impl fmt::Debug for CommonOptions {
         f.debug_struct("CommonOptions")
             .field("policy", &self.policy)
             .field("verification_check", &self.verification_check.is_some())
-            .field("on_verification", &self.on_verification.is_some())
+            .field(
+                "on_verification_attempt",
+                &self.on_verification_attempt.is_some(),
+            )
             .field("user_cache_secret", &self.user_cache_secret)
             .field("timeout", &self.timeout)
             .field("attestation_fetcher", &self.attestation_fetcher.is_some())

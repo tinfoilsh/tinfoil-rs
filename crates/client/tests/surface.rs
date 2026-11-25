@@ -80,12 +80,16 @@ fn the_accessors_have_their_signatures() {
     let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a str = EnclaveHttpClient::enclave;
     let _: for<'a> fn(&'a EnclaveHttpClient) -> &'a Trust = EnclaveHttpClient::trust;
     let _: fn(&EnclaveHttpClient) -> Result<VerificationReport, Error> =
-        EnclaveHttpClient::last_verification;
+        EnclaveHttpClient::last_verification_attempt;
+    let _: fn(&EnclaveHttpClient) -> Option<VerificationReport> =
+        EnclaveHttpClient::current_verification;
 
     let _: for<'a> fn(&'a RouterHttpClient) -> &'a Url = RouterHttpClient::base_url;
     let _: for<'a> fn(&'a RouterHttpClient) -> &'a str = RouterHttpClient::enclave;
     let _: fn(&RouterHttpClient) -> Result<VerificationReport, Error> =
-        RouterHttpClient::last_verification;
+        RouterHttpClient::last_verification_attempt;
+    let _: fn(&RouterHttpClient) -> Option<VerificationReport> =
+        RouterHttpClient::current_verification;
     let _: fn() -> RouterHttpClientBuilder = RouterHttpClient::builder;
 }
 
@@ -134,7 +138,7 @@ fn a_builder_does_no_io_and_prints_no_secret() {
         })
         .policy(Policy::default())
         .verification_check(check)
-        .on_verification(observe)
+        .on_verification_attempt(observe)
         .timeout(Duration::from_secs(30));
     let printed = format!("{builder:?}");
     assert!(!printed.contains("hunter2"));
@@ -167,7 +171,7 @@ async fn enclave_client(policy: Policy) -> Result<(), Box<dyn StdError>> {
         }
         Ok(())
     })
-    .on_verification(|host: &str, outcome: Result<&VerificationReport, &Error>| {
+    .on_verification_attempt(|host: &str, outcome: Result<&VerificationReport, &Error>| {
         if let Err(error) = outcome {
             eprintln!("{host}: {error}");
         }
@@ -182,10 +186,11 @@ async fn enclave_client(policy: Policy) -> Result<(), Box<dyn StdError>> {
     .await?;
     let _: &Trust = project.trust();
 
-    let last: Result<VerificationReport, Error> = configured.last_verification();
+    let last: Result<VerificationReport, Error> = configured.last_verification_attempt();
+    let current: Option<VerificationReport> = configured.current_verification();
     let valid: VerificationReport = send(configured.ensure_verified()).await?;
     let renewed: VerificationReport = send(configured.reverify()).await?;
-    let _ = (last, valid, renewed);
+    let _ = (last, current, valid, renewed);
 
     let url: Url = client.base_url().join("v1/x")?;
     let mut headers = HeaderMap::new();
@@ -222,7 +227,7 @@ async fn router_client() -> Result<(), Error> {
             })
             .policy(Policy::default())
             .verification_check(check)
-            .on_verification(observe)
+            .on_verification_attempt(observe)
             .user_cache_secret("opaque-random-value")
             .timeout(Duration::from_secs(30))
             .connect(),
@@ -519,7 +524,9 @@ mod openai {
         let _: for<'a> fn(&'a AttestedHttpClient) -> &'a Url = AttestedHttpClient::base_url;
         let _: for<'a> fn(&'a AttestedHttpClient) -> &'a str = AttestedHttpClient::enclave;
         let _: fn(&AttestedHttpClient) -> Result<VerificationReport, Error> =
-            AttestedHttpClient::last_verification;
+            AttestedHttpClient::last_verification_attempt;
+        let _: fn(&AttestedHttpClient) -> Option<VerificationReport> =
+            AttestedHttpClient::current_verification;
 
         let options = OpenAIOptions {
             api_path: Some("/v1/".into()),

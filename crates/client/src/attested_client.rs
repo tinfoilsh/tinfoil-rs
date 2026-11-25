@@ -57,9 +57,16 @@ impl AttestedHttpClient {
     }
 
     /// The outcome of the most recent attempt to verify the enclave, without
-    /// I/O. See [`EnclaveHttpClient::last_verification`].
-    pub fn last_verification(&self) -> Result<VerificationReport, Error> {
-        self.attested().last_verification()
+    /// I/O. See [`EnclaveHttpClient::last_verification_attempt`].
+    pub fn last_verification_attempt(&self) -> Result<VerificationReport, Error> {
+        self.attested().last_verification_attempt()
+    }
+
+    /// The report of the verification that the client's requests are bound
+    /// to now, without I/O, or `None` when there is none. See
+    /// [`EnclaveHttpClient::current_verification`].
+    pub fn current_verification(&self) -> Option<VerificationReport> {
+        self.attested().current_verification()
     }
 
     /// The report of a verification that is valid now, verifying first

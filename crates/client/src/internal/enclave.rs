@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use crate::error::{Error, ErrorKind};
 use crate::internal::transport::base_url::authority_url;
 use crate::internal::{BoxFuture, Clock, fetch};
-use crate::options::{Check, Notify, OnVerification, VerificationCheck};
+use crate::options::{Check, Notify, OnVerificationAttempt, VerificationCheck};
 use crate::verifier::{
     BoxError, CRYPTO_MATERIAL_ID_HPKE, CRYPTO_MATERIAL_ID_TLS, CryptoMaterialItem,
     KEY_SPKI_FP_SHA256_V1_FORMAT, KEY_X25519_HPKE_V1_FORMAT, NONCE_SIZE, Pin, VerificationReport,
@@ -98,7 +98,7 @@ pub(crate) struct Config {
     /// The caller's veto.
     pub(crate) verification_check: Option<VerificationCheck>,
     /// The caller's observer of each attempt.
-    pub(crate) on_verification: Option<OnVerification>,
+    pub(crate) on_verification_attempt: Option<OnVerificationAttempt>,
 }
 
 /// One enclave and the policy that its attestation is verified against.
@@ -108,7 +108,7 @@ pub(crate) struct Enclave<V: Evidence = VerificationReport> {
     verifier: Option<Arc<Verifier>>,
     source: Source<V>,
     check: Option<Check<V::Facts>>,
-    on_verification: Option<Notify<V>>,
+    on_verification_attempt: Option<Notify<V>>,
     clock: Clock,
 }
 
@@ -118,7 +118,7 @@ pub(crate) struct Checked {
     pin: Pin,
     verifier: Arc<Verifier>,
     verification_check: Option<VerificationCheck>,
-    on_verification: Option<OnVerification>,
+    on_verification_attempt: Option<OnVerificationAttempt>,
 }
 
 impl Checked {
@@ -133,8 +133,8 @@ impl Checked {
     }
 
     /// The caller's observer of each attempt, if there is one.
-    pub(crate) fn on_verification(&self) -> Option<&OnVerification> {
-        self.on_verification.as_ref()
+    pub(crate) fn on_verification_attempt(&self) -> Option<&OnVerificationAttempt> {
+        self.on_verification_attempt.as_ref()
     }
 
     /// The verification policy: the configured one, or the default
@@ -171,7 +171,7 @@ impl Config {
             pin: self.pin,
             verifier,
             verification_check: self.verification_check,
-            on_verification: self.on_verification,
+            on_verification_attempt: self.on_verification_attempt,
         })
     }
 }
@@ -197,7 +197,9 @@ impl Enclave<VerificationReport> {
     /// (a usage error is a configuration error, any other rejection is an
     /// attestation error, and the verifier's error is the source either
     /// way, with the report of a rejection); and
-    /// [`validate_transport_keys`] on the report's verified facts.
+    /// [`validate_transport_keys`] on the report's verified facts. The
+    /// report, of a success or of a rejection, names the host
+    /// ([`with_host`]), so that every report that a client hands out does.
     pub(crate) fn from_checked(checked: Checked, clock: Clock, fetch: Fetch) -> Self {
         let verifier = checked.verifier;
         let source: Source<VerificationReport> = {
@@ -209,9 +211,8 @@ impl Enclave<VerificationReport> {
                 Box::pin(async move {
                     let nonce =
                         random_nonce().map_err(|error| Error::wrap(ErrorKind::Network, error))?;
-                    let document = fetch(host, nonce).await?;
-                    let report = verifier
-                        .verify_v3(&document, &nonce, &pin)
+                    let document = fetch(host.clone(), nonce).await?;
+                    let report = with_host(verifier.verify_v3(&document, &nonce, &pin), &host)
                         .map_err(from_verifier)?;
                     if let Some(facts) = report.verified_facts() {
                         validate_transport_keys(facts)?;
@@ -226,7 +227,7 @@ impl Enclave<VerificationReport> {
             verifier: Some(verifier),
             source,
             check: checked.verification_check,
-            on_verification: checked.on_verification,
+            on_verification_attempt: checked.on_verification_attempt,
             clock,
         }
     }
@@ -254,7 +255,7 @@ impl<V: Evidence> Enclave<V> {
             verifier: None,
             source,
             check,
-            on_verification: None,
+            on_verification_attempt: None,
             clock,
         }
     }
@@ -262,7 +263,7 @@ impl<V: Evidence> Enclave<V> {
     /// This enclave, with `notify` as the observer of each attempt.
     #[cfg(test)]
     pub(crate) fn notifying(mut self, notify: Notify<V>) -> Self {
-        self.on_verification = Some(notify);
+        self.on_verification_attempt = Some(notify);
         self
     }
 
@@ -356,7 +357,7 @@ impl<V: Evidence> Enclave<V> {
     /// code: a panic ends here, so that it never unwinds through a
     /// verification that other callers share, and it changes nothing.
     pub(crate) fn notify(&self, outcome: Result<&V, &Error>) {
-        if let Some(notify) = &self.on_verification {
+        if let Some(notify) = &self.on_verification_attempt {
             let _ = catch_unwind(AssertUnwindSafe(|| notify(&self.host, outcome)));
         }
     }
@@ -482,6 +483,21 @@ fn check_key_format(items: &[CryptoMaterialItem], id: &str, format: &str) -> Res
     }
 }
 
+/// The outcome of the verifier on a document of `host`, with the host named
+/// in its report: the report of a success, or the report that a rejection
+/// carries. The verifier does not know where the document came from. A
+/// usage error has no report.
+fn with_host(
+    outcome: Result<VerificationReport, crate::verifier::Error>,
+    host: &str,
+) -> Result<VerificationReport, crate::verifier::Error> {
+    match outcome {
+        Ok(report) => Ok(report.with_host(host)),
+        Err(crate::verifier::Error::Verification(rejected)) => Err(rejected.with_host(host).into()),
+        Err(error) => Err(error),
+    }
+}
+
 /// A verifier error in the client's categories, by its outermost type: a
 /// usage error is the caller's configuration error, and any rejection is an
 /// attestation error. The verifier's error stays the source.
@@ -506,6 +522,45 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::Configuration);
         let source = std::error::Error::source(&error).expect("the verifier's error");
         assert!(source.is::<crate::verifier::Error>());
+    }
+
+    #[test]
+    fn the_verifiers_report_names_the_host_on_success_and_on_rejection() {
+        use crate::internal::testing::json_host;
+
+        let nonce = crate::verifier::random_nonce().unwrap();
+        let outcome = Verifier::default().verify_v3(b"{}", &nonce, &Pin::repo("owner/name"));
+        let crate::verifier::Error::Verification(rejected) = outcome.expect_err("rejected") else {
+            panic!("a rejection");
+        };
+        let report = rejected.report().clone();
+        assert_eq!(json_host(&report), None, "the verifier names no host");
+
+        // A report that passed: any report stands for one here, since only
+        // the verifier builds a report.
+        let passed = with_host(Ok(report), "enclave.example.com:8443").unwrap();
+        assert_eq!(
+            json_host(&passed).as_deref(),
+            Some("enclave.example.com:8443")
+        );
+
+        let error = with_host(Err(rejected.into()), "enclave.example.com:8443")
+            .expect_err("still rejected");
+        let crate::verifier::Error::Verification(rejected) = &error else {
+            panic!("still a rejection");
+        };
+        assert_eq!(
+            json_host(rejected.report()).as_deref(),
+            Some("enclave.example.com:8443")
+        );
+        assert_eq!(from_verifier(error).kind(), ErrorKind::Attestation);
+
+        // A usage error has no report, and passes through.
+        let usage = Verifier::default()
+            .check_pin_verifiability(&Pin::repo("not a reference"))
+            .expect_err("refused");
+        let usage = with_host(Err(usage), "enclave.example.com").expect_err("refused");
+        assert!(matches!(usage, crate::verifier::Error::Usage(_)));
     }
 
     #[test]
@@ -849,7 +904,7 @@ mod tests {
             pin,
             verifier: None,
             verification_check: None,
-            on_verification: None,
+            on_verification_attempt: None,
         }
     }
 
