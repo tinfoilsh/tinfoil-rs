@@ -1524,7 +1524,7 @@ fn a_config_is_held_to_the_container_builds_that_it_requires() {
     ];
     for (name, config, entries, want) in cases {
         let verifier = Verifier::new(config, inputs.artifacts()).unwrap();
-        let nonce = [0; crate::NONCE_SIZE];
+        let nonce = crate::document::random_nonce().unwrap();
         let document = TestDocument::new(&nonce)
             .with_collateral(Some(FORMAT_V3), &format!("[{}]", entries.join(",")))
             .render();
