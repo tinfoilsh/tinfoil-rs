@@ -1405,7 +1405,7 @@ fn a_config_authorizer_sees_the_material_of_the_document() {
 const CONTAINER_BUNDLE: &str =
     include_str!("../tests/data/endorsement/container_provenance_bundle.json");
 const CONTAINER_DIGEST: &str = "85306e3ab312a2d80466e901081e855cc53f21c4802c638f861e6ef31ba4f5d1";
-const CONTAINER_PROVENANCE: &str = r#"{"github":{"repository":"tinfoilsh/measure-image-action","repository_id":"924941172","workflow":"build.yml","ref":"refs/tags/build-v*"}}"#;
+const CONTAINER_PROVENANCE: &str = r#"{"github":{"repository":"tinfoilsh/measure-image-action","repository_id":"924941172","workflow":"build.yml","ref":"refs/tags/build-v0.14.2","commit":"01a05df207140a8e8e1d2cd26028ab7c51dad9d1"}}"#;
 
 /// A document here has no authentic quote, so one whose container builds
 /// pass is rejected at the quote layer.

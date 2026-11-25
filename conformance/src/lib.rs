@@ -981,7 +981,7 @@ mod stage_tests {
     );
     const CONTAINER_DIGEST: &str =
         "85306e3ab312a2d80466e901081e855cc53f21c4802c638f861e6ef31ba4f5d1";
-    const CONTAINER_PROVENANCE: &str = r#","provenance":{"github":{"repository":"tinfoilsh/measure-image-action","repository_id":"924941172","workflow":"build.yml","ref":"refs/tags/build-v*"}}"#;
+    const CONTAINER_PROVENANCE: &str = r#","provenance":{"github":{"repository":"tinfoilsh/measure-image-action","repository_id":"924941172","workflow":"build.yml","ref":"refs/tags/build-v0.14.2","commit":"01a05df207140a8e8e1d2cd26028ab7c51dad9d1"}}"#;
     /// A trusted root that does not authenticate the recorded bundle.
     const OTHER_TRUSTED_ROOT: &[u8] = include_bytes!(
         "../../crates/verifier/tests/data/sigstore/rekor_v2_staging_trusted_root.json"

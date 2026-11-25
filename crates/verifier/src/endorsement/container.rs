@@ -18,7 +18,7 @@ const PROVENANCE_KEY: &str = "provenance";
 /// The one kind of build requirement.
 const GITHUB_KEY: &str = "github";
 /// The members of a GitHub build requirement: all of them, and no others.
-const GITHUB_KEYS: [&str; 4] = ["repository", "repository_id", "workflow", "ref"];
+const GITHUB_KEYS: [&str; 5] = ["repository", "repository_id", "workflow", "ref", "commit"];
 
 /// What precedes the hex SHA-256 digest that ends a pinned image reference.
 const IMAGE_DIGEST_PREFIX: &str = "@sha256:";
@@ -31,13 +31,9 @@ const GITHUB_WORKFLOWS_PATH: &str = "/.github/workflows/";
 /// What separates a workflow file from its ref in a signing identity.
 const WORKFLOW_REF_SEPARATOR: &str = "@";
 
-/// What separates the segments of a ref.
-const REF_SEGMENT_SEPARATOR: char = '/';
-/// What stands for any run of characters within a segment of a ref pattern.
-const REF_WILDCARD: char = '*';
-
 /// The build that a config requires for the container image with the
-/// SHA-256 `digest`: a run of a GitHub Actions workflow of a repository.
+/// SHA-256 `digest`: a run of a GitHub Actions workflow of a repository, at
+/// a ref and a commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerProvenance {
     /// The SHA-256 of the image, lowercase hex.
@@ -48,9 +44,10 @@ pub struct ContainerProvenance {
     pub repository_id: String,
     /// The file name of the workflow.
     pub workflow: String,
-    /// The ref that the workflow ran at, where `*` stands for any run of
-    /// characters other than `/`.
+    /// The ref that the workflow ran at.
     pub git_ref: String,
+    /// The commit that the workflow ran at.
+    pub commit: String,
 }
 
 /// Returns the builds that a config requires, in container order. A
@@ -98,10 +95,11 @@ pub fn container_provenance_from_config(
             Some(repository_id),
             Some(workflow),
             Some(git_ref),
+            Some(commit),
         ] = GITHUB_KEYS.map(|key| github?.get(key)?.as_str())
         else {
             return Err(EndorsementError::new(format!(
-                "containers[{index}].provenance must hold only github, with only the strings repository, repository_id, workflow and ref"
+                "containers[{index}].provenance must hold only github, with only the strings repository, repository_id, workflow, ref and commit"
             )));
         };
         let digest = container
@@ -121,6 +119,7 @@ pub fn container_provenance_from_config(
             repository_id: repository_id.to_owned(),
             workflow: workflow.to_owned(),
             git_ref: git_ref.to_owned(),
+            commit: commit.to_owned(),
         });
     }
     Ok(required)
@@ -147,8 +146,7 @@ impl ProvenanceClient {
 
     /// Verifies that `bundle` is a SLSA build attestation of the image with
     /// `required.digest`, signed on a GitHub-hosted runner by the required
-    /// workflow of the required repository, at a ref that
-    /// `required.git_ref` matches.
+    /// workflow of the required repository, at the required ref and commit.
     fn authenticate_container(
         &self,
         bundle: &Value,
@@ -167,83 +165,53 @@ impl ProvenanceClient {
                 "container provenance must use SLSA v1",
             ));
         }
-        // The source claims name the repository and the ref that the run
-        // built. The identity names the workflow file that signed, which
-        // must be that repository's own file at that ref and not one called
-        // from elsewhere.
+        // The source claims name the repository, the ref and the commit that
+        // the run built. The identity names the workflow file that signed,
+        // which must be that repository's own file at that ref and not one
+        // called from elsewhere.
         let signer = &verified.identity;
         let claims = &signer.extensions;
         let repository = format!("{GITHUB_URL_PREFIX}{}", required.repository);
         let identity = format!(
             "{repository}{GITHUB_WORKFLOWS_PATH}{}{WORKFLOW_REF_SEPARATOR}{}",
-            required.workflow, claims.source_repository_ref
+            required.workflow, required.git_ref
         );
-        let rejected = if claims.source_repository_uri != repository {
-            format!(
-                "source repository {:?} is not {repository:?}",
-                claims.source_repository_uri
-            )
-        } else if claims.source_repository_identifier != required.repository_id {
-            format!(
-                "source repository ID {:?} is not {:?}",
-                claims.source_repository_identifier, required.repository_id
-            )
-        } else if signer.subject_alternative_name != identity {
-            format!(
-                "workflow identity {:?} is not {identity:?}",
-                signer.subject_alternative_name
-            )
-        } else if !ref_matches(&required.git_ref, &claims.source_repository_ref) {
-            format!(
-                "source ref {:?} does not match {:?}",
-                claims.source_repository_ref, required.git_ref
-            )
-        } else {
-            return Ok(());
-        };
-        Err(EndorsementError::new(format!(
-            "container provenance {rejected}"
-        )))
+        let equalities = [
+            (
+                "source repository",
+                &claims.source_repository_uri,
+                &repository,
+            ),
+            (
+                "source repository ID",
+                &claims.source_repository_identifier,
+                &required.repository_id,
+            ),
+            (
+                "workflow identity",
+                &signer.subject_alternative_name,
+                &identity,
+            ),
+            (
+                "source ref",
+                &claims.source_repository_ref,
+                &required.git_ref,
+            ),
+            (
+                "source commit",
+                &claims.source_repository_digest,
+                &required.commit,
+            ),
+        ];
+        for (name, found, wanted) in equalities {
+            if found != wanted {
+                return Err(EndorsementError::new(format!(
+                    "container provenance {name} {found:?} is not {wanted:?}"
+                )));
+            }
+        }
+        Ok(())
     }
-}
-
-/// Whether the whole of `git_ref` matches `pattern`, in which `*` stands for
-/// any run of characters, possibly empty, other than `/`, and every other
-/// character stands for itself. It takes time bounded by the product of the
-/// two lengths.
-fn ref_matches(pattern: &str, git_ref: &str) -> bool {
-    let mut segments = git_ref.split(REF_SEGMENT_SEPARATOR);
-    pattern.split(REF_SEGMENT_SEPARATOR).all(|pattern| {
-        segments
-            .next()
-            .is_some_and(|segment| ref_segment_matches(pattern, segment))
-    }) && segments.next().is_none()
-}
-
-/// [`ref_matches`] for one segment of each.
-fn ref_segment_matches(pattern: &str, segment: &str) -> bool {
-    let mut pieces = pattern.split(REF_WILDCARD);
-    let first = pieces.next().unwrap_or_default();
-    let Some(last) = pieces.next_back() else {
-        return segment == first;
-    };
-    // The suffix is taken from what follows the prefix, so that the two do
-    // not overlap.
-    let Some(mut rest) = segment
-        .strip_prefix(first)
-        .and_then(|rest| rest.strip_suffix(last))
-    else {
-        return false;
-    };
-    // Each piece between the first and the last is taken at its earliest
-    // occurrence, which leaves the most room for those after it.
-    for piece in pieces {
-        let Some((_, after)) = rest.split_once(piece) else {
-            return false;
-        };
-        rest = after;
-    }
-    true
 }
 
 #[cfg(test)]
@@ -262,7 +230,7 @@ mod tests {
     type Change = fn(&mut ContainerProvenance);
 
     #[test]
-    fn a_build_attestation_is_held_to_the_required_repository_workflow_and_ref() {
+    fn a_build_attestation_is_held_to_the_required_workflow_run() {
         let client = ProvenanceClient::embedded().unwrap();
         let bundle = json::parse(RECORDED_BUNDLE).unwrap();
         let recorded = ContainerProvenance {
@@ -270,11 +238,12 @@ mod tests {
             repository: "tinfoilsh/measure-image-action".to_owned(),
             repository_id: "924941172".to_owned(),
             workflow: "build.yml".to_owned(),
-            git_ref: "refs/tags/build-v*".to_owned(),
+            git_ref: "refs/tags/build-v0.14.2".to_owned(),
+            commit: "01a05df207140a8e8e1d2cd26028ab7c51dad9d1".to_owned(),
         };
         assert_eq!(client.authenticate_container(&bundle, &recorded), Ok(()));
 
-        let cases: [(&str, Change, &str); 5] = [
+        let cases: [(&str, Change, &str); 6] = [
             (
                 "another image",
                 |required| required.digest.replace_range(..2, "00"),
@@ -295,10 +264,16 @@ mod tests {
                 |required| required.workflow = "release.yml".to_owned(),
                 "container provenance workflow identity ",
             ),
+            // The identity ends with the ref, and a `*` stands for itself.
             (
-                "another ref",
-                |required| required.git_ref = "refs/tags/v*".to_owned(),
-                "container provenance source ref ",
+                "ref with an asterisk",
+                |required| required.git_ref = "refs/tags/build-v*".to_owned(),
+                "container provenance workflow identity ",
+            ),
+            (
+                "another commit",
+                |required| required.commit.replace_range(..2, "00"),
+                "container provenance source commit ",
             ),
         ];
         for (name, change, want) in cases {
@@ -313,59 +288,16 @@ mod tests {
     }
 
     #[test]
-    fn a_ref_pattern_wildcard_stands_for_a_run_within_one_segment() {
-        // A matcher that tried every way to share a ref out among the
-        // wildcards would not finish the last two cases.
-        let many = format!("refs/tags/{}*b*", "*a".repeat(2000));
-        let near_miss = format!("refs/tags/{}", "a".repeat(4000));
-        let matching = format!("{near_miss}b");
-        for (pattern, git_ref, want) in [
-            // No wildcard: the ref itself.
-            ("refs/heads/main", "refs/heads/main", true),
-            ("refs/heads/main", "refs/heads/maintenance", false),
-            ("refs/tags/v1.2", "refs/tags/v1x2", false),
-            // The same number of segments.
-            ("refs/tags/*", "refs/tags", false),
-            ("refs/tags/*", "refs/tags/v1/extra", false),
-            // A wildcard alone, at the end, at the start and in the middle.
-            ("refs/tags/*", "refs/tags/v1.2.3", true),
-            ("refs/tags/*", "refs/tags/", true),
-            ("refs/tags/build-v*", "refs/tags/build-v0.14.2", true),
-            ("refs/tags/build-v*", "refs/tags/build-v", true),
-            ("refs/tags/build-v*", "refs/tags/rebuild-v1", false),
-            ("refs/tags/build-v*", "refs/tags/build-v1/2", false),
-            ("refs/tags/*-rc", "refs/tags/v1-rc", true),
-            ("refs/tags/*-rc", "refs/tags/v1-rc1", false),
-            ("refs/tags/v*-rc", "refs/tags/v1.2-rc", true),
-            ("refs/tags/v*-rc", "refs/tags/v-rc", true),
-            ("refs/tags/ab*ba", "refs/tags/aba", false),
-            // Several wildcards in a segment, and in several segments.
-            ("refs/tags/v*.*.*", "refs/tags/v1.2.3", true),
-            ("refs/tags/v*.*.*", "refs/tags/v1.2", false),
-            ("refs/tags/*ab*ab*", "refs/tags/abab", true),
-            ("refs/tags/*a*b*", "refs/tags/ba", false),
-            ("refs/tags/v**", "refs/tags/v1", true),
-            ("refs/*/v*", "refs/tags/v1", true),
-            ("refs/*/v*", "refs/remotes/origin/v1", false),
-            (&many, &near_miss, false),
-            (&many, &matching, true),
-        ] {
-            assert_eq!(
-                ref_matches(pattern, git_ref),
-                want,
-                "{pattern} against {git_ref}"
-            );
-        }
-    }
-
-    #[test]
     fn a_config_states_the_builds_that_its_containers_require() {
         const IMAGE_NAME: &str = r#""ghcr.io/tinfoilsh/inference-vllm"#;
-        const GITHUB: &str = r#"{"repository":"tinfoilsh/inference","repository_id":"902195777","workflow":"containers.yml","ref":"refs/tags/vllm-v*"}"#;
+        const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
         const UNCONSTRAINED: &str = r#"{"name":"router","image":"example.com/router:latest"}"#;
         let (digest, other) = ("ab".repeat(32), "cd".repeat(32));
         let image = format!(r#"{IMAGE_NAME}@sha256:{digest}""#);
-        let provenance = format!(r#"{{"github":{GITHUB}}}"#);
+        let github = format!(
+            r#"{{"repository":"tinfoilsh/inference","repository_id":"902195777","workflow":"containers.yml","ref":"refs/tags/vllm-v1.2.3","commit":"{COMMIT}"}}"#
+        );
+        let provenance = format!(r#"{{"github":{github}}}"#);
         let container = |image: &str, provenance: &str| {
             format!(r#"{{"name":"model","image":{image},"provenance":{provenance}}}"#)
         };
@@ -374,7 +306,7 @@ mod tests {
         let requiring =
             |image: &str, provenance: &str| config(&format!("[{}]", container(image, provenance)));
         let edited = |old: &str, new: &str| {
-            let github = GITHUB.replacen(old, new, 1);
+            let github = github.replacen(old, new, 1);
             requiring(&image, &format!(r#"{{"github":{github}}}"#))
         };
         let required = |digest: &str| ContainerProvenance {
@@ -382,7 +314,8 @@ mod tests {
             repository: "tinfoilsh/inference".to_owned(),
             repository_id: "902195777".to_owned(),
             workflow: "containers.yml".to_owned(),
-            git_ref: "refs/tags/vllm-v*".to_owned(),
+            git_ref: "refs/tags/vllm-v1.2.3".to_owned(),
+            commit: COMMIT.to_owned(),
         };
         let read = |config: &str| container_provenance_from_config(config.as_bytes());
 
@@ -430,15 +363,15 @@ mod tests {
             ("provenance empty", requiring(&image, "{}")),
             (
                 "unknown kind",
-                requiring(&image, &format!(r#"{{"gitlab":{GITHUB}}}"#)),
+                requiring(&image, &format!(r#"{{"gitlab":{github}}}"#)),
             ),
             (
                 "second kind",
-                requiring(&image, &format!(r#"{{"github":{GITHUB},"gitlab":{{}}}}"#)),
+                requiring(&image, &format!(r#"{{"github":{github},"gitlab":{{}}}}"#)),
             ),
             (
                 "kind in another case",
-                requiring(&image, &format!(r#"{{"GitHub":{GITHUB}}}"#)),
+                requiring(&image, &format!(r#"{{"GitHub":{github}}}"#)),
             ),
             ("github null", requiring(&image, r#"{"github":null}"#)),
             (
@@ -459,7 +392,15 @@ mod tests {
             ),
             (
                 "github without ref",
-                edited(r#","ref":"refs/tags/vllm-v*""#, ""),
+                edited(r#""ref":"refs/tags/vllm-v1.2.3","#, ""),
+            ),
+            (
+                "github without commit",
+                edited(&format!(r#","commit":"{COMMIT}""#), ""),
+            ),
+            (
+                "github commit not a string",
+                edited(&format!(r#""{COMMIT}""#), "7"),
             ),
             (
                 "github unknown member",
@@ -475,7 +416,7 @@ mod tests {
             ),
             (
                 "github null member",
-                edited(r#""refs/tags/vllm-v*""#, "null"),
+                edited(r#""refs/tags/vllm-v1.2.3""#, "null"),
             ),
             (
                 "image absent",
