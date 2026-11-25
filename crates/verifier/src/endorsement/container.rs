@@ -1,9 +1,13 @@
 //! Container provenance: the builds that a config requires for its
-//! container images.
+//! container images, and their authentication.
 
 use super::EndorsementError;
+use super::provenance::ProvenanceClient;
 use super::reference::is_sha256_hex;
+use super::runtime::SLSA_PROVENANCE_V1;
+use crate::document::Document;
 use crate::json::{self, Value};
+use crate::sigstore::statement::STATEMENT_TYPE;
 
 /// The config member that holds the containers.
 const CONTAINERS_KEY: &str = "containers";
@@ -18,6 +22,19 @@ const GITHUB_KEYS: [&str; 4] = ["repository", "repository_id", "workflow", "ref"
 
 /// What precedes the hex SHA-256 digest that ends a pinned image reference.
 const IMAGE_DIGEST_PREFIX: &str = "@sha256:";
+
+/// What the URI of a repository on GitHub, and with it every signing
+/// identity of its workflows, starts with.
+const GITHUB_URL_PREFIX: &str = "https://github.com/";
+/// What separates a repository from a workflow file in a signing identity.
+const GITHUB_WORKFLOWS_PATH: &str = "/.github/workflows/";
+/// What separates a workflow file from its ref in a signing identity.
+const WORKFLOW_REF_SEPARATOR: &str = "@";
+
+/// What separates the segments of a ref.
+const REF_SEGMENT_SEPARATOR: char = '/';
+/// What stands for any run of characters within a segment of a ref pattern.
+const REF_WILDCARD: char = '*';
 
 /// The build that a config requires for the container image with the
 /// SHA-256 `digest`: a run of a GitHub Actions workflow of a repository.
@@ -109,9 +126,237 @@ pub fn container_provenance_from_config(
     Ok(required)
 }
 
+impl ProvenanceClient {
+    /// Verifies the build of every container image for which `config`
+    /// requires one, against the build attestation that `document` carries
+    /// for the image.
+    pub fn authenticate_containers(
+        &self,
+        config: &[u8],
+        document: &Document,
+    ) -> Result<(), EndorsementError> {
+        for required in container_provenance_from_config(config)? {
+            let bundle = document.container_provenance(&required.digest)?;
+            self.authenticate_container(bundle, &required)
+                .map_err(|cause| {
+                    cause.within(format_args!("container image sha256:{}", required.digest))
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Verifies that `bundle` is a SLSA build attestation of the image with
+    /// `required.digest`, signed on a GitHub-hosted runner by the required
+    /// workflow of the required repository, at a ref that
+    /// `required.git_ref` matches.
+    fn authenticate_container(
+        &self,
+        bundle: &Value,
+        required: &ContainerProvenance,
+    ) -> Result<(), EndorsementError> {
+        // Every identity on GitHub is accepted here. It is compared as text
+        // below.
+        let on_github = |identity: &str| identity.starts_with(GITHUB_URL_PREFIX);
+        let verified = self
+            .verify_bundle(bundle, on_github, &required.digest, None)
+            .map_err(|cause| cause.within("verifying container provenance"))?;
+        if verified.statement.statement_type != STATEMENT_TYPE
+            || verified.statement.predicate_type != SLSA_PROVENANCE_V1
+        {
+            return Err(EndorsementError::new(
+                "container provenance must use SLSA v1",
+            ));
+        }
+        // The source claims name the repository and the ref that the run
+        // built. The identity names the workflow file that signed, which
+        // must be that repository's own file at that ref and not one called
+        // from elsewhere.
+        let signer = &verified.identity;
+        let claims = &signer.extensions;
+        let repository = format!("{GITHUB_URL_PREFIX}{}", required.repository);
+        let identity = format!(
+            "{repository}{GITHUB_WORKFLOWS_PATH}{}{WORKFLOW_REF_SEPARATOR}{}",
+            required.workflow, claims.source_repository_ref
+        );
+        let rejected = if claims.source_repository_uri != repository {
+            format!(
+                "source repository {:?} is not {repository:?}",
+                claims.source_repository_uri
+            )
+        } else if claims.source_repository_identifier != required.repository_id {
+            format!(
+                "source repository ID {:?} is not {:?}",
+                claims.source_repository_identifier, required.repository_id
+            )
+        } else if signer.subject_alternative_name != identity {
+            format!(
+                "workflow identity {:?} is not {identity:?}",
+                signer.subject_alternative_name
+            )
+        } else if !ref_matches(&required.git_ref, &claims.source_repository_ref) {
+            format!(
+                "source ref {:?} does not match {:?}",
+                claims.source_repository_ref, required.git_ref
+            )
+        } else {
+            return Ok(());
+        };
+        Err(EndorsementError::new(format!(
+            "container provenance {rejected}"
+        )))
+    }
+}
+
+/// Whether the whole of `git_ref` matches `pattern`, in which `*` stands for
+/// any run of characters, possibly empty, other than `/`, and every other
+/// character stands for itself. It takes time bounded by the product of the
+/// two lengths.
+fn ref_matches(pattern: &str, git_ref: &str) -> bool {
+    let mut segments = git_ref.split(REF_SEGMENT_SEPARATOR);
+    pattern.split(REF_SEGMENT_SEPARATOR).all(|pattern| {
+        segments
+            .next()
+            .is_some_and(|segment| ref_segment_matches(pattern, segment))
+    }) && segments.next().is_none()
+}
+
+/// [`ref_matches`] for one segment of each.
+fn ref_segment_matches(pattern: &str, segment: &str) -> bool {
+    let mut pieces = pattern.split(REF_WILDCARD);
+    let first = pieces.next().unwrap_or_default();
+    let Some(last) = pieces.next_back() else {
+        return segment == first;
+    };
+    // The suffix is taken from what follows the prefix, so that the two do
+    // not overlap.
+    let Some(mut rest) = segment
+        .strip_prefix(first)
+        .and_then(|rest| rest.strip_suffix(last))
+    else {
+        return false;
+    };
+    // Each piece between the first and the last is taken at its earliest
+    // occurrence, which leaves the most room for those after it.
+    for piece in pieces {
+        let Some((_, after)) = rest.split_once(piece) else {
+            return false;
+        };
+        rest = after;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The published build attestation of the image with
+    /// [`RECORDED_DIGEST`]. Its certificate names the workflow identity
+    /// `https://github.com/tinfoilsh/measure-image-action/.github/workflows/build.yml@refs/tags/build-v0.14.2`.
+    const RECORDED_BUNDLE: &[u8] =
+        include_bytes!("../../tests/data/endorsement/container_provenance_bundle.json");
+    const RECORDED_DIGEST: &str =
+        "85306e3ab312a2d80466e901081e855cc53f21c4802c638f861e6ef31ba4f5d1";
+
+    /// A change to a requirement.
+    type Change = fn(&mut ContainerProvenance);
+
+    #[test]
+    fn a_build_attestation_is_held_to_the_required_repository_workflow_and_ref() {
+        let client = ProvenanceClient::embedded().unwrap();
+        let bundle = json::parse(RECORDED_BUNDLE).unwrap();
+        let recorded = ContainerProvenance {
+            digest: RECORDED_DIGEST.to_owned(),
+            repository: "tinfoilsh/measure-image-action".to_owned(),
+            repository_id: "924941172".to_owned(),
+            workflow: "build.yml".to_owned(),
+            git_ref: "refs/tags/build-v*".to_owned(),
+        };
+        assert_eq!(client.authenticate_container(&bundle, &recorded), Ok(()));
+
+        let cases: [(&str, Change, &str); 5] = [
+            (
+                "another image",
+                |required| required.digest.replace_range(..2, "00"),
+                "verifying container provenance: ",
+            ),
+            (
+                "another repository",
+                |required| required.repository = "tinfoilsh/measure-image".to_owned(),
+                "container provenance source repository \"",
+            ),
+            (
+                "another repository ID",
+                |required| required.repository_id = "92494117".to_owned(),
+                "container provenance source repository ID ",
+            ),
+            (
+                "another workflow",
+                |required| required.workflow = "release.yml".to_owned(),
+                "container provenance workflow identity ",
+            ),
+            (
+                "another ref",
+                |required| required.git_ref = "refs/tags/v*".to_owned(),
+                "container provenance source ref ",
+            ),
+        ];
+        for (name, change, want) in cases {
+            let mut required = recorded.clone();
+            change(&mut required);
+            let error = client
+                .authenticate_container(&bundle, &required)
+                .unwrap_err()
+                .to_string();
+            assert!(error.starts_with(want), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_ref_pattern_wildcard_stands_for_a_run_within_one_segment() {
+        // A matcher that tried every way to share a ref out among the
+        // wildcards would not finish the last two cases.
+        let many = format!("refs/tags/{}*b*", "*a".repeat(2000));
+        let near_miss = format!("refs/tags/{}", "a".repeat(4000));
+        let matching = format!("{near_miss}b");
+        for (pattern, git_ref, want) in [
+            // No wildcard: the ref itself.
+            ("refs/heads/main", "refs/heads/main", true),
+            ("refs/heads/main", "refs/heads/maintenance", false),
+            ("refs/tags/v1.2", "refs/tags/v1x2", false),
+            // The same number of segments.
+            ("refs/tags/*", "refs/tags", false),
+            ("refs/tags/*", "refs/tags/v1/extra", false),
+            // A wildcard alone, at the end, at the start and in the middle.
+            ("refs/tags/*", "refs/tags/v1.2.3", true),
+            ("refs/tags/*", "refs/tags/", true),
+            ("refs/tags/build-v*", "refs/tags/build-v0.14.2", true),
+            ("refs/tags/build-v*", "refs/tags/build-v", true),
+            ("refs/tags/build-v*", "refs/tags/rebuild-v1", false),
+            ("refs/tags/build-v*", "refs/tags/build-v1/2", false),
+            ("refs/tags/*-rc", "refs/tags/v1-rc", true),
+            ("refs/tags/*-rc", "refs/tags/v1-rc1", false),
+            ("refs/tags/v*-rc", "refs/tags/v1.2-rc", true),
+            ("refs/tags/v*-rc", "refs/tags/v-rc", true),
+            ("refs/tags/ab*ba", "refs/tags/aba", false),
+            // Several wildcards in a segment, and in several segments.
+            ("refs/tags/v*.*.*", "refs/tags/v1.2.3", true),
+            ("refs/tags/v*.*.*", "refs/tags/v1.2", false),
+            ("refs/tags/*ab*ab*", "refs/tags/abab", true),
+            ("refs/tags/*a*b*", "refs/tags/ba", false),
+            ("refs/tags/v**", "refs/tags/v1", true),
+            ("refs/*/v*", "refs/tags/v1", true),
+            ("refs/*/v*", "refs/remotes/origin/v1", false),
+            (&many, &near_miss, false),
+            (&many, &matching, true),
+        ] {
+            assert_eq!(
+                ref_matches(pattern, git_ref),
+                want,
+                "{pattern} against {git_ref}"
+            );
+        }
+    }
 
     #[test]
     fn a_config_states_the_builds_that_its_containers_require() {

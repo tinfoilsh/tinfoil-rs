@@ -133,6 +133,19 @@ impl ProvenanceClient {
         digest: &str,
         subject_name: Option<&str>,
     ) -> Result<VerifiedBundle, EndorsementError> {
+        self.verify_bundle(bundle, |name| identity.matches(name), digest, subject_name)
+    }
+
+    /// [`verify_bundle_for_subject`](Self::verify_bundle_for_subject) for
+    /// a signing certificate whose subject alternative name `identity`
+    /// accepts.
+    pub(super) fn verify_bundle(
+        &self,
+        bundle: &Value,
+        identity: impl Fn(&str) -> bool,
+        digest: &str,
+        subject_name: Option<&str>,
+    ) -> Result<VerifiedBundle, EndorsementError> {
         let bundle = Bundle::from_value(bundle).map_err(|cause| cause.within("parsing bundle"))?;
         let digest_bytes: [u8; 32] = decode_hex(digest)
             .and_then(|bytes| bytes.try_into().ok())
@@ -141,7 +154,7 @@ impl ProvenanceClient {
             .map_err(|cause| cause.within("verifying"))?;
 
         let signer = &verified.identity;
-        if !identity.matches(&signer.subject_alternative_name) {
+        if !identity(&signer.subject_alternative_name) {
             return Err(EndorsementError::new(format!(
                 "verifying: signing certificate identity {:?} is not the expected workflow",
                 signer.subject_alternative_name
