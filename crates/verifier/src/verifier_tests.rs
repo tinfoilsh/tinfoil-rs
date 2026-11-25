@@ -1454,7 +1454,7 @@ fn a_config_is_held_to_the_container_builds_that_it_requires() {
         })
     };
 
-    let cases: [(&str, ConfigTrust, Vec<String>, Layer); 11] = [
+    let cases: [(&str, ConfigTrust, Vec<String>, Layer); 12] = [
         (
             "authorized, proven",
             authorized(),
@@ -1489,6 +1489,12 @@ fn a_config_is_held_to_the_container_builds_that_it_requires() {
             "embedded, no entry",
             embedded(&required),
             vec![],
+            Layer::Provenance,
+        ),
+        (
+            "embedded, unknown kind",
+            embedded(&unreadable),
+            vec![proof.clone()],
             Layer::Provenance,
         ),
         (
@@ -1535,9 +1541,6 @@ fn a_config_is_held_to_the_container_builds_that_it_requires() {
         };
         assert_eq!(rejected.layer(), want, "{name}: {rejected}");
     }
-
-    let unbuilt = Verifier::new(embedded(&unreadable), inputs.artifacts());
-    assert!(usage(unbuilt).contains("containers[0].provenance must hold only github"));
 }
 
 #[test]

@@ -4,7 +4,6 @@ use sha2::{Digest, Sha256};
 
 use crate::canonical;
 use crate::endorsement::approval::parse_name;
-use crate::endorsement::container::container_provenance_from_config;
 use crate::policy::{self, ARTIFACT_FORMAT_V2, Artifact};
 use crate::runtime::{self, MAX_CONFIG_SIZE, decode_manifest, parse_manifest, runtime_from_config};
 
@@ -93,11 +92,10 @@ impl Embedded {
     ///
     /// In order: a supplied manifest decodes; a supplied platform artifact
     /// decodes and has the v2 format; config bytes have 1 to
-    /// [`MAX_CONFIG_SIZE`] bytes, pin a runtime and require container
-    /// builds that can be read; a config name is a versioned config name;
-    /// the config digest is a SHA-256; the runtime pin is valid; a supplied
-    /// manifest is the one that the config pins. The error is a message
-    /// for the caller.
+    /// [`MAX_CONFIG_SIZE`] bytes and pin a runtime; a config name is a
+    /// versioned config name; the config digest is a SHA-256; the runtime
+    /// pin is valid; a supplied manifest is the one that the config pins.
+    /// The error is a message for the caller.
     pub(crate) fn check(
         config: Option<EmbeddedConfig>,
         runtime: Option<Vec<u8>>,
@@ -140,7 +138,6 @@ impl Embedded {
                     return Err("embedded config size is outside allowed bounds".to_owned());
                 }
                 let runtime = runtime_from_config(&bytes).map_err(|cause| cause.to_string())?;
-                container_provenance_from_config(&bytes).map_err(|cause| cause.to_string())?;
                 Some(ConfigReference {
                     name,
                     digest: canonical::encode_lower_hex(&Sha256::digest(&bytes)),
